@@ -66,3 +66,14 @@ def test_loopback_renderer_origin_is_allowed(tmp_path: Path) -> None:
     )
 
     assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
+def test_runtime_status_and_smoke_test(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+
+    status = client.get("/api/runtime/status")
+    rerun = client.post("/api/runtime/smoke-test")
+
+    assert status.status_code == 200
+    assert status.json()["status"] in {"ready", "warning", "blocked"}
+    assert rerun.json()["checks"]

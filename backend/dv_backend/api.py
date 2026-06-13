@@ -9,6 +9,7 @@ from .database import Database
 from .errors import AppError, app_error_handler
 from .jobs import JobService
 from .models import Job, JobCreate
+from .runtime import RuntimeReport, default_runtime_service
 
 
 def create_app(config: AppConfig | None = None) -> FastAPI:
@@ -18,6 +19,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     database.migrate()
     jobs = JobService(database, config.data_dir)
     jobs.reconcile_interrupted()
+    runtime = default_runtime_service(config, database)
+    if runtime.latest() is None:
+        runtime.run()
 
     app = FastAPI(title="Douyin Vietnamizer Backend")
     app.add_middleware(
@@ -34,11 +38,21 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.get("/api/capabilities")
     def capabilities() -> dict:
+        runtime_status = runtime.latest()
         return {
             "cpu_mode": True,
             "implemented_steps": [],
             "optional_backends": {"whisper_vulkan": False, "qwen3_asr": False},
+            "runtime_status": runtime_status.status if runtime_status else "not_run",
         }
+
+    @app.get("/api/runtime/status", response_model=RuntimeReport)
+    def runtime_status() -> RuntimeReport:
+        return runtime.latest() or runtime.run()
+
+    @app.post("/api/runtime/smoke-test", response_model=RuntimeReport)
+    def run_runtime_smoke_test() -> RuntimeReport:
+        return runtime.run()
 
     @app.get("/api/jobs", response_model=list[Job])
     def list_jobs() -> list[Job]:
@@ -85,4 +99,5 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.config = config
     app.state.database = database
     app.state.jobs = jobs
+    app.state.runtime = runtime
     return app

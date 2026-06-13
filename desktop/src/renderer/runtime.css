@@ -1,0 +1,9 @@
+.runtime{background:transparent;text-align:left;color:inherit}
+.runtime.warning i{background:#f2ba5b}.runtime.blocked i{background:#f16f7e}
+button:disabled{cursor:not-allowed;opacity:.45}
+.overlay{position:fixed;inset:0;background:#080a0dcc;display:flex;justify-content:flex-end;z-index:10}
+.runtime-panel{width:min(520px,100%);height:100%;background:#12151c;border-left:1px solid #303746;padding:28px;overflow:auto}
+.runtime-head{display:flex;justify-content:space-between;gap:18px}.runtime-head p{color:#8170ff;font-weight:600;margin:0 0 5px}.runtime-head h2{margin:0 0 5px;text-transform:capitalize}.runtime-head small{color:#7e8798}.runtime-head button{background:transparent;color:#9098a9}
+.runtime-checks{display:grid;gap:10px;margin:28px 0}.runtime-check{display:grid;grid-template-columns:auto 1fr auto;gap:12px;border:1px solid #2c3340;border-radius:12px;padding:14px}.runtime-check strong{font-size:14px}.runtime-check p{font-size:13px;margin:4px 0;color:#a7afbd}.runtime-check small{font-size:12px;color:#747e90}.runtime-check em{font-size:10px;text-transform:uppercase;font-style:normal;color:#929aaa}
+.check-icon{color:#5bdd9a}.check-icon.warning{color:#f2ba5b}.check-icon.blocked{color:#f16f7e}
+.smoke-button{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:13px;border-radius:10px;background:#7258f6;font-weight:600}

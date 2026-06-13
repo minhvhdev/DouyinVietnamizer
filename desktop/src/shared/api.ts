@@ -1,4 +1,4 @@
-import type { Job, JobsApi } from "./contracts";
+import type { Job, JobsApi, RuntimeReport } from "./contracts";
 
 const baseUrl = import.meta.env.VITE_BACKEND_URL ?? "http://127.0.0.1:8765";
 
@@ -15,6 +15,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api: JobsApi = {
   listJobs: () => request<Job[]>("/api/jobs"),
   createJob: (sourceUrl) =>
-    request<Job>("/api/jobs", { method: "POST", body: JSON.stringify({ source_url: sourceUrl }) })
+    request<Job>("/api/jobs", { method: "POST", body: JSON.stringify({ source_url: sourceUrl }) }),
+  runtimeStatus: () => request<RuntimeReport>("/api/runtime/status"),
+  runSmokeTest: () => request<RuntimeReport>("/api/runtime/smoke-test", { method: "POST" })
 };
 

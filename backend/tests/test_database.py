@@ -11,5 +11,5 @@ def test_migration_creates_required_tables(tmp_path: Path) -> None:
         "SELECT name FROM sqlite_master WHERE type = 'table'"
     ).fetchall()
 
-    assert {"jobs", "job_steps", "settings", "events"} <= {row["name"] for row in rows}
+    assert {"jobs", "job_steps", "settings", "events", "runtime_reports"} <= {row["name"] for row in rows}
 
