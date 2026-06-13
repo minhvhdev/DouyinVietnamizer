@@ -21,7 +21,7 @@ Write-Host "=== Packaging Python Backend ===" -ForegroundColor Cyan
 Push-Location "$root\backend"
 python -m pip install pyinstaller
 Write-Host "Running PyInstaller..."
-python -m PyInstaller --clean --onefile --name dv_backend --noconsole dv_backend/main.py
+python -m PyInstaller --clean --onefile --name dv_backend run_backend.py
 Pop-Location
 
 # 3. Assemble Portable Folder Structure
