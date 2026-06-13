@@ -18,7 +18,7 @@ def test_health_and_capabilities(tmp_path: Path) -> None:
 
     assert health.json()["status"] == "ok"
     assert capabilities.json()["cpu_mode"] is True
-    assert capabilities.json()["implemented_steps"] == []
+    assert len(capabilities.json()["implemented_steps"]) == 12
 
 
 def test_create_and_list_job(tmp_path: Path) -> None:

@@ -50,6 +50,16 @@
       "version_contains": "piper",
       "required": false,
       "capability": "tts_local"
+    },
+    {
+      "id": "qwen3_asr",
+      "display_name": "Qwen3-ASR CPU",
+      "executable": "qwen3-asr/qwen3-asr.exe",
+      "dev_command": "qwen3-asr",
+      "version_args": ["--help"],
+      "version_contains": "qwen3",
+      "required": false,
+      "capability": "asr_qwen"
     }
   ]
 }

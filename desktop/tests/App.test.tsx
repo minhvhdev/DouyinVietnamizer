@@ -21,17 +21,33 @@ const readyRuntime = {
   checked_at: "2026-06-13T00:00:00Z",
   checks: [{ id: "storage", display_name: "Local storage", status: "ready", required: true, message: "Local storage is writable.", action: "No action required." }]
 };
+import { JobsApi } from "../src/shared/contracts";
+
+const baseApi: JobsApi = {
+  listJobs: vi.fn().mockResolvedValue([]),
+  createJob: vi.fn().mockResolvedValue(job),
+  runtimeStatus: vi.fn().mockResolvedValue(readyRuntime),
+  runSmokeTest: vi.fn().mockResolvedValue(readyRuntime),
+  startJob: vi.fn().mockResolvedValue({ status: "started" }),
+  cancelJob: vi.fn().mockResolvedValue({ status: "cancelled" }),
+  selectVideo: vi.fn().mockResolvedValue({ status: "selected" }),
+  getCheckpoint: vi.fn().mockResolvedValue(null),
+  getSettings: vi.fn().mockResolvedValue({}),
+  updateSettings: vi.fn().mockResolvedValue({}),
+  getEvents: vi.fn().mockResolvedValue([]),
+  listOutputs: vi.fn().mockResolvedValue([])
+};
 
 test("shows an actionable backend connection error", async () => {
-  const api = { listJobs: vi.fn().mockRejectedValue(new Error("Backend unavailable")), createJob: vi.fn(), runtimeStatus: vi.fn().mockResolvedValue(readyRuntime), runSmokeTest: vi.fn() };
+  const api: JobsApi = { ...baseApi, listJobs: vi.fn().mockRejectedValue(new Error("Backend unavailable")) };
   render(<App api={api} />);
 
   expect(await screen.findByText("Backend unavailable")).toBeInTheDocument();
-  expect(screen.getByText(/Start the local backend/)).toBeInTheDocument();
+  expect(screen.getByText(/Check logs or configuration/)).toBeInTheDocument();
 });
 
 test("creates a job and shows it on the dashboard", async () => {
-  const api = { listJobs: vi.fn().mockResolvedValue([]), createJob: vi.fn().mockResolvedValue(job), runtimeStatus: vi.fn().mockResolvedValue(readyRuntime), runSmokeTest: vi.fn() };
+  const api: JobsApi = { ...baseApi, listJobs: vi.fn().mockResolvedValue([]), createJob: vi.fn().mockResolvedValue(job) };
   render(<App api={api} />);
 
   fireEvent.change(await screen.findByPlaceholderText(/Paste a Douyin/), {
@@ -44,7 +60,7 @@ test("creates a job and shows it on the dashboard", async () => {
 
 test("shows runtime checks and reruns the smoke test", async () => {
   const warning = { ...readyRuntime, status: "warning", checks: [{ ...readyRuntime.checks[0], status: "warning", action: "Bundle this tool before release." }] };
-  const api = { listJobs: vi.fn().mockResolvedValue([]), createJob: vi.fn(), runtimeStatus: vi.fn().mockResolvedValue(warning), runSmokeTest: vi.fn().mockResolvedValue(readyRuntime) };
+  const api: JobsApi = { ...baseApi, listJobs: vi.fn().mockResolvedValue([]), runtimeStatus: vi.fn().mockResolvedValue(warning), runSmokeTest: vi.fn().mockResolvedValue(readyRuntime) };
   render(<App api={api} />);
 
   fireEvent.click(await screen.findByRole("button", { name: /Runtime/ }));
@@ -57,9 +73,31 @@ test("shows runtime checks and reruns the smoke test", async () => {
 
 test("disables job creation when runtime is blocked", async () => {
   const blocked = { ...readyRuntime, status: "blocked" };
-  const api = { listJobs: vi.fn().mockResolvedValue([]), createJob: vi.fn(), runtimeStatus: vi.fn().mockResolvedValue(blocked), runSmokeTest: vi.fn() };
+  const api: JobsApi = { ...baseApi, listJobs: vi.fn().mockResolvedValue([]), runtimeStatus: vi.fn().mockResolvedValue(blocked) };
   render(<App api={api} />);
 
   expect(await screen.findByRole("button", { name: "Create job" })).toBeDisabled();
+});
+
+test("shows free translation Edge TTS and browser cookie disclosure", async () => {
+  const api: JobsApi = {
+    ...baseApi,
+    getSettings: vi.fn().mockResolvedValue({
+      cookies_browser: "none",
+      translation_backend: "google_free",
+      asr_backend: "whisper_cpu",
+      whisper_model_path: "",
+      tts_backend: "edge",
+      edge_tts_voice: "vi-VN-HoaiMyNeural",
+      edge_tts_rate: "+0%"
+    })
+  };
+  render(<App api={api} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+
+  expect(screen.getAllByText("Google Translate Free").length).toBeGreaterThan(0);
+  expect(screen.getAllByText("Microsoft Edge TTS").length).toBeGreaterThan(0);
+  expect(screen.getByText(/cookies may contain sensitive session data/i)).toBeInTheDocument();
 });
 
