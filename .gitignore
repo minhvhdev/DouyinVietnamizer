@@ -6,5 +6,5 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .superpowers/
+.worktrees/
 *.pyc
-
