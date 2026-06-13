@@ -1,0 +1,15 @@
+from pathlib import Path
+
+from dv_backend.database import Database
+
+
+def test_migration_creates_required_tables(tmp_path: Path) -> None:
+    database = Database(tmp_path / "app.db")
+    database.migrate()
+
+    rows = database.connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'"
+    ).fetchall()
+
+    assert {"jobs", "job_steps", "settings", "events"} <= {row["name"] for row in rows}
+
