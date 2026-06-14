@@ -366,6 +366,86 @@ def write_dummy_wav(path: Path, duration: float = 5.0, sample_rate: int = 48000,
 
 @patch("dv_backend.pipeline.resolve_tool_path")
 @patch("dv_backend.pipeline.run_subprocess_with_cancel")
+def test_mix_ducks_original_and_includes_vietnamese_narration(
+    mock_run, mock_resolve, test_env
+):
+    config, database, _job_service, runner = test_env
+    mock_resolve.return_value = Path("ffmpeg")
+    job_id = "job123"
+    artifacts_dir = config.data_dir / "jobs" / job_id / "artifacts"
+    original = artifacts_dir / "original_48k.wav"
+    narration_segment = artifacts_dir / "tts" / "tts_repaired_0.wav"
+    write_dummy_wav(original)
+    write_dummy_wav(narration_segment, duration=1.0)
+    save_checkpoint(
+        config.data_dir,
+        job_id,
+        "extract_audio",
+        {"original_48k_path": str(original)},
+    )
+    save_checkpoint(
+        config.data_dir,
+        job_id,
+        "duration_repair",
+        {"segments": [{"index": 0, "start": 0.0}]},
+    )
+
+    def write_mix(cmd, *_args, **_kwargs):
+        write_dummy_wav(Path(cmd[-1]))
+        return MagicMock(stdout="", stderr="", returncode=0)
+
+    mock_run.side_effect = write_mix
+
+    pipeline.mix_step(job_id, config, database, runner)
+
+    filter_graph = mock_run.call_args.args[0][
+        mock_run.call_args.args[0].index("-filter_complex") + 1
+    ]
+    assert "sidechaincompress" in filter_graph
+    assert "[ducked][fg]amix=inputs=2" in filter_graph
+
+
+@patch("dv_backend.pipeline.resolve_tool_path")
+@patch("dv_backend.pipeline.run_subprocess_with_cancel")
+def test_mix_saves_vietnamese_narration_as_debug_output(
+    mock_run, mock_resolve, test_env
+):
+    config, database, _job_service, runner = test_env
+    mock_resolve.return_value = Path("ffmpeg")
+    job_id = "job123"
+    artifacts_dir = config.data_dir / "jobs" / job_id / "artifacts"
+    original = artifacts_dir / "original_48k.wav"
+    narration_segment = artifacts_dir / "tts" / "tts_repaired_0.wav"
+    write_dummy_wav(original)
+    write_dummy_wav(narration_segment, duration=1.0)
+    save_checkpoint(
+        config.data_dir,
+        job_id,
+        "extract_audio",
+        {"original_48k_path": str(original)},
+    )
+    save_checkpoint(
+        config.data_dir,
+        job_id,
+        "duration_repair",
+        {"segments": [{"index": 0, "start": 0.0}]},
+    )
+
+    def write_mix(cmd, *_args, **_kwargs):
+        write_dummy_wav(Path(cmd[-1]))
+        return MagicMock(stdout="", stderr="", returncode=0)
+
+    mock_run.side_effect = write_mix
+
+    result = pipeline.mix_step(job_id, config, database, runner)
+
+    debug_path = config.data_dir / "jobs" / job_id / "output" / "vietnamese_narration.wav"
+    assert debug_path.is_file()
+    assert result["vietnamese_narration_path"] == str(debug_path)
+
+
+@patch("dv_backend.pipeline.resolve_tool_path")
+@patch("dv_backend.pipeline.run_subprocess_with_cancel")
 @patch("dv_backend.pipeline.GoogleFreeTranslator")
 @patch("dv_backend.pipeline.EdgeTtsAdapter")
 def test_full_runner_execution_and_resume(edge_tts_type, translator_type, mock_run, mock_resolve, test_env):

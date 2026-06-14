@@ -2,6 +2,7 @@ import json
 import html
 import os
 import re
+import shutil
 import subprocess
 import time
 import urllib.request
@@ -1175,6 +1176,11 @@ def mix_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
         out.setsampwidth(2)
         out.setframerate(frame_rate)
         out.writeframes(audio_data)
+
+    output_dir = job_dir / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    vietnamese_narration = output_dir / "vietnamese_narration.wav"
+    shutil.copyfile(narration_wav, vietnamese_narration)
         
     ffmpeg_path = resolve_tool_path(config, "ffmpeg")
     
@@ -1182,7 +1188,13 @@ def mix_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
         str(ffmpeg_path), "-y",
         "-i", str(original_48k),
         "-i", str(narration_wav),
-        "-filter_complex", "[0:a]volume=1.0[bg];[1:a]volume=1.2[fg];[bg][fg]sidechaincompress=threshold=0.15:ratio=4:attack=50:release=300[mixed]",
+        "-filter_complex",
+        (
+            "[0:a]volume=0.35[bg];[1:a]volume=1.5[fg];"
+            "[bg][fg]sidechaincompress=threshold=0.02:ratio=8:"
+            "attack=20:release=400[ducked];"
+            "[ducked][fg]amix=inputs=2:duration=first:dropout_transition=0[mixed]"
+        ),
         "-map", "[mixed]",
         str(mixed_wav)
     ]
@@ -1206,7 +1218,8 @@ def mix_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
         "step_name": "mix",
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "narration_wav_path": str(narration_wav),
-        "mixed_wav_path": str(mixed_wav)
+        "mixed_wav_path": str(mixed_wav),
+        "vietnamese_narration_path": str(vietnamese_narration)
     }
     save_checkpoint(config.data_dir, job_id, "mix", checkpoint_data)
     return checkpoint_data
