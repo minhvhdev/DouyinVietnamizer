@@ -93,7 +93,12 @@ class JobRunner:
             now_start = utc_now()
             with self.database.connection:
                 self.database.connection.execute(
-                    "UPDATE job_steps SET status = 'running', started_at = ? WHERE job_id = ? AND name = ?",
+                    """
+                    UPDATE job_steps
+                    SET status = 'running', started_at = ?, completed_at = NULL,
+                        error_code = NULL, error_message = NULL
+                    WHERE job_id = ? AND name = ?
+                    """,
                     (now_start, job_id, step_name)
                 )
                 self.database.connection.execute(
@@ -108,7 +113,12 @@ class JobRunner:
                 now_end = utc_now()
                 with self.database.connection:
                     self.database.connection.execute(
-                        "UPDATE job_steps SET status = 'completed', completed_at = ? WHERE job_id = ? AND name = ?",
+                        """
+                        UPDATE job_steps
+                        SET status = 'completed', completed_at = ?,
+                            error_code = NULL, error_message = NULL
+                        WHERE job_id = ? AND name = ?
+                        """,
                         (now_end, job_id, step_name)
                     )
             except AppError as e:
@@ -163,7 +173,13 @@ class JobRunner:
             now_end = utc_now()
             with self.database.connection:
                 self.database.connection.execute(
-                    "UPDATE jobs SET status = 'completed', current_step = NULL, updated_at = ? WHERE id = ?",
+                    """
+                    UPDATE jobs
+                    SET status = 'completed', current_step = NULL,
+                        last_error_code = NULL, last_error_message = NULL,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
                     (now_end, job_id)
                 )
                 self.database.connection.execute(

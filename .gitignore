@@ -1,5 +1,6 @@
 node_modules/
 dist/
+dist_portable/
 release/
 .venv/
 __pycache__/
@@ -9,3 +10,7 @@ __pycache__/
 .worktrees/
 *.pyc
 *.egg-info/
+backend/build/
+backend/*.spec
+vendor/*
+!vendor/manifest.json

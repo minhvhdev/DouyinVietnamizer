@@ -6,6 +6,7 @@ import subprocess
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 import wave
 from pathlib import Path
 
@@ -27,6 +28,14 @@ def yt_dlp_cookie_args(database: Database) -> list[str]:
     if browser == "none":
         return []
     return ["--cookies-from-browser", browser]
+
+
+def normalize_douyin_url(source_url: str) -> str:
+    parsed = urllib.parse.urlparse(source_url)
+    modal_id = urllib.parse.parse_qs(parsed.query).get("modal_id", [None])[0]
+    if parsed.netloc.endswith("douyin.com") and modal_id and modal_id.isdigit():
+        return f"https://www.douyin.com/video/{modal_id}"
+    return source_url
 
 
 def resolve_tool_path(config: AppConfig, tool_id: str) -> Path:
@@ -215,7 +224,7 @@ def call_openai_tts(api_base: str, api_key: str, model: str, voice: str, text: s
 # Steps implementation
 def resolve_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
     row = database.connection.execute("SELECT source_url FROM jobs WHERE id = ?", (job_id,)).fetchone()
-    source_url = row["source_url"]
+    source_url = normalize_douyin_url(row["source_url"])
     
     yt_dlp_path = resolve_tool_path(config, "yt_dlp")
     
@@ -527,9 +536,13 @@ def asr_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
     rows = database.connection.execute("SELECT key, value FROM settings").fetchall()
     settings = {r["key"]: json.loads(r["value"]) for r in rows}
     
-    backend = settings.get("whisper_backend", "whisper_cpu")
+    backend = settings.get("asr_backend", settings.get("whisper_backend", "whisper_cpu"))
     model_path = settings.get("whisper_model_path", "")
-    
+    if not model_path:
+        project_root = Path(__file__).resolve().parents[2]
+        vendor_dir = Path(os.environ.get("DV_VENDOR_DIR", project_root / "vendor"))
+        model_path = str(vendor_dir / "whisper.cpp" / "models" / "ggml-base.bin")
+
     if not model_path or not Path(model_path).is_file():
         raise AppError(
             400,
@@ -570,6 +583,7 @@ def asr_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
             str(exe_path),
             "-m", str(model_path),
             "-f", str(audio_16k),
+            "-l", "zh",
             "-oj"
         ]
         
@@ -611,6 +625,8 @@ def asr_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
     raw_segments = []
     if "result" in res_data and "transcription" in res_data["result"]:
         raw_segments = res_data["result"]["transcription"]
+    elif "transcription" in res_data:
+        raw_segments = res_data["transcription"]
     elif "segments" in res_data:
         raw_segments = res_data["segments"]
         
@@ -627,6 +643,17 @@ def asr_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
             "end": round(end, 2),
             "text": raw.get("text", "").strip()
         })
+
+    segments = [segment for segment in segments if segment["text"]]
+    if not segments:
+        raise AppError(
+            422,
+            ErrorInfo(
+                code="EMPTY_ASR_TRANSCRIPTION",
+                message="ASR completed without detecting any spoken text.",
+                action="Verify the source audio and ASR model, then resume the ASR step."
+            )
+        )
         
     checkpoint_data = {
         "schema_version": 1,

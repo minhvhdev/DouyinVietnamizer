@@ -82,6 +82,77 @@ def test_resolve_step_single_video(mock_run, mock_resolve, test_env):
     assert job_db.title == "Funny cat video"
 
 
+def test_normalize_douyin_jingxuan_modal_url() -> None:
+    assert pipeline.normalize_douyin_url(
+        "https://www.douyin.com/jingxuan?modal_id=7639476837437699301"
+    ) == "https://www.douyin.com/video/7639476837437699301"
+
+
+@patch("dv_backend.pipeline.resolve_tool_path")
+@patch("dv_backend.pipeline.run_subprocess_with_cancel")
+def test_asr_parses_current_whisper_json_and_uses_chinese(
+    mock_run, mock_resolve, test_env
+):
+    config, database, job_service, runner = test_env
+    mock_resolve.return_value = Path("whisper-cli")
+    job = job_service.create("https://www.douyin.com/video/douyin123")
+    job_dir = config.data_dir / "jobs" / job.id
+    artifacts_dir = job_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = artifacts_dir / "audio_16k.wav"
+    audio_path.write_bytes(b"wav")
+
+    def write_whisper_json(*_args, **_kwargs):
+        audio_path.with_suffix(".wav.json").write_text(
+            json.dumps(
+                {
+                    "transcription": [
+                        {
+                            "offsets": {"from": 250, "to": 1480},
+                            "text": " 你好 ",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    mock_run.side_effect = write_whisper_json
+
+    result = pipeline.asr_step(job.id, config, database, runner)
+
+    assert result["segments"] == [{"start": 0.25, "end": 1.48, "text": "你好"}]
+    command = mock_run.call_args.args[0]
+    assert command[-3:] == ["-l", "zh", "-oj"]
+
+
+@patch("dv_backend.pipeline.resolve_tool_path")
+@patch("dv_backend.pipeline.run_subprocess_with_cancel")
+def test_asr_rejects_empty_transcription(mock_run, mock_resolve, test_env):
+    config, database, job_service, runner = test_env
+    mock_resolve.return_value = Path("whisper-cli")
+    job = job_service.create("https://www.douyin.com/video/douyin123")
+    artifacts_dir = config.data_dir / "jobs" / job.id / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = artifacts_dir / "audio_16k.wav"
+    audio_path.write_bytes(b"wav")
+
+    def write_empty_whisper_json(*_args, **_kwargs):
+        audio_path.with_suffix(".wav.json").write_text(
+            json.dumps({"transcription": []}),
+            encoding="utf-8",
+        )
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    mock_run.side_effect = write_empty_whisper_json
+
+    with pytest.raises(AppError) as error:
+        pipeline.asr_step(job.id, config, database, runner)
+
+    assert error.value.info.code == "EMPTY_ASR_TRANSCRIPTION"
+
+
 @patch("dv_backend.pipeline.resolve_tool_path")
 @patch("dv_backend.pipeline.run_subprocess_with_cancel")
 def test_resolve_step_uses_selected_browser_cookies(mock_run, mock_resolve, test_env):
