@@ -102,8 +102,15 @@ test("shows free translation Edge TTS and browser cookie disclosure", async () =
 });
 
 test("manages Gemini API key pool from settings", async () => {
-  const updateSettings = vi.fn().mockResolvedValue({
-    gemini_api_keys: [{ id: "key-1", masked: "AIza...7890", label: "AIza...7890" }]
+  const updateSettings = vi.fn().mockImplementation(async (payload) => {
+    if (payload.gemini_api_key_update) {
+      return {
+        gemini_api_keys: [{ id: "key-1", masked: "AIza...7890", label: payload.gemini_api_key_update.label }]
+      };
+    }
+    return {
+      gemini_api_keys: [{ id: "key-1", masked: "AIza...7890", label: "Studio quota 1" }]
+    };
   });
   const api: JobsApi = {
     ...baseApi,
@@ -112,7 +119,7 @@ test("manages Gemini API key pool from settings", async () => {
       cookies_browser: "none",
       translation_backend: "gemini",
       tts_backend: "gemini",
-      gemini_api_keys: [{ id: "key-1", masked: "AIza...7890", label: "AIza...7890" }],
+      gemini_api_keys: [{ id: "key-1", masked: "AIza...7890", label: "Studio quota 1" }],
       gemini_translation_model: "gemini-2.5-flash",
       gemini_tts_model: "gemini-2.5-flash-preview-tts",
       gemini_tts_voice: "Zephyr"
@@ -125,12 +132,21 @@ test("manages Gemini API key pool from settings", async () => {
   expect(await screen.findByText("Google AI Studio / Gemini API Keys")).toBeInTheDocument();
   expect(screen.getAllByText("Gemini").length).toBeGreaterThan(0);
   expect(screen.getByText("AIza...7890")).toBeInTheDocument();
+  expect(screen.getByDisplayValue("Studio quota 1")).toBeInTheDocument();
 
   fireEvent.change(screen.getByPlaceholderText(/Paste Google AI Studio API key/i), {
     target: { value: "AIzaSyNewSecret" }
   });
   fireEvent.click(screen.getByRole("button", { name: "Add Gemini key" }));
   await waitFor(() => expect(updateSettings).toHaveBeenCalledWith({ gemini_api_key_add: "AIzaSyNewSecret" }));
+
+  fireEvent.change(screen.getByLabelText("Edit label for Gemini key AIza...7890"), {
+    target: { value: "backup key" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save label for Gemini key AIza...7890" }));
+  await waitFor(() => expect(updateSettings).toHaveBeenCalledWith({
+    gemini_api_key_update: { id: "key-1", label: "backup key" }
+  }));
 
   fireEvent.click(screen.getByRole("button", { name: "Remove Gemini key AIza...7890" }));
   await waitFor(() => expect(updateSettings).toHaveBeenCalledWith({ gemini_api_key_remove: "key-1" }));

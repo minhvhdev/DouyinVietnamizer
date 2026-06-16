@@ -77,3 +77,19 @@ def test_settings_update_ignores_masked_gemini_keys_from_ui(tmp_path: Path) -> N
     settings.update({"gemini_api_keys": [{"id": "masked", "masked": "AIza...7890"}]})
 
     assert settings.get_raw_all()["gemini_api_keys"][0]["key"] == "AIzaSySecret1234567890"
+
+
+def test_gemini_key_pool_updates_label_without_exposing_secret(tmp_path: Path) -> None:
+    settings = service(tmp_path)
+    added = settings.update({"gemini_api_key_add": "AIzaSySecret1234567890"})
+    key_id = added["gemini_api_keys"][0]["id"]
+
+    updated = settings.update({
+        "gemini_api_key_update": {"id": key_id, "label": "studio quota 1"}
+    })
+
+    assert updated["gemini_api_keys"] == [
+        {"id": key_id, "label": "studio quota 1", "masked": "AIza...7890"}
+    ]
+    assert "Secret" not in json.dumps(updated)
+    assert settings.get_raw_all()["gemini_api_keys"][0]["key"] == "AIzaSySecret1234567890"

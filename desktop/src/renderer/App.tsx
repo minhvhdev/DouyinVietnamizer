@@ -231,6 +231,29 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     }
   }
 
+  function updateGeminiKeyLabel(id: string, label: string) {
+    setSettings({
+      ...settings,
+      gemini_api_keys: (settings.gemini_api_keys ?? []).map((item: any) =>
+        item.id === id ? { ...item, label } : item
+      )
+    });
+  }
+
+  async function handleSaveGeminiKeyLabel(id: string, label: string) {
+    setSettingsSuccess(false);
+    try {
+      const updated = await api.updateSettings({
+        gemini_api_key_update: { id, label }
+      });
+      setSettings(updated);
+      setSettingsSuccess(true);
+      setTimeout(() => setSettingsSuccess(false), 3000);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to update Gemini API key label");
+    }
+  }
+
   function formatDuration(sec?: number): string {
     if (sec === undefined || sec === null) return "--:--";
     const minutes = Math.floor(sec / 60);
@@ -423,7 +446,8 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                 <h1>Application Settings</h1>
               </div>
             </header>
-            <form onSubmit={handleSaveSettings} style={{ marginTop: "28px", display: "grid", gap: "20px", background: "#12151c", border: "1px solid #292f3b", borderRadius: "18px", padding: "28px", maxWidth: "800px" }}>
+            <form onSubmit={handleSaveSettings} className="settings-page">
+              <section className="settings-card settings-card-wide">
               <h3 style={{ margin: 0, color: "#8170ff" }}>Google Translate Free</h3>
               <p style={{ margin: 0, color: "#9ca3af" }}>
                 Uses Google's free web translation service. It may be rate-limited or temporarily unavailable.
@@ -458,9 +482,9 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
               <small style={{ color: "#f6c177" }}>
                 Browser cookies may contain sensitive session data. They are passed only to yt-dlp and are not stored by the application.
               </small>
+              </section>
 
-              <hr style={{ border: "0", borderTop: "1px solid #292f3b", margin: "10px 0" }} />
-
+              <section className="settings-card">
               <h3 style={{ margin: 0, color: "#8170ff" }}>Google AI Studio / Gemini API Keys</h3>
               <p style={{ margin: 0, color: "#9ca3af" }}>
                 Add multiple Gemini API keys for translation and TTS. Keys are stored locally and shown only in masked form.
@@ -492,14 +516,34 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                   (settings.gemini_api_keys ?? []).map((item: any) => (
                     <div
                       key={item.id}
-                      style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#0e1117", border: "1px solid #292f3b", borderRadius: "10px", padding: "10px 12px" }}
+                      className="gemini-key-row"
                     >
-                      <span style={{ fontFamily: "monospace", color: "#d7ddf0" }}>{item.masked ?? item.label}</span>
+                      <div>
+                        <span style={{ fontFamily: "monospace", color: "#d7ddf0" }}>{item.masked ?? item.label}</span>
+                        <small style={{ display: "block", color: "#747d90", marginTop: "3px" }}>Stored locally, secret hidden</small>
+                      </div>
+                      <label className="key-label-editor">
+                        <span>Label</span>
+                        <input
+                          aria-label={`Edit label for Gemini key ${item.masked ?? item.label}`}
+                          className="settings-input"
+                          value={item.label ?? item.masked ?? ""}
+                          onChange={(event) => updateGeminiKeyLabel(item.id, event.target.value)}
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        aria-label={`Save label for Gemini key ${item.masked ?? item.label}`}
+                        onClick={() => handleSaveGeminiKeyLabel(item.id, item.label ?? "")}
+                        className="secondary-button"
+                      >
+                        <Save size={15} /> Save label
+                      </button>
                       <button
                         type="button"
                         aria-label={`Remove Gemini key ${item.masked ?? item.label}`}
                         onClick={() => handleRemoveGeminiKey(item.id)}
-                        style={{ background: "transparent", color: "#ffbcc9", display: "flex", alignItems: "center", gap: "6px" }}
+                        className="danger-button"
                       >
                         <X size={16} /> Remove
                       </button>
@@ -507,6 +551,9 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                   ))
                 )}
               </div>
+              </section>
+
+              <section className="settings-card">
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "14px" }}>
                 <label style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                   <span>Gemini translation model</span>
@@ -533,9 +580,9 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                   />
                 </label>
               </div>
+              </section>
 
-              <hr style={{ border: "0", borderTop: "1px solid #292f3b", margin: "10px 0" }} />
-
+              <section className="settings-card">
               <h3 style={{ margin: 0, color: "#8170ff" }}>ASR (Speech-To-Text)</h3>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "14px" }}>
                 <label style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
@@ -560,9 +607,9 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                   />
                 </label>
               </div>
+              </section>
 
-              <hr style={{ border: "0", borderTop: "1px solid #292f3b", margin: "10px 0" }} />
-
+              <section className="settings-card">
               <h3 style={{ margin: 0, color: "#8170ff" }}>Microsoft Edge TTS</h3>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "14px" }}>
                 <label style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
@@ -585,8 +632,9 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                   />
                 </label>
               </div>
+              </section>
 
-              <div style={{ display: "flex", alignItems: "center", gap: "12px", marginTop: "10px" }}>
+              <div className="settings-actions">
                 <button type="submit" className="smoke-button" style={{ width: "auto", padding: "13px 28px" }}>
                   <Save size={18} /> Save Settings
                 </button>

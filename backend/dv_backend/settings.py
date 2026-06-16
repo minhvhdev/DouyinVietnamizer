@@ -76,6 +76,7 @@ class SettingsService:
         values = dict(values)
         add_gemini_key = values.pop("gemini_api_key_add", None)
         remove_gemini_key = values.pop("gemini_api_key_remove", None)
+        update_gemini_key = values.pop("gemini_api_key_update", None)
         values.pop("gemini_api_keys", None)
 
         now = datetime.now(timezone.utc).isoformat()
@@ -99,6 +100,20 @@ class SettingsService:
                 values["gemini_api_keys"] = [
                     item for item in raw.get("gemini_api_keys", [])
                     if isinstance(item, dict) and item.get("id") != remove_gemini_key
+                ]
+
+            if update_gemini_key:
+                raw = self.get_raw_all()
+                update_id = str(update_gemini_key.get("id", ""))
+                label = str(update_gemini_key.get("label", "")).strip()
+                values["gemini_api_keys"] = [
+                    {
+                        **item,
+                        "label": label or mask_api_key(item["key"]),
+                    }
+                    if isinstance(item, dict) and item.get("id") == update_id
+                    else item
+                    for item in raw.get("gemini_api_keys", [])
                 ]
 
             for key, value in values.items():
