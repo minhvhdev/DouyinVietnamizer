@@ -52,6 +52,10 @@ The Runtime panel shows storage, SQLite, manifest, and executable probe results.
 
 - Douyin URLs and downloaded media are processed locally, but Google Translate
   receives transcript text and Edge TTS receives translated Vietnamese text.
+- If Gemini is selected for translation or TTS, transcript/translation text is
+  sent to the Gemini API using the Google AI Studio API key pool configured in
+  Settings. Keys are stored locally in SQLite and shown only in masked form in
+  the UI.
 - Browser cookies are optional and are only passed to yt-dlp when selected.
 - Douyin may change its site or require authentication, which can break a URL.
 - Qwen3-ASR, Vulkan acceleration, and a final customer installer remain optional

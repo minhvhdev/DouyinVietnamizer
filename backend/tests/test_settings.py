@@ -20,6 +20,7 @@ def test_defaults_use_free_portable_pipeline(tmp_path: Path) -> None:
     assert settings.get_all()["translation_backend"] == "google_free"
     assert settings.get_all()["tts_backend"] == "edge"
     assert settings.get_all()["asr_backend"] == "whisper_cpu"
+    assert settings.get_all()["gemini_api_keys"] == []
 
 
 def test_cookie_browser_accepts_only_supported_values(tmp_path: Path) -> None:
@@ -45,3 +46,34 @@ def test_update_does_not_replace_unrelated_settings(tmp_path: Path) -> None:
         "edge_tts_voice": "vi-VN-NamMinhNeural",
         "translation_backend": "google_free",
     }
+
+
+def test_gemini_key_pool_adds_masks_and_removes_without_exposing_keys(tmp_path: Path) -> None:
+    settings = service(tmp_path)
+
+    masked = settings.update({"gemini_api_key_add": "  AIzaSySecret1234567890  "})
+
+    assert masked["gemini_api_keys"] == [
+        {
+            "id": masked["gemini_api_keys"][0]["id"],
+            "label": "AIza...7890",
+            "masked": "AIza...7890",
+        }
+    ]
+    assert "Secret" not in json.dumps(masked)
+
+    raw = settings.get_raw_all()
+    assert raw["gemini_api_keys"][0]["key"] == "AIzaSySecret1234567890"
+
+    removed = settings.update({"gemini_api_key_remove": masked["gemini_api_keys"][0]["id"]})
+
+    assert removed["gemini_api_keys"] == []
+
+
+def test_settings_update_ignores_masked_gemini_keys_from_ui(tmp_path: Path) -> None:
+    settings = service(tmp_path)
+    settings.update({"gemini_api_key_add": "AIzaSySecret1234567890"})
+
+    settings.update({"gemini_api_keys": [{"id": "masked", "masked": "AIza...7890"}]})
+
+    assert settings.get_raw_all()["gemini_api_keys"][0]["key"] == "AIzaSySecret1234567890"

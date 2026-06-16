@@ -51,8 +51,13 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     whisper_model_path: "",
     tts_backend: "edge",
     edge_tts_voice: "vi-VN-HoaiMyNeural",
-    edge_tts_rate: "+0%"
+    edge_tts_rate: "+0%",
+    gemini_api_keys: [],
+    gemini_translation_model: "gemini-2.5-flash",
+    gemini_tts_model: "gemini-2.5-flash-preview-tts",
+    gemini_tts_voice: "Zephyr"
   });
+  const [newGeminiKey, setNewGeminiKey] = useState("");
   const [settingsSuccess, setSettingsSuccess] = useState(false);
 
   // Fetch initial data
@@ -190,11 +195,39 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     event.preventDefault();
     setSettingsSuccess(false);
     try {
-      await api.updateSettings(settings);
+      const { gemini_api_keys, ...savePayload } = settings;
+      await api.updateSettings(savePayload);
       setSettingsSuccess(true);
       setTimeout(() => setSettingsSuccess(false), 3000);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Unable to save settings");
+    }
+  }
+
+  async function handleAddGeminiKey() {
+    const key = newGeminiKey.trim();
+    if (!key) return;
+    setSettingsSuccess(false);
+    try {
+      const updated = await api.updateSettings({ gemini_api_key_add: key });
+      setSettings(updated);
+      setNewGeminiKey("");
+      setSettingsSuccess(true);
+      setTimeout(() => setSettingsSuccess(false), 3000);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to add Gemini API key");
+    }
+  }
+
+  async function handleRemoveGeminiKey(id: string) {
+    setSettingsSuccess(false);
+    try {
+      const updated = await api.updateSettings({ gemini_api_key_remove: id });
+      setSettings(updated);
+      setSettingsSuccess(true);
+      setTimeout(() => setSettingsSuccess(false), 3000);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to remove Gemini API key");
     }
   }
 
@@ -418,12 +451,88 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                     onChange={(e) => setSettings({ ...settings, translation_backend: e.target.value })}
                   >
                     <option value="google_free">Google Translate Free</option>
+                    <option value="gemini">Gemini</option>
                   </select>
                 </label>
               </div>
               <small style={{ color: "#f6c177" }}>
                 Browser cookies may contain sensitive session data. They are passed only to yt-dlp and are not stored by the application.
               </small>
+
+              <hr style={{ border: "0", borderTop: "1px solid #292f3b", margin: "10px 0" }} />
+
+              <h3 style={{ margin: 0, color: "#8170ff" }}>Google AI Studio / Gemini API Keys</h3>
+              <p style={{ margin: 0, color: "#9ca3af" }}>
+                Add multiple Gemini API keys for translation and TTS. Keys are stored locally and shown only in masked form.
+              </p>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "10px", alignItems: "end" }}>
+                <label style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  <span>New Gemini API key</span>
+                  <input
+                    className="settings-input"
+                    type="password"
+                    placeholder="Paste Google AI Studio API key"
+                    value={newGeminiKey}
+                    onChange={(e) => setNewGeminiKey(e.target.value)}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="smoke-button"
+                  style={{ width: "auto", padding: "13px 18px" }}
+                  onClick={handleAddGeminiKey}
+                >
+                  <Plus size={16} /> Add Gemini key
+                </button>
+              </div>
+              <div style={{ display: "grid", gap: "8px" }}>
+                {(settings.gemini_api_keys ?? []).length === 0 ? (
+                  <small style={{ color: "#9ca3af" }}>No Gemini API keys added yet.</small>
+                ) : (
+                  (settings.gemini_api_keys ?? []).map((item: any) => (
+                    <div
+                      key={item.id}
+                      style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#0e1117", border: "1px solid #292f3b", borderRadius: "10px", padding: "10px 12px" }}
+                    >
+                      <span style={{ fontFamily: "monospace", color: "#d7ddf0" }}>{item.masked ?? item.label}</span>
+                      <button
+                        type="button"
+                        aria-label={`Remove Gemini key ${item.masked ?? item.label}`}
+                        onClick={() => handleRemoveGeminiKey(item.id)}
+                        style={{ background: "transparent", color: "#ffbcc9", display: "flex", alignItems: "center", gap: "6px" }}
+                      >
+                        <X size={16} /> Remove
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "14px" }}>
+                <label style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  <span>Gemini translation model</span>
+                  <input
+                    className="settings-input"
+                    value={settings.gemini_translation_model ?? "gemini-2.5-flash"}
+                    onChange={(e) => setSettings({ ...settings, gemini_translation_model: e.target.value })}
+                  />
+                </label>
+                <label style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  <span>Gemini TTS model</span>
+                  <input
+                    className="settings-input"
+                    value={settings.gemini_tts_model ?? "gemini-2.5-flash-preview-tts"}
+                    onChange={(e) => setSettings({ ...settings, gemini_tts_model: e.target.value })}
+                  />
+                </label>
+                <label style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  <span>Gemini TTS voice</span>
+                  <input
+                    className="settings-input"
+                    value={settings.gemini_tts_voice ?? "Zephyr"}
+                    onChange={(e) => setSettings({ ...settings, gemini_tts_voice: e.target.value })}
+                  />
+                </label>
+              </div>
 
               <hr style={{ border: "0", borderTop: "1px solid #292f3b", margin: "10px 0" }} />
 
@@ -464,6 +573,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                     onChange={(e) => setSettings({ ...settings, tts_backend: e.target.value })}
                   >
                     <option value="edge">Microsoft Edge TTS</option>
+                    <option value="gemini">Gemini TTS</option>
                   </select>
                 </label>
                 <label style={{ display: "flex", flexDirection: "column", gap: "6px" }}>

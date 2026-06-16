@@ -101,3 +101,40 @@ test("shows free translation Edge TTS and browser cookie disclosure", async () =
   expect(screen.getByText(/cookies may contain sensitive session data/i)).toBeInTheDocument();
 });
 
+test("manages Gemini API key pool from settings", async () => {
+  const updateSettings = vi.fn().mockResolvedValue({
+    gemini_api_keys: [{ id: "key-1", masked: "AIza...7890", label: "AIza...7890" }]
+  });
+  const api: JobsApi = {
+    ...baseApi,
+    updateSettings,
+    getSettings: vi.fn().mockResolvedValue({
+      cookies_browser: "none",
+      translation_backend: "gemini",
+      tts_backend: "gemini",
+      gemini_api_keys: [{ id: "key-1", masked: "AIza...7890", label: "AIza...7890" }],
+      gemini_translation_model: "gemini-2.5-flash",
+      gemini_tts_model: "gemini-2.5-flash-preview-tts",
+      gemini_tts_voice: "Zephyr"
+    })
+  };
+  render(<App api={api} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+
+  expect(await screen.findByText("Google AI Studio / Gemini API Keys")).toBeInTheDocument();
+  expect(screen.getAllByText("Gemini").length).toBeGreaterThan(0);
+  expect(screen.getByText("AIza...7890")).toBeInTheDocument();
+
+  fireEvent.change(screen.getByPlaceholderText(/Paste Google AI Studio API key/i), {
+    target: { value: "AIzaSyNewSecret" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Add Gemini key" }));
+  await waitFor(() => expect(updateSettings).toHaveBeenCalledWith({ gemini_api_key_add: "AIzaSyNewSecret" }));
+
+  fireEvent.click(screen.getByRole("button", { name: "Remove Gemini key AIza...7890" }));
+  await waitFor(() => expect(updateSettings).toHaveBeenCalledWith({ gemini_api_key_remove: "key-1" }));
+
+  expect(screen.queryByText("AIzaSyNewSecret")).not.toBeInTheDocument();
+});
+

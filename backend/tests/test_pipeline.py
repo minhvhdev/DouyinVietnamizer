@@ -318,6 +318,80 @@ def test_translate_step(translator_type, mock_chat, test_env):
     assert res["segments"][0]["translation"] == "Xin chào"
 
 
+@patch("dv_backend.pipeline.GeminiTranslator")
+def test_translate_step_uses_gemini_pool_and_persists_cursor(translator_type, test_env):
+    config, database, _job_service, runner = test_env
+    translator = translator_type.return_value
+    translator.translate.return_value = ["Xin chao"]
+    translator.key_pool.cursor = 1
+    save_checkpoint(config.data_dir, "job123", "normalize_segments", {
+        "segments": [
+            {"index": 0, "start": 0.0, "end": 1.0, "text": "hello", "duration_budget": 1.0}
+        ]
+    })
+    with database.connection:
+        database.connection.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("translation_backend", json.dumps("gemini"), "now"),
+        )
+        database.connection.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("gemini_api_keys", json.dumps([{"id": "a", "key": "key-a"}]), "now"),
+        )
+
+    res = pipeline.translate_step("job123", config, database, runner)
+
+    assert res["segments"][0]["translation"] == "Xin chao"
+    assert json.loads(database.connection.execute(
+        "SELECT value FROM settings WHERE key = 'gemini_key_cursor'"
+    ).fetchone()["value"]) == 1
+
+
+@patch("dv_backend.pipeline.resolve_tool_path")
+@patch("dv_backend.pipeline.run_subprocess_with_cancel")
+@patch("dv_backend.pipeline.get_wav_duration")
+@patch("dv_backend.pipeline.GeminiTtsAdapter")
+def test_tts_step_uses_gemini_pool_and_persists_cursor(
+    tts_type, mock_duration, mock_run, mock_resolve, test_env
+):
+    config, database, _job_service, runner = test_env
+    mock_resolve.return_value = Path("ffmpeg")
+    mock_duration.return_value = 1.0
+    tts = tts_type.return_value
+    tts.key_pool.cursor = 1
+
+    def synthesize(_text, output_path, **_kwargs):
+        write_dummy_wav(output_path, duration=1.0, sample_rate=24000, channels=1)
+
+    def convert(cmd, *_args, **_kwargs):
+        write_dummy_wav(Path(cmd[-1]), duration=1.0, sample_rate=48000, channels=2)
+        return MagicMock(stdout="", stderr="", returncode=0)
+
+    tts.synthesize.side_effect = synthesize
+    mock_run.side_effect = convert
+    save_checkpoint(config.data_dir, "job123", "translate", {
+        "segments": [
+            {"index": 0, "start": 0.0, "end": 1.0, "translation": "Xin chao", "duration_budget": 1.0}
+        ]
+    })
+    with database.connection:
+        database.connection.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("tts_backend", json.dumps("gemini"), "now"),
+        )
+        database.connection.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("gemini_api_keys", json.dumps([{"id": "a", "key": "key-a"}]), "now"),
+        )
+
+    pipeline.tts_step("job123", config, database, runner)
+
+    tts.synthesize.assert_called_once()
+    assert json.loads(database.connection.execute(
+        "SELECT value FROM settings WHERE key = 'gemini_key_cursor'"
+    ).fetchone()["value"]) == 1
+
+
 @patch("dv_backend.pipeline.resolve_tool_path")
 @patch("dv_backend.pipeline.run_subprocess_with_cancel")
 @patch("dv_backend.pipeline.get_wav_duration")

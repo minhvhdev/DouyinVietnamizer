@@ -19,6 +19,7 @@ from .checkpoints import save_checkpoint, load_checkpoint
 from .vendor import VendorManifest, VendorResolver
 from .adapters.translation import GoogleFreeTranslator
 from .adapters.tts import EdgeTtsAdapter
+from .adapters.gemini import GeminiKeyPool, GeminiTranslator, GeminiTtsAdapter
 
 
 def yt_dlp_cookie_args(database: Database) -> list[str]:
@@ -37,6 +38,18 @@ def normalize_douyin_url(source_url: str) -> str:
     if parsed.netloc.endswith("douyin.com") and modal_id and modal_id.isdigit():
         return f"https://www.douyin.com/video/{modal_id}"
     return source_url
+
+
+def save_setting(database: Database, key: str, value) -> None:
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with database.connection:
+        database.connection.execute(
+            """
+            INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (key, json.dumps(value), now),
+        )
 
 
 def resolve_tool_path(config: AppConfig, tool_id: str) -> Path:
@@ -769,21 +782,37 @@ def translate_step(job_id: str, config: AppConfig, database: Database, runner) -
     rows = database.connection.execute("SELECT key, value FROM settings").fetchall()
     settings = {r["key"]: json.loads(r["value"]) for r in rows}
     
-    if settings.get("translation_backend", "google_free") != "google_free":
+    translation_backend = settings.get("translation_backend", "google_free")
+    if translation_backend not in {"google_free", "gemini"}:
         raise AppError(
             400,
             ErrorInfo(
                 code="UNSUPPORTED_TRANSLATION_BACKEND",
                 message="The selected translation backend is not available.",
-                action="Choose Google Translate Free in Settings."
+                action="Choose Google Translate Free or Gemini in Settings."
             )
         )
 
-    translated = GoogleFreeTranslator().translate(
-        [segment["text"] for segment in segments],
-        source=settings.get("translation_source_language", "zh-CN"),
-        target=settings.get("translation_target_language", "vi"),
-    )
+    source_lang = settings.get("translation_source_language", "zh-CN")
+    target_lang = settings.get("translation_target_language", "vi")
+    texts = [segment["text"] for segment in segments]
+    if translation_backend == "gemini":
+        key_pool = GeminiKeyPool(
+            settings.get("gemini_api_keys", []),
+            cursor=int(settings.get("gemini_key_cursor", 0)),
+        )
+        translator = GeminiTranslator(
+            key_pool,
+            model=settings.get("gemini_translation_model", "gemini-2.5-flash"),
+        )
+        translated = translator.translate(texts, source=source_lang, target=target_lang)
+        save_setting(database, "gemini_key_cursor", translator.key_pool.cursor)
+    else:
+        translated = GoogleFreeTranslator().translate(
+            texts,
+            source=source_lang,
+            target=target_lang,
+        )
     for segment, translation in zip(segments, translated, strict=True):
         segment["translation"] = translation
         
@@ -889,6 +918,31 @@ def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
             run_subprocess_with_cancel(cmd_conv, job_id, runner)
             if mp3_path.is_file():
                 mp3_path.unlink()
+        elif tts_backend == "gemini":
+            key_pool = GeminiKeyPool(
+                settings.get("gemini_api_keys", []),
+                cursor=int(settings.get("gemini_key_cursor", 0)),
+            )
+            gemini_tts = GeminiTtsAdapter(
+                key_pool,
+                model=settings.get("gemini_tts_model", "gemini-2.5-flash-preview-tts"),
+            )
+            gemini_tts.synthesize(
+                text,
+                raw_tts,
+                voice=settings.get("gemini_tts_voice", "Zephyr"),
+            )
+            save_setting(database, "gemini_key_cursor", gemini_tts.key_pool.cursor)
+
+            cmd_conv = [
+                str(ffmpeg_path), "-y",
+                "-i", str(raw_tts),
+                "-ar", "48000",
+                "-ac", "2",
+                "-c:a", "pcm_s16le",
+                str(final_tts)
+            ]
+            run_subprocess_with_cancel(cmd_conv, job_id, runner)
                 
         else:
             piper_path = resolve_tool_path(config, "piper")
