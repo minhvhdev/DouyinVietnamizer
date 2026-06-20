@@ -39,7 +39,7 @@ class RuntimeSmokeTestService:
         database: Database,
         manifest_path: Path,
         vendor_dir: Path,
-        allow_path_tools: bool = False,
+        allow_path_tools: bool = True,
     ) -> None:
         self.config = config
         self.database = database
@@ -54,7 +54,13 @@ class RuntimeSmokeTestService:
         return RuntimeReport.model_validate_json(row["report_json"]) if row else None
 
     def run(self) -> RuntimeReport:
-        checks = [self._check_storage(), self._check_sqlite()]
+        checks = [
+            self._check_storage(),
+            self._check_sqlite(),
+            self._check_qwen3_asr(),
+            self._check_vieneu(),
+            self._check_espeak(),
+        ]
         try:
             manifest = VendorManifest.load(self.manifest_path)
             checks.append(RuntimeCheck(
@@ -69,7 +75,7 @@ class RuntimeSmokeTestService:
                         id=tool.id, display_name=tool.display_name,
                         status="blocked" if tool.required else "warning", required=tool.required,
                         message=f"{tool.display_name} was not found.",
-                        action="Install the complete bundled runtime and rerun the smoke test.",
+                        action="Install the tool under vendor/ or add it to PATH, then rerun the smoke test.",
                         source="missing",
                     ))
                     continue
@@ -77,14 +83,9 @@ class RuntimeSmokeTestService:
                 status = probe.status
                 if status == "blocked" and not tool.required:
                     status = "warning"
-                if status == "ready" and resolved.source == "path":
-                    status = "warning"
                 checks.append(RuntimeCheck(
                     id=tool.id, display_name=tool.display_name, status=status, required=tool.required,
-                    message=probe.message, action=(
-                        "Bundle this tool before creating a customer build."
-                        if resolved.source == "path" and probe.status == "ready" else probe.action
-                    ),
+                    message=probe.message, action=probe.action,
                     detail=probe.detail, resolved_path=str(resolved.path), source=resolved.source,
                     version=probe.version, duration_ms=probe.duration_ms,
                 ))
@@ -123,11 +124,87 @@ class RuntimeSmokeTestService:
         except Exception as error:
             return RuntimeCheck(id="sqlite", display_name="SQLite", status="blocked", required=True, message="SQLite check failed.", action="Check application data permissions.", detail=str(error))
 
+    def _check_qwen3_asr(self) -> RuntimeCheck:
+        try:
+            from .adapters.asr import cuda_available, DEFAULT_ASR_MODEL
+
+            if not cuda_available():
+                return RuntimeCheck(
+                    id="qwen3_asr",
+                    display_name="Qwen3-ASR GPU",
+                    status="blocked",
+                    required=True,
+                    message="CUDA GPU is not available for Qwen3-ASR.",
+                    action="Install NVIDIA drivers and a CUDA-enabled PyTorch build, then rerun the smoke test.",
+                )
+            return RuntimeCheck(
+                id="qwen3_asr",
+                display_name="Qwen3-ASR GPU",
+                status="ready",
+                required=True,
+                message=f"Qwen3-ASR is configured for GPU inference ({DEFAULT_ASR_MODEL}).",
+                action="No action required.",
+            )
+        except Exception as error:
+            return RuntimeCheck(
+                id="qwen3_asr",
+                display_name="Qwen3-ASR GPU",
+                status="blocked",
+                required=True,
+                message="Qwen3-ASR dependencies are not available.",
+                action="Install qwen-asr, torch, and soundfile in the backend environment.",
+                detail=str(error),
+            )
+
+    def _check_vieneu(self) -> RuntimeCheck:
+        try:
+            import vieneu  # noqa: F401
+
+            return RuntimeCheck(
+                id="vieneu",
+                display_name="VieNeu-TTS",
+                status="ready",
+                required=True,
+                message="VieNeu-TTS Python package is installed.",
+                action="No action required.",
+            )
+        except ImportError as error:
+            return RuntimeCheck(
+                id="vieneu",
+                display_name="VieNeu-TTS",
+                status="blocked",
+                required=True,
+                message="VieNeu-TTS is not installed in the backend environment.",
+                action="Run 'uv sync' in the backend folder, then rerun the smoke test.",
+                detail=str(error),
+            )
+
+    def _check_espeak(self) -> RuntimeCheck:
+        from .hardware import detect_espeak
+
+        if detect_espeak():
+            return RuntimeCheck(
+                id="espeak",
+                display_name="eSpeak NG",
+                status="ready",
+                required=False,
+                message="eSpeak NG phonemizer is available.",
+                action="No action required.",
+            )
+        return RuntimeCheck(
+            id="espeak",
+            display_name="eSpeak NG",
+            status="warning",
+            required=False,
+            message="eSpeak NG was not found (optional for VieNeu-TTS v3).",
+            action="No action required for VieNeu-TTS v3 Turbo.",
+        )
+
     @staticmethod
     def _aggregate(checks: list[RuntimeCheck]) -> str:
         if any(check.required and check.status == "blocked" for check in checks):
             return "blocked"
-        if any(check.status == "warning" or check.source == "path" for check in checks):
+        if any(check.status == "warning" for check in checks):
             return "warning"
         return "ready"
 
@@ -138,6 +215,6 @@ def default_runtime_service(config: AppConfig, database: Database) -> RuntimeSmo
     manifest_path = Path(os.environ.get("DV_VENDOR_MANIFEST", vendor_dir / "manifest.json"))
     return RuntimeSmokeTestService(
         config, database, manifest_path, vendor_dir,
-        allow_path_tools=os.environ.get("DV_ALLOW_PATH_TOOLS") == "1",
+        allow_path_tools=os.environ.get("DV_ALLOW_PATH_TOOLS", "1") == "1",
     )
 

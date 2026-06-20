@@ -1,62 +1,50 @@
-# Douyin Vietnamizer Portable Edition
+# Douyin Vietnamizer
 
-Windows-first desktop application for producing Vietnamese dubbed Douyin videos.
+Windows workflow for producing Vietnamese dubbed Douyin videos.
 
 ## Current status
 
-The default CPU pipeline is implemented end to end:
+The GPU pipeline is implemented end to end:
 
 1. Resolve and download a Douyin video.
-2. Extract audio, detect speech, and transcribe Chinese with whisper.cpp.
-3. Translate to Vietnamese with the free Google Translate adapter.
-4. Synthesize Vietnamese speech with `edge-tts`.
+2. Extract audio, detect speech, and transcribe Chinese with Qwen3-ASR on CUDA.
+3. Translate to Vietnamese with Google Translate or Gemini.
+4. Synthesize Vietnamese speech with VieNeu-TTS v3 Turbo (48 kHz) on GPU.
 5. Repair timing, mix audio, render `dubbed.mp4`, and produce JSON/HTML QC reports.
 
-The real Douyin URL
-`https://www.douyin.com/jingxuan?modal_id=7639476837437699301` has passed all
-twelve steps with 90 translated and dubbed segments.
+## Quick start
 
-## Development
-
-Requirements: Node.js 20+ and Python 3.11+.
-
-Development also needs FFmpeg and yt-dlp on `PATH`, plus whisper.cpp CPU and a
-multilingual model under:
-
-```text
-vendor/whisper.cpp/cpu/whisper-cli.exe
-vendor/whisper.cpp/models/ggml-base.bin
-```
+Requirements: Node.js 20+, pnpm, **Python 3.12** (not 3.13), [uv](https://docs.astral.sh/uv/), NVIDIA GPU (RTX 50-series needs **PyTorch cu128**), FFmpeg and yt-dlp on `PATH` (or under `vendor/`).
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/dev.ps1
+pnpm run setup   # pnpm install + uv sync (installs vieneu 3.x [gpu], torch, torchaudio)
+pnpm run dev     # backend + UI, opens browser automatically
 ```
 
-Run verification:
+Backend dependencies (including VieNeu-TTS) are installed into `backend/.venv` via `uv sync`. Use `cd backend && uv python pin 3.12` if uv picks the wrong Python version.
+
+Press `Ctrl+C` to stop both processes.
+
+Run tests:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/test.ps1
+pnpm test
 ```
 
 Development state defaults to `%LOCALAPPDATA%\DouyinVietnamizer`. Set `DV_DATA_DIR` to override it.
 
-## Vendor runtime
+## Vendor tools
 
-`vendor/manifest.json` declares FFmpeg, yt-dlp, whisper.cpp CPU, optional whisper.cpp Vulkan, and optional Piper. Customer and packaged execution only accept executables bundled under `vendor/`.
+`vendor/manifest.json` declares FFmpeg and yt-dlp.
 
-Development may explicitly allow tools installed on `%PATH%` by setting `DV_ALLOW_PATH_TOOLS=1`; `scripts/dev.ps1` sets this flag for the development backend. PATH-resolved tools always produce a runtime warning so they cannot be mistaken for a complete customer build.
+Tools are resolved from `vendor/` first, then from `%PATH%`. Set `DV_ALLOW_PATH_TOOLS=0` to require files under `vendor/` only.
 
-The Runtime panel shows storage, SQLite, manifest, and executable probe results. A missing required CPU tool blocks new-job creation. Optional Vulkan or Piper failures only produce warnings.
+Missing tools or Qwen3 models? Use the setup wizard in the UI (Môi trường) to download them into `vendor/`.
 
 ## Privacy and limitations
 
-- Douyin URLs and downloaded media are processed locally, but Google Translate
-  receives transcript text and Edge TTS receives translated Vietnamese text.
-- If Gemini is selected for translation or TTS, transcript/translation text is
-  sent to the Gemini API using the Google AI Studio API key pool configured in
-  Settings. Keys are stored locally in SQLite and shown only in masked form in
-  the UI.
+- Douyin URLs and downloaded media are processed locally.
+- Google Translate or Gemini receives transcript text when selected for translation.
+- VieNeu-TTS runs fully offline after models are downloaded.
 - Browser cookies are optional and are only passed to yt-dlp when selected.
 - Douyin may change its site or require authentication, which can break a URL.
-- Qwen3-ASR, Vulkan acceleration, and a final customer installer remain optional
-  release work; the verified baseline is whisper.cpp CPU.

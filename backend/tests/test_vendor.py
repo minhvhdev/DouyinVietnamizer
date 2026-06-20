@@ -41,7 +41,7 @@ def test_manifest_rejects_unsafe_executable_path(tmp_path: Path) -> None:
         VendorManifest.load(write_manifest(tmp_path / "manifest.json", "../ffmpeg.exe"))
 
 
-def test_packaged_resolver_never_uses_path(tmp_path: Path, monkeypatch) -> None:
+def test_resolver_can_disable_path_fallback(tmp_path: Path, monkeypatch) -> None:
     tool = VendorManifest.load(write_manifest(tmp_path / "manifest.json")).tools[0]
     monkeypatch.setattr("shutil.which", lambda _name: "C:/tools/ffmpeg.exe")
 
@@ -51,11 +51,11 @@ def test_packaged_resolver_never_uses_path(tmp_path: Path, monkeypatch) -> None:
     assert resolved.source == "missing"
 
 
-def test_development_path_fallback_requires_opt_in(tmp_path: Path, monkeypatch) -> None:
+def test_development_path_fallback_is_default(tmp_path: Path, monkeypatch) -> None:
     tool = VendorManifest.load(write_manifest(tmp_path / "manifest.json")).tools[0]
     monkeypatch.setattr("shutil.which", lambda _name: "C:/tools/ffmpeg.exe")
 
-    resolved = VendorResolver(tmp_path, allow_path_tools=True).resolve(tool)
+    resolved = VendorResolver(tmp_path).resolve(tool)
 
     assert resolved.path == Path("C:/tools/ffmpeg.exe")
     assert resolved.source == "path"

@@ -1,4 +1,5 @@
 import json
+import logging
 import html
 import os
 import re
@@ -18,8 +19,13 @@ from .models import ErrorInfo
 from .checkpoints import save_checkpoint, load_checkpoint
 from .vendor import VendorManifest, VendorResolver
 from .adapters.translation import GoogleFreeTranslator
-from .adapters.tts import EdgeTtsAdapter
-from .adapters.gemini import GeminiKeyPool, GeminiTranslator, GeminiTtsAdapter
+from .adapters.tts import VieNeuTtsAdapter
+from .adapters.asr import reset_model_cache, transcribe_audio
+from .adapters.separation import MIX_MODE_SEPARATE, separate_vocals
+from .adapters.subtitles import ffmpeg_subtitles_filter, probe_video_dimensions, write_ass_file
+from .adapters.gemini import GeminiKeyPool, GeminiTranslator
+
+logger = logging.getLogger(__name__)
 
 
 def yt_dlp_cookie_args(database: Database) -> list[str]:
@@ -67,7 +73,7 @@ def resolve_tool_path(config: AppConfig, tool_id: str) -> Path:
                 action="Verify vendor/manifest.json."
             )
         )
-    allow_path_tools = os.environ.get("DV_ALLOW_PATH_TOOLS") == "1"
+    allow_path_tools = os.environ.get("DV_ALLOW_PATH_TOOLS", "1") == "1"
     resolver = VendorResolver(vendor_dir, allow_path_tools=allow_path_tools)
     resolved = resolver.resolve(tool)
     if resolved.path is None:
@@ -546,126 +552,40 @@ def asr_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
                 action="Resume extract_audio step."
             )
         )
-        
-    rows = database.connection.execute("SELECT key, value FROM settings").fetchall()
-    settings = {r["key"]: json.loads(r["value"]) for r in rows}
-    
-    backend = settings.get("asr_backend", settings.get("whisper_backend", "whisper_cpu"))
-    model_path = settings.get("whisper_model_path", "")
-    if not model_path:
-        project_root = Path(__file__).resolve().parents[2]
-        vendor_dir = Path(os.environ.get("DV_VENDOR_DIR", project_root / "vendor"))
-        model_path = str(vendor_dir / "whisper.cpp" / "models" / "ggml-base.bin")
 
-    if not model_path or not Path(model_path).is_file():
+    if runner and runner.is_cancelled(job_id):
         raise AppError(
-            400,
+            409,
             ErrorInfo(
-                code="MISSING_ASR_MODEL",
-                message="Whisper model file not found.",
-                action="Go to Settings and select a valid whisper .bin model file."
+                code="JOB_CANCELLED",
+                message="The job was cancelled by the user.",
+                action="Create a new job if you still want to process this video."
             )
         )
         
-    def run_qwen3() -> dict:
-        exe_path = resolve_tool_path(config, "qwen3_asr")
-        json_out = audio_16k.with_suffix(".wav.json")
-        if json_out.is_file():
-            json_out.unlink()
-            
-        cmd = [
-            str(exe_path),
-            "-i", str(audio_16k),
-            "-o", str(json_out)
-        ]
-        
-        run_subprocess_with_cancel(cmd, job_id, runner)
-        
-        if not json_out.is_file():
-            raise RuntimeError("Qwen3-ASR did not generate JSON output.")
-            
-        with open(json_out, "r", encoding="utf-8") as f:
-            return json.load(f)
-            
-    def run_whisper(tool_id: str) -> dict:
-        exe_path = resolve_tool_path(config, tool_id)
-        json_out = audio_16k.with_suffix(".wav.json")
-        if json_out.is_file():
-            json_out.unlink()
-            
-        cmd = [
-            str(exe_path),
-            "-m", str(model_path),
-            "-f", str(audio_16k),
-            "-l", "zh",
-            "-oj"
-        ]
-        
-        run_subprocess_with_cancel(cmd, job_id, runner)
-        
-        if not json_out.is_file():
-            raise RuntimeError("Whisper did not generate JSON output.")
-            
-        with open(json_out, "r", encoding="utf-8") as f:
-            return json.load(f)
-            
-    segments = []
-    res_data = None
-    if backend == "qwen3_asr":
-        try:
-            res_data = run_qwen3()
-        except Exception as e:
-            now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            database.connection.execute(
-                "INSERT INTO events (level, code, message, job_id, created_at) VALUES ('warning', 'QWEN3_ASR_FAILED', ?, ?, ?)",
-                (f"Qwen3-ASR failed: {e}. Retrying on CPU ASR.", job_id, now)
-            )
-            backend = "whisper_cpu"
-            
-    if res_data is None:
-        if backend == "whisper_vulkan":
-            try:
-                res_data = run_whisper("whisper_vulkan")
-            except Exception as e:
-                now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                database.connection.execute(
-                    "INSERT INTO events (level, code, message, job_id, created_at) VALUES ('warning', 'ASR_VULKAN_FAILED', ?, ?, ?)",
-                    (f"Vulkan ASR failed: {e}. Retrying on CPU ASR.", job_id, now)
-                )
-                res_data = run_whisper("whisper_cpu")
-        else:
-            res_data = run_whisper("whisper_cpu")
-        
-    raw_segments = []
-    if "result" in res_data and "transcription" in res_data["result"]:
-        raw_segments = res_data["result"]["transcription"]
-    elif "transcription" in res_data:
-        raw_segments = res_data["transcription"]
-    elif "segments" in res_data:
-        raw_segments = res_data["segments"]
-        
-    for raw in raw_segments:
-        if "offsets" in raw:
-            offsets = raw.get("offsets", {})
-            start = offsets.get("from", 0) / 1000.0
-            end = offsets.get("to", 0) / 1000.0
-        else:
-            start = float(raw.get("start", 0))
-            end = float(raw.get("end", 0))
-        segments.append({
-            "start": round(start, 2),
-            "end": round(end, 2),
-            "text": raw.get("text", "").strip()
-        })
+    rows = database.connection.execute("SELECT key, value FROM settings").fetchall()
+    settings = {r["key"]: json.loads(r["value"]) for r in rows}
 
-    segments = [segment for segment in segments if segment["text"]]
+    project_root = Path(__file__).resolve().parents[2]
+    vendor_dir = Path(os.environ.get("DV_VENDOR_DIR", project_root / "vendor"))
+
+    segments = transcribe_audio(
+        audio_16k,
+        vendor_dir=vendor_dir,
+        asr_model=str(settings.get("qwen3_asr_model", "") or ""),
+        aligner_model=str(settings.get("qwen3_aligner_model", "") or ""),
+        device=str(settings.get("qwen3_device", "cuda:0") or "cuda:0"),
+        language="Chinese",
+        speaker_diarization=bool(settings.get("speaker_diarization", False)),
+    )
+
     if not segments:
         raise AppError(
             422,
             ErrorInfo(
                 code="EMPTY_ASR_TRANSCRIPTION",
                 message="ASR completed without detecting any spoken text.",
-                action="Verify the source audio and ASR model, then resume the ASR step."
+                action="Verify the source audio and Qwen3-ASR model, then resume the ASR step."
             )
         )
         
@@ -705,7 +625,8 @@ def normalize_segments_step(job_id: str, config: AppConfig, database: Database, 
         segments.append({
             "start": float(seg["start"]),
             "end": float(seg["end"]),
-            "text": text
+            "text": text,
+            **({"speaker_id": str(seg["speaker_id"])} if seg.get("speaker_id") is not None else {}),
         })
         
     segments.sort(key=lambda x: x["start"])
@@ -741,7 +662,8 @@ def normalize_segments_step(job_id: str, config: AppConfig, database: Database, 
             "original_duration": round(orig_dur, 2),
             "duration_budget": round(budget, 2),
             "translation": None,
-            "tts_duration": None
+            "tts_duration": None,
+            **({"speaker_id": curr["speaker_id"]} if curr.get("speaker_id") is not None else {}),
         })
         
     checkpoint_data = {
@@ -753,6 +675,70 @@ def normalize_segments_step(job_id: str, config: AppConfig, database: Database, 
     }
     save_checkpoint(config.data_dir, job_id, "normalize_segments", checkpoint_data)
     return checkpoint_data
+
+
+def _translate_texts(
+    settings: dict,
+    database: Database,
+    texts: list[str],
+    *,
+    source_lang: str,
+    target_lang: str,
+) -> list[str]:
+    if not texts:
+        return []
+
+    translation_backend = settings.get("translation_backend", "google_free")
+    if translation_backend == "gemini":
+        key_pool = GeminiKeyPool(
+            settings.get("gemini_api_keys", []),
+            cursor=int(settings.get("gemini_key_cursor", 0)),
+        )
+        translator = GeminiTranslator(
+            key_pool,
+            model=settings.get("gemini_translation_model", "gemini-2.5-flash"),
+        )
+        translated = translator.translate(texts, source=source_lang, target=target_lang)
+        save_setting(database, "gemini_key_cursor", translator.key_pool.cursor)
+        return translated
+
+    return GoogleFreeTranslator().translate(
+        texts,
+        source=source_lang,
+        target=target_lang,
+    )
+
+
+def _translate_job_title(
+    job_id: str,
+    database: Database,
+    settings: dict,
+    *,
+    source_lang: str,
+    target_lang: str,
+) -> str | None:
+    row = database.connection.execute(
+        "SELECT title FROM jobs WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    original_title = (row["title"] or "").strip() if row else ""
+    if not original_title:
+        return None
+
+    title_vi = _translate_texts(
+        settings,
+        database,
+        [original_title],
+        source_lang=source_lang,
+        target_lang=target_lang,
+    )[0]
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with database.connection:
+        database.connection.execute(
+            "UPDATE jobs SET title_vi = ?, updated_at = ? WHERE id = ?",
+            (title_vi, now, job_id),
+        )
+    return title_vi
 
 
 def translate_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
@@ -768,20 +754,9 @@ def translate_step(job_id: str, config: AppConfig, database: Database, runner) -
         )
         
     segments = norm_cp.get("segments", [])
-    if not segments:
-        checkpoint_data = {
-            "schema_version": 1,
-            "job_id": job_id,
-            "step_name": "translate",
-            "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "segments": []
-        }
-        save_checkpoint(config.data_dir, job_id, "translate", checkpoint_data)
-        return checkpoint_data
-        
     rows = database.connection.execute("SELECT key, value FROM settings").fetchall()
     settings = {r["key"]: json.loads(r["value"]) for r in rows}
-    
+
     translation_backend = settings.get("translation_backend", "google_free")
     if translation_backend not in {"google_free", "gemini"}:
         raise AppError(
@@ -795,36 +770,86 @@ def translate_step(job_id: str, config: AppConfig, database: Database, runner) -
 
     source_lang = settings.get("translation_source_language", "zh-CN")
     target_lang = settings.get("translation_target_language", "vi")
+    title_vi = _translate_job_title(
+        job_id,
+        database,
+        settings,
+        source_lang=source_lang,
+        target_lang=target_lang,
+    )
+
+    if not segments:
+        checkpoint_data = {
+            "schema_version": 1,
+            "job_id": job_id,
+            "step_name": "translate",
+            "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "title_vi": title_vi,
+            "segments": []
+        }
+        save_checkpoint(config.data_dir, job_id, "translate", checkpoint_data)
+        return checkpoint_data
+
     texts = [segment["text"] for segment in segments]
-    if translation_backend == "gemini":
-        key_pool = GeminiKeyPool(
-            settings.get("gemini_api_keys", []),
-            cursor=int(settings.get("gemini_key_cursor", 0)),
-        )
-        translator = GeminiTranslator(
-            key_pool,
-            model=settings.get("gemini_translation_model", "gemini-2.5-flash"),
-        )
-        translated = translator.translate(texts, source=source_lang, target=target_lang)
-        save_setting(database, "gemini_key_cursor", translator.key_pool.cursor)
-    else:
-        translated = GoogleFreeTranslator().translate(
-            texts,
-            source=source_lang,
-            target=target_lang,
-        )
+    translated = _translate_texts(
+        settings,
+        database,
+        texts,
+        source_lang=source_lang,
+        target_lang=target_lang,
+    )
     for segment, translation in zip(segments, translated, strict=True):
         segment["translation"] = translation
-        
+
     checkpoint_data = {
         "schema_version": 1,
         "job_id": job_id,
         "step_name": "translate",
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "title_vi": title_vi,
         "segments": segments
     }
     save_checkpoint(config.data_dir, job_id, "translate", checkpoint_data)
     return checkpoint_data
+
+
+def _vieneu_tts_adapter(settings: dict) -> VieNeuTtsAdapter:
+    return VieNeuTtsAdapter(
+        device=str(settings.get("vieneu_device", "cuda") or "cuda"),
+    )
+
+
+def _resolve_segment_voice(settings: dict, segment: dict) -> str:
+    default_voice = str(settings.get("vieneu_voice", "Xuân Vĩnh") or "Xuân Vĩnh")
+    speaker_id = segment.get("speaker_id")
+    if speaker_id is None:
+        return default_voice
+    speaker_voices = settings.get("speaker_voices") or {}
+    if not isinstance(speaker_voices, dict):
+        return default_voice
+    mapped = speaker_voices.get(str(speaker_id))
+    if mapped is None:
+        return default_voice
+    voice = str(mapped).strip()
+    return voice or default_voice
+
+
+def _convert_tts_to_final_wav(
+    ffmpeg_path: Path,
+    source_path: Path,
+    final_tts: Path,
+    job_id: str,
+    runner,
+) -> None:
+    cmd_conv = [
+        str(ffmpeg_path), "-y",
+        "-i", str(source_path),
+        "-ar", "48000",
+        "-ac", "2",
+        "-c:a", "pcm_s16le",
+        str(final_tts),
+    ]
+    run_subprocess_with_cancel(cmd_conv, job_id, runner)
 
 
 def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
@@ -847,9 +872,9 @@ def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
     
     rows = database.connection.execute("SELECT key, value FROM settings").fetchall()
     settings = {r["key"]: json.loads(r["value"]) for r in rows}
-    
-    tts_backend = settings.get("tts_backend", "edge")
     ffmpeg_path = resolve_tool_path(config, "ffmpeg")
+    reset_model_cache()
+    vieneu_tts = _vieneu_tts_adapter(settings)
     
     for s in segments:
         idx = s["index"]
@@ -862,159 +887,15 @@ def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
         final_tts = tts_dir / f"tts_{idx}.wav"
         if final_tts.is_file():
             final_tts.unlink()
-            
-        if tts_backend == "edge":
-            mp3_path = tts_dir / f"tts_{idx}.mp3"
-            if mp3_path.is_file():
-                mp3_path.unlink()
-            EdgeTtsAdapter().synthesize(
-                text,
-                mp3_path,
-                voice=settings.get("edge_tts_voice", "vi-VN-HoaiMyNeural"),
-                rate=settings.get("edge_tts_rate", "+0%"),
-                pitch=settings.get("edge_tts_pitch", "+0Hz"),
-                volume=settings.get("edge_tts_volume", "+0%"),
-            )
 
-            cmd_conv = [
-                str(ffmpeg_path), "-y",
-                "-i", str(mp3_path),
-                "-ar", "48000",
-                "-ac", "2",
-                "-c:a", "pcm_s16le",
-                str(final_tts)
-            ]
-            run_subprocess_with_cancel(cmd_conv, job_id, runner)
-            if mp3_path.is_file():
-                mp3_path.unlink()
-        elif tts_backend == "api":
-            api_base = settings.get("tts_api_base", "https://api.openai.com/v1")
-            api_key = settings.get("tts_api_key", "")
-            voice = settings.get("tts_voice", "alloy")
-            
-            if not api_key:
-                raise AppError(
-                    400,
-                    ErrorInfo(
-                        code="MISSING_TTS_API_KEY",
-                        message="TTS API key is missing.",
-                        action="Go to Settings and enter your TTS/OpenAI API key."
-                    )
-                )
-            
-            mp3_path = tts_dir / f"tts_{idx}.mp3"
-            if mp3_path.is_file():
-                mp3_path.unlink()
-            call_openai_tts(api_base, api_key, "tts-1", voice, text, mp3_path)
-            
-            cmd_conv = [
-                str(ffmpeg_path), "-y",
-                "-i", str(mp3_path),
-                "-ar", "48000",
-                "-ac", "2",
-                "-c:a", "pcm_s16le",
-                str(final_tts)
-            ]
-            run_subprocess_with_cancel(cmd_conv, job_id, runner)
-            if mp3_path.is_file():
-                mp3_path.unlink()
-        elif tts_backend == "gemini":
-            key_pool = GeminiKeyPool(
-                settings.get("gemini_api_keys", []),
-                cursor=int(settings.get("gemini_key_cursor", 0)),
-            )
-            gemini_tts = GeminiTtsAdapter(
-                key_pool,
-                model=settings.get("gemini_tts_model", "gemini-2.5-flash-preview-tts"),
-            )
-            gemini_tts.synthesize(
-                text,
-                raw_tts,
-                voice=settings.get("gemini_tts_voice", "Zephyr"),
-            )
-            save_setting(database, "gemini_key_cursor", gemini_tts.key_pool.cursor)
-
-            cmd_conv = [
-                str(ffmpeg_path), "-y",
-                "-i", str(raw_tts),
-                "-ar", "48000",
-                "-ac", "2",
-                "-c:a", "pcm_s16le",
-                str(final_tts)
-            ]
-            run_subprocess_with_cancel(cmd_conv, job_id, runner)
-                
-        else:
-            piper_path = resolve_tool_path(config, "piper")
-            piper_model = settings.get("piper_model_path", "")
-            
-            if not piper_model or not Path(piper_model).is_file():
-                raise AppError(
-                    400,
-                    ErrorInfo(
-                        code="MISSING_PIPER_MODEL",
-                        message="Piper ONNX model not found.",
-                        action="Go to Settings and select a valid Piper .onnx model."
-                    )
-                )
-                
-            cmd = [
-                str(piper_path),
-                "--model", str(piper_model),
-                "--output_file", str(raw_tts)
-            ]
-            
-            proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            
-            if runner:
-                runner.register_process(job_id, proc)
-                
-            try:
-                stdout, stderr = proc.communicate(input=text, timeout=30)
-                if proc.returncode != 0:
-                    raise AppError(
-                        500,
-                        ErrorInfo(
-                            code="PIPER_FAILED",
-                            message="Piper process failed to generate speech.",
-                            action="Check that Piper model matches configuration.",
-                            detail=stderr
-                        )
-                    )
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.communicate()
-                raise AppError(
-                    500,
-                    ErrorInfo(
-                        code="PIPER_TIMEOUT",
-                        message="Piper TTS speech generation timed out.",
-                        action="Choose a shorter segment or check system resources."
-                    )
-                )
-            finally:
-                if runner:
-                    runner.unregister_process(job_id)
-                    
-            cmd_conv = [
-                str(ffmpeg_path), "-y",
-                "-i", str(raw_tts),
-                "-ar", "48000",
-                "-ac", "2",
-                "-c:a", "pcm_s16le",
-                str(final_tts)
-            ]
-            run_subprocess_with_cancel(cmd_conv, job_id, runner)
-            if raw_tts.is_file():
-                raw_tts.unlink()
+        vieneu_tts.synthesize(
+            text,
+            raw_tts,
+            voice=_resolve_segment_voice(settings, s),
+        )
+        _convert_tts_to_final_wav(ffmpeg_path, raw_tts, final_tts, job_id, runner)
+        if raw_tts.is_file():
+            raw_tts.unlink()
                 
         s["tts_duration"] = round(get_wav_duration(final_tts), 2)
         
@@ -1092,50 +973,17 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                 temp_wav = tts_dir / f"tts_temp_{idx}.wav"
                 if temp_wav.is_file():
                     temp_wav.unlink()
-                    
-                tts_backend = settings.get("tts_backend", "api")
-                if tts_backend == "api":
-                    voice = settings.get("tts_voice", "alloy")
-                    mp3_path = tts_dir / f"tts_temp_{idx}.mp3"
-                    call_openai_tts(api_base, api_key, "tts-1", voice, new_translation, mp3_path)
-                    
-                    cmd_conv = [
-                        str(ffmpeg_path), "-y",
-                        "-i", str(mp3_path),
-                        "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le",
-                        str(temp_wav)
-                    ]
-                    run_subprocess_with_cancel(cmd_conv, job_id, runner)
-                    if mp3_path.is_file():
-                        mp3_path.unlink()
-                else:
-                    piper_path = resolve_tool_path(config, "piper")
-                    piper_model = settings.get("piper_model_path", "")
-                    
-                    raw_temp = tts_dir / f"tts_temp_raw_{idx}.wav"
-                    cmd = [str(piper_path), "--model", str(piper_model), "--output_file", str(raw_temp)]
-                    
-                    proc = subprocess.Popen(
-                        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                        text=True, encoding="utf-8", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                    )
-                    if runner:
-                        runner.register_process(job_id, proc)
-                    try:
-                        proc.communicate(input=new_translation, timeout=30)
-                    finally:
-                        if runner:
-                            runner.unregister_process(job_id)
-                            
-                    cmd_conv = [
-                        str(ffmpeg_path), "-y",
-                        "-i", str(raw_temp),
-                        "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le",
-                        str(temp_wav)
-                    ]
-                    run_subprocess_with_cancel(cmd_conv, job_id, runner)
-                    if raw_temp.is_file():
-                        raw_temp.unlink()
+
+                raw_temp = tts_dir / f"tts_temp_raw_{idx}.wav"
+                vieneu_tts = _vieneu_tts_adapter(settings)
+                vieneu_tts.synthesize(
+                    new_translation,
+                    raw_temp,
+                    voice=_resolve_segment_voice(settings, s),
+                )
+                _convert_tts_to_final_wav(ffmpeg_path, raw_temp, temp_wav, job_id, runner)
+                if raw_temp.is_file():
+                    raw_temp.unlink()
                         
                 new_dur = get_wav_duration(temp_wav)
                 if new_dur <= budget + 0.1:
@@ -1237,18 +1085,46 @@ def mix_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
     shutil.copyfile(narration_wav, vietnamese_narration)
         
     ffmpeg_path = resolve_tool_path(config, "ffmpeg")
-    
+    rows = database.connection.execute("SELECT key, value FROM settings").fetchall()
+    settings = {r["key"]: json.loads(r["value"]) for r in rows}
+    mix_mode = str(settings.get("mix_mode", "duck") or "duck")
+
+    vocals_wav = artifacts_dir / "vocals.wav"
+    bgm_wav = artifacts_dir / "bgm.wav"
+    background_wav = original_48k
+
+    if mix_mode == MIX_MODE_SEPARATE:
+        reset_model_cache()
+        if not bgm_wav.is_file() or not vocals_wav.is_file():
+            separate_vocals(
+            original_48k,
+            vocals_out=vocals_wav,
+            bgm_out=bgm_wav,
+            ffmpeg_path=ffmpeg_path,
+            device=str(settings.get("vieneu_device", "cuda") or "cuda"),
+            job_id=job_id,
+            runner=runner,
+        )
+        background_wav = bgm_wav
+        filter_graph = (
+            "[0:a]volume=1.0[bg];[1:a]volume=1.3[fg];"
+            "[bg][fg]amix=inputs=2:duration=first:dropout_transition=0[mixed]"
+        )
+    else:
+        filter_graph = (
+            "[0:a]volume=0.35[bg];[1:a]volume=1.5[fg];"
+            "[fg]asplit=2[fg1][fg2];"
+            "[bg][fg1]sidechaincompress=threshold=0.02:ratio=8:"
+            "attack=20:release=400[ducked];"
+            "[ducked][fg2]amix=inputs=2:duration=first:dropout_transition=0[mixed]"
+        )
+
     cmd_mix = [
         str(ffmpeg_path), "-y",
-        "-i", str(original_48k),
+        "-i", str(background_wav),
         "-i", str(narration_wav),
         "-filter_complex",
-        (
-            "[0:a]volume=0.35[bg];[1:a]volume=1.5[fg];"
-            "[bg][fg]sidechaincompress=threshold=0.02:ratio=8:"
-            "attack=20:release=400[ducked];"
-            "[ducked][fg]amix=inputs=2:duration=first:dropout_transition=0[mixed]"
-        ),
+        filter_graph,
         "-map", "[mixed]",
         str(mixed_wav)
     ]
@@ -1271,6 +1147,7 @@ def mix_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
         "job_id": job_id,
         "step_name": "mix",
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "mix_mode": mix_mode,
         "narration_wav_path": str(narration_wav),
         "mixed_wav_path": str(mixed_wav),
         "vietnamese_narration_path": str(vietnamese_narration)
@@ -1282,6 +1159,7 @@ def mix_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
 def render_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
     mix_cp = load_checkpoint(config.data_dir, job_id, "mix")
     download_cp = load_checkpoint(config.data_dir, job_id, "download")
+    repair_cp = load_checkpoint(config.data_dir, job_id, "duration_repair")
     
     if not mix_cp or not download_cp:
         raise AppError(
@@ -1303,8 +1181,29 @@ def render_step(job_id: str, config: AppConfig, database: Database, runner) -> d
     output_dir = job_dir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
     final_mp4 = output_dir / "dubbed.mp4"
+    ass_path = output_dir / "subtitles.ass"
     
     ffmpeg_path = resolve_tool_path(config, "ffmpeg")
+    rows = database.connection.execute("SELECT key, value FROM settings").fetchall()
+    settings = {r["key"]: json.loads(r["value"]) for r in rows}
+
+    video_filters: list[str] = []
+    if settings.get("subtitles_enabled", True) and repair_cp:
+        segments = [
+            segment
+            for segment in repair_cp.get("segments", [])
+            if str(segment.get("translation") or "").strip()
+        ]
+        if segments:
+            width, height = probe_video_dimensions(ffmpeg_path, original_mp4)
+            write_ass_file(
+                ass_path,
+                segments,
+                settings,
+                play_res_x=width,
+                play_res_y=height,
+            )
+            video_filters.append(ffmpeg_subtitles_filter(ass_path))
     
     cmd_norm = [
         str(ffmpeg_path), "-y",
@@ -1319,14 +1218,21 @@ def render_step(job_id: str, config: AppConfig, database: Database, runner) -> d
         str(ffmpeg_path), "-y",
         "-i", str(original_mp4),
         "-i", str(normalized_wav),
+    ]
+    if video_filters:
+        cmd_render.extend(["-vf", ",".join(video_filters)])
+    cmd_render.extend([
         "-map", "0:v:0",
         "-map", "1:a:0",
-        "-c:v", "copy",
+        "-c:v", "libx264",
+        "-preset", "superfast",
+        "-crf", "22",
+        "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         "-b:a", "192k",
         "-shortest",
-        str(final_mp4)
-    ]
+        str(final_mp4),
+    ])
     
     try:
         run_subprocess_with_cancel(cmd_norm, job_id, runner)
@@ -1347,7 +1253,9 @@ def render_step(job_id: str, config: AppConfig, database: Database, runner) -> d
         "job_id": job_id,
         "step_name": "render",
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "output_path": str(final_mp4)
+        "output_path": str(final_mp4),
+        "subtitles_enabled": bool(settings.get("subtitles_enabled", True)),
+        "subtitles_path": str(ass_path) if ass_path.is_file() else None,
     }
     save_checkpoint(config.data_dir, job_id, "render", checkpoint_data)
     return checkpoint_data

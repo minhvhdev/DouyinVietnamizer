@@ -40,6 +40,21 @@ def test_gemini_translator_rotates_api_keys_after_failure() -> None:
     assert pool.cursor == 0
 
 
+def test_gemini_translator_reports_model_unavailable() -> None:
+    pool = GeminiKeyPool([{"id": "a", "key": "key-a"}])
+    adapter = GeminiTranslator(
+        pool,
+        request=lambda *_args: (_ for _ in ()).throw(
+            RuntimeError('Gemini HTTP 503: {"error":{"status":"UNAVAILABLE"}}')
+        ),
+    )
+
+    with pytest.raises(AppError) as error:
+        adapter.translate(["你好"], source="zh-CN", target="vi")
+
+    assert error.value.info.code == "GEMINI_MODEL_UNAVAILABLE"
+
+
 def test_gemini_translator_reports_all_keys_failed() -> None:
     pool = GeminiKeyPool([{"id": "a", "key": "key-a"}])
     adapter = GeminiTranslator(pool, request=lambda *_args: (_ for _ in ()).throw(RuntimeError("429")))
@@ -81,3 +96,19 @@ def test_gemini_tts_writes_wave_from_inline_pcm(tmp_path: Path) -> None:
         assert wav.getnchannels() == 1
         assert wav.getsampwidth() == 2
         assert wav.readframes(wav.getnframes()) == pcm
+
+
+def test_gemini_tts_reports_quota_exhaustion() -> None:
+    pool = GeminiKeyPool([{"id": "a", "key": "key-a"}])
+    adapter = GeminiTtsAdapter(
+        pool,
+        request=lambda *_args: (_ for _ in ()).throw(
+            RuntimeError("Gemini HTTP 429: RESOURCE_EXHAUSTED quota exceeded")
+        ),
+    )
+
+    with pytest.raises(AppError) as error:
+        adapter.synthesize("Xin chao", Path("unused.wav"), voice="Zephyr")
+
+    assert error.value.info.code == "GEMINI_TTS_QUOTA_EXHAUSTED"
+    assert error.value.info.retryable is True

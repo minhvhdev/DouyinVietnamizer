@@ -12,4 +12,9 @@ def test_migration_creates_required_tables(tmp_path: Path) -> None:
     ).fetchall()
 
     assert {"jobs", "job_steps", "settings", "events", "runtime_reports"} <= {row["name"] for row in rows}
+    job_columns = {
+        row["name"]
+        for row in database.connection.execute("PRAGMA table_info(jobs)").fetchall()
+    }
+    assert "title_vi" in job_columns
 

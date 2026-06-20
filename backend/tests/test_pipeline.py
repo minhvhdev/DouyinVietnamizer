@@ -34,17 +34,17 @@ def test_env(tmp_path: Path):
         )
         database.connection.execute(
             "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
-            ("whisper_model_path", json.dumps(str(tmp_path / "ggml-tiny.bin")), "now")
+            ("qwen3_asr_model", json.dumps("Qwen/Qwen3-ASR-1.7B"), "now")
         )
         database.connection.execute(
             "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
-            ("piper_model_path", json.dumps(str(tmp_path / "voice.onnx")), "now")
+            ("qwen3_aligner_model", json.dumps("Qwen/Qwen3-ForcedAligner-0.6B"), "now")
+        )
+        database.connection.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("qwen3_device", json.dumps("cuda:0"), "now")
         )
         
-    # Create files to satisfy path checks
-    (tmp_path / "ggml-tiny.bin").write_text("dummy model")
-    (tmp_path / "voice.onnx").write_text("dummy voice")
-    
     job_service = JobService(database, tmp_path)
     runner = JobRunner(config, database)
     return config, database, job_service, runner
@@ -88,13 +88,9 @@ def test_normalize_douyin_jingxuan_modal_url() -> None:
     ) == "https://www.douyin.com/video/7639476837437699301"
 
 
-@patch("dv_backend.pipeline.resolve_tool_path")
-@patch("dv_backend.pipeline.run_subprocess_with_cancel")
-def test_asr_parses_current_whisper_json_and_uses_chinese(
-    mock_run, mock_resolve, test_env
-):
+@patch("dv_backend.pipeline.transcribe_audio")
+def test_asr_uses_qwen3_gpu_transcription(mock_transcribe, test_env):
     config, database, job_service, runner = test_env
-    mock_resolve.return_value = Path("whisper-cli")
     job = job_service.create("https://www.douyin.com/video/douyin123")
     job_dir = config.data_dir / "jobs" / job.id
     artifacts_dir = job_dir / "artifacts"
@@ -102,50 +98,27 @@ def test_asr_parses_current_whisper_json_and_uses_chinese(
     audio_path = artifacts_dir / "audio_16k.wav"
     audio_path.write_bytes(b"wav")
 
-    def write_whisper_json(*_args, **_kwargs):
-        audio_path.with_suffix(".wav.json").write_text(
-            json.dumps(
-                {
-                    "transcription": [
-                        {
-                            "offsets": {"from": 250, "to": 1480},
-                            "text": " 你好 ",
-                        }
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
-        return MagicMock(returncode=0, stdout="", stderr="")
-
-    mock_run.side_effect = write_whisper_json
+    mock_transcribe.return_value = [{"start": 0.25, "end": 1.48, "text": "你好"}]
 
     result = pipeline.asr_step(job.id, config, database, runner)
 
     assert result["segments"] == [{"start": 0.25, "end": 1.48, "text": "你好"}]
-    command = mock_run.call_args.args[0]
-    assert command[-3:] == ["-l", "zh", "-oj"]
+    mock_transcribe.assert_called_once()
+    kwargs = mock_transcribe.call_args.kwargs
+    assert kwargs["device"] == "cuda:0"
+    assert kwargs["language"] == "Chinese"
 
 
-@patch("dv_backend.pipeline.resolve_tool_path")
-@patch("dv_backend.pipeline.run_subprocess_with_cancel")
-def test_asr_rejects_empty_transcription(mock_run, mock_resolve, test_env):
+@patch("dv_backend.pipeline.transcribe_audio")
+def test_asr_rejects_empty_transcription(mock_transcribe, test_env):
     config, database, job_service, runner = test_env
-    mock_resolve.return_value = Path("whisper-cli")
     job = job_service.create("https://www.douyin.com/video/douyin123")
     artifacts_dir = config.data_dir / "jobs" / job.id / "artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     audio_path = artifacts_dir / "audio_16k.wav"
     audio_path.write_bytes(b"wav")
 
-    def write_empty_whisper_json(*_args, **_kwargs):
-        audio_path.with_suffix(".wav.json").write_text(
-            json.dumps({"transcription": []}),
-            encoding="utf-8",
-        )
-        return MagicMock(returncode=0, stdout="", stderr="")
-
-    mock_run.side_effect = write_empty_whisper_json
+    mock_transcribe.return_value = []
 
     with pytest.raises(AppError) as error:
         pipeline.asr_step(job.id, config, database, runner)
@@ -291,6 +264,13 @@ def test_normalize_segments_resolves_overlaps(test_env):
 @patch("dv_backend.pipeline.GoogleFreeTranslator")
 def test_translate_step(translator_type, mock_chat, test_env):
     config, database, job_service, runner = test_env
+
+    with database.connection:
+        database.connection.execute(
+            "INSERT INTO jobs (id, source_url, title, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'running', ?, ?)",
+            ("job123", "https://www.douyin.com/video/1", "中文标题", "now", "now"),
+        )
     
     save_checkpoint(config.data_dir, "job123", "normalize_segments", {
         "segments": [
@@ -311,18 +291,24 @@ def test_translate_step(translator_type, mock_chat, test_env):
     }
     
     content = mock_chat.return_value["choices"][0]["message"]["content"]
-    translator_type.return_value.translate.return_value = [
-        json.loads(content)["translations"][0]["translation"]
+    translator_type.return_value.translate.side_effect = [
+        ["Tiêu đề tiếng Việt"],
+        [json.loads(content)["translations"][0]["translation"]],
     ]
     res = pipeline.translate_step("job123", config, database, runner)
     assert res["segments"][0]["translation"] == "Xin chào"
+    assert res["title_vi"] == "Tiêu đề tiếng Việt"
+    row = database.connection.execute(
+        "SELECT title_vi FROM jobs WHERE id = 'job123'"
+    ).fetchone()
+    assert row["title_vi"] == "Tiêu đề tiếng Việt"
 
 
 @patch("dv_backend.pipeline.GeminiTranslator")
 def test_translate_step_uses_gemini_pool_and_persists_cursor(translator_type, test_env):
     config, database, _job_service, runner = test_env
     translator = translator_type.return_value
-    translator.translate.return_value = ["Xin chao"]
+    translator.translate.side_effect = [["Tieu de"], ["Xin chao"]]
     translator.key_pool.cursor = 1
     save_checkpoint(config.data_dir, "job123", "normalize_segments", {
         "segments": [
@@ -330,6 +316,11 @@ def test_translate_step_uses_gemini_pool_and_persists_cursor(translator_type, te
         ]
     })
     with database.connection:
+        database.connection.execute(
+            "INSERT INTO jobs (id, source_url, title, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'running', ?, ?)",
+            ("job123", "https://www.douyin.com/video/1", "Chinese title", "now", "now"),
+        )
         database.connection.execute(
             "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
             ("translation_backend", json.dumps("gemini"), "now"),
@@ -350,15 +341,14 @@ def test_translate_step_uses_gemini_pool_and_persists_cursor(translator_type, te
 @patch("dv_backend.pipeline.resolve_tool_path")
 @patch("dv_backend.pipeline.run_subprocess_with_cancel")
 @patch("dv_backend.pipeline.get_wav_duration")
-@patch("dv_backend.pipeline.GeminiTtsAdapter")
-def test_tts_step_uses_gemini_pool_and_persists_cursor(
+@patch("dv_backend.pipeline.VieNeuTtsAdapter")
+def test_tts_step_uses_vieneu_adapter(
     tts_type, mock_duration, mock_run, mock_resolve, test_env
 ):
     config, database, _job_service, runner = test_env
     mock_resolve.return_value = Path("ffmpeg")
     mock_duration.return_value = 1.0
     tts = tts_type.return_value
-    tts.key_pool.cursor = 1
 
     def synthesize(_text, output_path, **_kwargs):
         write_dummy_wav(output_path, duration=1.0, sample_rate=24000, channels=1)
@@ -377,19 +367,13 @@ def test_tts_step_uses_gemini_pool_and_persists_cursor(
     with database.connection:
         database.connection.execute(
             "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
-            ("tts_backend", json.dumps("gemini"), "now"),
-        )
-        database.connection.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
-            ("gemini_api_keys", json.dumps([{"id": "a", "key": "key-a"}]), "now"),
+            ("vieneu_voice", json.dumps("Xuân Vĩnh"), "now"),
         )
 
     pipeline.tts_step("job123", config, database, runner)
 
     tts.synthesize.assert_called_once()
-    assert json.loads(database.connection.execute(
-        "SELECT value FROM settings WHERE key = 'gemini_key_cursor'"
-    ).fetchone()["value"]) == 1
+    tts_type.assert_called_once()
 
 
 @patch("dv_backend.pipeline.resolve_tool_path")
@@ -476,7 +460,116 @@ def test_mix_ducks_original_and_includes_vietnamese_narration(
         mock_run.call_args.args[0].index("-filter_complex") + 1
     ]
     assert "sidechaincompress" in filter_graph
-    assert "[ducked][fg]amix=inputs=2" in filter_graph
+    assert "[ducked][fg2]amix=inputs=2" in filter_graph
+
+
+@patch("dv_backend.pipeline.separate_vocals")
+@patch("dv_backend.pipeline.resolve_tool_path")
+@patch("dv_backend.pipeline.run_subprocess_with_cancel")
+def test_mix_separate_mode_uses_bgm_without_ducking(
+    mock_run,
+    mock_resolve,
+    mock_separate,
+    test_env,
+):
+    config, database, _job_service, runner = test_env
+    mock_resolve.return_value = Path("ffmpeg")
+    job_id = "job123"
+    artifacts_dir = config.data_dir / "jobs" / job_id / "artifacts"
+    original = artifacts_dir / "original_48k.wav"
+    bgm = artifacts_dir / "bgm.wav"
+    vocals = artifacts_dir / "vocals.wav"
+    narration_segment = artifacts_dir / "tts" / "tts_repaired_0.wav"
+    write_dummy_wav(original)
+    write_dummy_wav(bgm)
+    write_dummy_wav(vocals)
+    write_dummy_wav(narration_segment, duration=1.0)
+    with database.connection:
+        database.connection.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("mix_mode", json.dumps("separate"), "now"),
+        )
+
+    save_checkpoint(
+        config.data_dir,
+        job_id,
+        "extract_audio",
+        {"original_48k_path": str(original)},
+    )
+    save_checkpoint(
+        config.data_dir,
+        job_id,
+        "duration_repair",
+        {"segments": [{"index": 0, "start": 0.0}]},
+    )
+
+    def write_mix(cmd, *_args, **_kwargs):
+        write_dummy_wav(Path(cmd[-1]))
+        return MagicMock(stdout="", stderr="", returncode=0)
+
+    mock_run.side_effect = write_mix
+
+    pipeline.mix_step(job_id, config, database, runner)
+
+    mock_separate.assert_not_called()
+    filter_graph = mock_run.call_args.args[0][
+        mock_run.call_args.args[0].index("-filter_complex") + 1
+    ]
+    assert "sidechaincompress" not in filter_graph
+    assert str(bgm) in mock_run.call_args.args[0]
+
+
+@patch("dv_backend.pipeline.separate_vocals")
+@patch("dv_backend.pipeline.resolve_tool_path")
+@patch("dv_backend.pipeline.run_subprocess_with_cancel")
+def test_mix_separate_mode_runs_demucs_when_bgm_missing(
+    mock_run,
+    mock_resolve,
+    mock_separate,
+    test_env,
+):
+    config, database, _job_service, runner = test_env
+    mock_resolve.return_value = Path("ffmpeg")
+    job_id = "job456"
+    artifacts_dir = config.data_dir / "jobs" / job_id / "artifacts"
+    original = artifacts_dir / "original_48k.wav"
+    narration_segment = artifacts_dir / "tts" / "tts_repaired_0.wav"
+    write_dummy_wav(original)
+    write_dummy_wav(narration_segment, duration=1.0)
+    with database.connection:
+        database.connection.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("mix_mode", json.dumps("separate"), "now"),
+        )
+
+    save_checkpoint(
+        config.data_dir,
+        job_id,
+        "extract_audio",
+        {"original_48k_path": str(original)},
+    )
+    save_checkpoint(
+        config.data_dir,
+        job_id,
+        "duration_repair",
+        {"segments": [{"index": 0, "start": 0.0}]},
+    )
+
+    def fake_separate(input_wav, **kwargs):
+        write_dummy_wav(kwargs["bgm_out"])
+        write_dummy_wav(kwargs["vocals_out"])
+
+    mock_separate.side_effect = fake_separate
+
+    def write_mix(cmd, *_args, **_kwargs):
+        write_dummy_wav(Path(cmd[-1]))
+        return MagicMock(stdout="", stderr="", returncode=0)
+
+    mock_run.side_effect = write_mix
+
+    pipeline.mix_step(job_id, config, database, runner)
+
+    mock_separate.assert_called_once()
 
 
 @patch("dv_backend.pipeline.resolve_tool_path")
@@ -518,13 +611,124 @@ def test_mix_saves_vietnamese_narration_as_debug_output(
     assert result["vietnamese_narration_path"] == str(debug_path)
 
 
+@patch("dv_backend.pipeline.probe_video_dimensions")
 @patch("dv_backend.pipeline.resolve_tool_path")
 @patch("dv_backend.pipeline.run_subprocess_with_cancel")
+def test_render_step_burns_subtitles_when_enabled(
+    mock_run,
+    mock_resolve,
+    mock_probe,
+    test_env,
+):
+    config, database, _job_service, runner = test_env
+    mock_resolve.return_value = Path("ffmpeg")
+    mock_probe.return_value = (1080, 1920)
+    job_id = "job-subtitles"
+    artifacts_dir = config.data_dir / "jobs" / job_id / "artifacts"
+    output_dir = config.data_dir / "jobs" / job_id / "output"
+    original = artifacts_dir / "original.mp4"
+    mixed = artifacts_dir / "mixed.wav"
+    original.parent.mkdir(parents=True, exist_ok=True)
+    original.write_bytes(b"mp4")
+    write_dummy_wav(mixed)
+
+    with database.connection:
+        database.connection.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("subtitles_enabled", json.dumps(True), "now"),
+        )
+        database.connection.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("subtitle_font_size", json.dumps(52), "now"),
+        )
+        database.connection.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("subtitle_font_color", json.dumps("#FFFF00"), "now"),
+        )
+        database.connection.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("subtitle_background_color", json.dumps("#000000"), "now"),
+        )
+        database.connection.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("subtitle_background_opacity", json.dumps(80), "now"),
+        )
+        database.connection.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("subtitle_position", json.dumps("center"), "now"),
+        )
+
+    save_checkpoint(
+        config.data_dir,
+        job_id,
+        "download",
+        {"output_path": str(original)},
+    )
+    save_checkpoint(
+        config.data_dir,
+        job_id,
+        "mix",
+        {"mixed_wav_path": str(mixed)},
+    )
+    save_checkpoint(
+        config.data_dir,
+        job_id,
+        "duration_repair",
+        {
+            "segments": [
+                {
+                    "index": 0,
+                    "start": 0.0,
+                    "end": 2.0,
+                    "translation": "Xin chào mọi người",
+                    "repaired_duration": 2.0,
+                }
+            ]
+        },
+    )
+
+    render_calls: list[list[str]] = []
+
+    def side_effect(cmd, *_args, **_kwargs):
+        if "-c:v libx264" in " ".join(cmd):
+            render_calls.append(cmd)
+            Path(cmd[-1]).write_bytes(b"rendered")
+        elif str(cmd[-1]).endswith(".wav"):
+            write_dummy_wav(Path(cmd[-1]))
+        return MagicMock(stdout="", stderr="", returncode=0)
+
+    mock_run.side_effect = side_effect
+
+    result = pipeline.render_step(job_id, config, database, runner)
+
+    assert render_calls
+    render_cmd = render_calls[0]
+    vf_index = render_cmd.index("-vf")
+    assert "subtitles=" in render_cmd[vf_index + 1]
+    assert (output_dir / "subtitles.ass").is_file()
+    assert "Xin chào mọi người" in (output_dir / "subtitles.ass").read_text(encoding="utf-8-sig")
+    style_line = next(
+        line for line in (output_dir / "subtitles.ass").read_text(encoding="utf-8-sig").splitlines()
+        if line.startswith("Style:")
+    )
+    assert ",4," in style_line
+    assert "\\bord" in (output_dir / "subtitles.ass").read_text(encoding="utf-8-sig")
+    assert result["subtitles_enabled"] is True
+    assert result["subtitles_path"] == str(output_dir / "subtitles.ass")
+
+
+@patch("dv_backend.pipeline.resolve_tool_path")
+@patch("dv_backend.pipeline.run_subprocess_with_cancel")
+@patch("dv_backend.pipeline.transcribe_audio")
 @patch("dv_backend.pipeline.GoogleFreeTranslator")
-@patch("dv_backend.pipeline.EdgeTtsAdapter")
-def test_full_runner_execution_and_resume(edge_tts_type, translator_type, mock_run, mock_resolve, test_env):
+@patch("dv_backend.pipeline.VieNeuTtsAdapter")
+def test_full_runner_execution_and_resume(vieneu_tts_type, translator_type, mock_transcribe, mock_run, mock_resolve, test_env):
     config, database, job_service, runner = test_env
     mock_resolve.return_value = Path("dummy-tool")
+    mock_transcribe.return_value = [
+        {"start": 0.0, "end": 1.0, "text": "Hello"},
+        {"start": 2.0, "end": 3.0, "text": "World"},
+    ]
     
     def side_effect(cmd, job_id, runner_instance, timeout=None):
         cmd_str = " ".join(cmd)
@@ -570,7 +774,7 @@ def test_full_runner_execution_and_resume(edge_tts_type, translator_type, mock_r
             }))
             return MagicMock(stdout="", stderr="", returncode=0)
             
-        if "-c:v copy" in cmd_str:
+        if "-c:v libx264" in cmd_str:
             out_path = Path(cmd[-1])
             out_path.write_text("dummy dubbed mp4")
             return MagicMock(stdout="", stderr="", returncode=0)
@@ -591,10 +795,10 @@ def test_full_runner_execution_and_resume(edge_tts_type, translator_type, mock_r
     mock_run.side_effect = side_effect
     translator_type.return_value.translate.return_value = ["tr0", "tr1"]
 
-    def edge_tts_side_effect(text, output_path, **kwargs):
-        output_path.write_bytes(b"fake mp3")
+    def vieneu_tts_side_effect(text, output_path, **kwargs):
+        write_dummy_wav(output_path, duration=1.0, sample_rate=24000, channels=1)
 
-    edge_tts_type.return_value.synthesize.side_effect = edge_tts_side_effect
+    vieneu_tts_type.return_value.synthesize.side_effect = vieneu_tts_side_effect
     
     with patch("dv_backend.pipeline.call_openai_chat") as mock_chat, \
          patch("dv_backend.pipeline.call_openai_tts") as mock_tts:

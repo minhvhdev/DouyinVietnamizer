@@ -36,7 +36,7 @@ def probe_executable(
             return ProbeResult(
                 status="blocked",
                 message=f"{tool.display_name} exited with code {completed.returncode}.",
-                action="Replace the bundled executable with a supported release.",
+                action="Replace the executable with a supported release.",
                 detail=output,
                 duration_ms=duration_ms,
             )
@@ -44,7 +44,7 @@ def probe_executable(
             return ProbeResult(
                 status="blocked",
                 message=f"{tool.display_name} returned unrecognized version output.",
-                action="Verify that the bundled executable matches the vendor manifest.",
+                action="Verify that the executable matches the vendor manifest.",
                 detail=output,
                 duration_ms=duration_ms,
             )
@@ -66,7 +66,7 @@ def probe_executable(
         return ProbeResult(
             status="blocked",
             message=f"{tool.display_name} could not start.",
-            action="Install the complete bundled runtime and retry.",
+            action="Install the tool under vendor/ or add it to PATH, then retry.",
             detail=str(error),
             duration_ms=round((time.perf_counter() - started) * 1000),
         )

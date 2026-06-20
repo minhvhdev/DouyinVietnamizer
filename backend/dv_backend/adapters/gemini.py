@@ -71,6 +71,39 @@ def parse_json_array(text: str) -> list[str]:
     return data
 
 
+def classify_gemini_failure(error: Exception) -> tuple[str, str, str]:
+    message = str(error)
+    if "HTTP 503" in message or "UNAVAILABLE" in message:
+        return (
+            "GEMINI_MODEL_UNAVAILABLE",
+            "Gemini model is temporarily unavailable (server overload).",
+            "Wait a few minutes and retry, or switch to gemini-2.5-flash in Settings.",
+        )
+    if "HTTP 404" in message or "NOT_FOUND" in message:
+        return (
+            "GEMINI_MODEL_NOT_FOUND",
+            "The configured Gemini model name is not available on this API.",
+            "Use a supported model such as gemini-2.5-flash or gemini-3.5-flash.",
+        )
+    if "HTTP 429" in message or "RESOURCE_EXHAUSTED" in message:
+        return (
+            "GEMINI_QUOTA_EXCEEDED",
+            "Gemini API quota or rate limit was exceeded.",
+            "Check usage in Google AI Studio or add another API key.",
+        )
+    if "HTTP 401" in message or "HTTP 403" in message or "API key not valid" in message:
+        return (
+            "GEMINI_KEY_INVALID",
+            "One or more Gemini API keys were rejected.",
+            "Verify your API keys in Google AI Studio.",
+        )
+    return (
+        "GEMINI_KEYS_EXHAUSTED",
+        "All Gemini API keys failed for translation.",
+        "Check key quota in Google AI Studio or add another key.",
+    )
+
+
 class GeminiTranslator:
     def __init__(
         self,
@@ -104,6 +137,8 @@ class GeminiTranslator:
             "generationConfig": {"responseMimeType": "application/json"},
         }
         last_error: Exception | None = None
+        saw_model_unavailable = False
+        saw_model_not_found = False
         for index, api_key in self.key_pool.ordered_keys():
             try:
                 translated = parse_json_array(response_text(self.request(api_key, self.model, payload)))
@@ -113,13 +148,31 @@ class GeminiTranslator:
                 return translated
             except Exception as cause:
                 last_error = cause
+                code, _, _ = classify_gemini_failure(cause)
+                if code == "GEMINI_MODEL_UNAVAILABLE":
+                    saw_model_unavailable = True
+                if code == "GEMINI_MODEL_NOT_FOUND":
+                    saw_model_not_found = True
+
+        if saw_model_unavailable and not saw_model_not_found:
+            code, message, action = classify_gemini_failure(
+                last_error or RuntimeError("Gemini model unavailable")
+            )
+        elif saw_model_not_found:
+            code, message, action = classify_gemini_failure(
+                last_error or RuntimeError("Gemini model not found")
+            )
+        else:
+            code, message, action = classify_gemini_failure(
+                last_error or RuntimeError("Gemini request failed")
+            )
 
         raise AppError(
             502,
             ErrorInfo(
-                code="GEMINI_KEYS_EXHAUSTED",
-                message="All Gemini API keys failed for translation.",
-                action="Check key quota in Google AI Studio or add another key.",
+                code=code,
+                message=message,
+                action=action,
                 detail=str(last_error),
                 retryable=True,
             ),
@@ -190,6 +243,18 @@ class GeminiTtsAdapter:
             except Exception as cause:
                 last_error = cause
 
+        if last_error and ("429" in str(last_error) or "RESOURCE_EXHAUSTED" in str(last_error)):
+            raise AppError(
+                429,
+                ErrorInfo(
+                    code="GEMINI_TTS_QUOTA_EXHAUSTED",
+                    message="Gemini TTS quota exceeded.",
+                    action="Check key quota in Google AI Studio or add another key.",
+                    detail=str(last_error),
+                    retryable=True,
+                ),
+            )
+
         raise AppError(
             502,
             ErrorInfo(
@@ -200,3 +265,4 @@ class GeminiTtsAdapter:
                 retryable=True,
             ),
         )
+

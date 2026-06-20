@@ -1,16 +1,59 @@
+# Dependencies
 node_modules/
+
+# Build outputs
 dist/
-dist_portable/
+frontend/dist/
 release/
+dist_portable/
+
+# Python
 .venv/
+.venv.broken/
 __pycache__/
+*.py[cod]
+*.egg-info/
 .pytest_cache/
 .ruff_cache/
-.superpowers/
-.worktrees/
-*.pyc
-*.egg-info/
+.mypy_cache/
+.coverage
+htmlcov/
 backend/build/
+backend/dist/
 backend/*.spec
+
+# Vendor binaries (keep manifest only)
 vendor/*
 !vendor/manifest.json
+
+# Local / generated data
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Tooling caches
+graphify-out/
+
+# Package managers
+package-lock.json
+npm-debug.log*
+pnpm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log

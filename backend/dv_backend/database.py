@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY,
     source_url TEXT NOT NULL,
     title TEXT,
+    title_vi TEXT,
     status TEXT NOT NULL,
     current_step TEXT,
     last_error_code TEXT,
@@ -45,6 +46,12 @@ CREATE TABLE IF NOT EXISTS runtime_reports (
     report_json TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS cloned_voices (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    wav_filename TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -58,5 +65,11 @@ class Database:
 
     def migrate(self) -> None:
         self.connection.executescript(SCHEMA)
+        columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(jobs)").fetchall()
+        }
+        if "title_vi" not in columns:
+            self.connection.execute("ALTER TABLE jobs ADD COLUMN title_vi TEXT")
         self.connection.commit()
 

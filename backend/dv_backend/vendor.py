@@ -39,7 +39,7 @@ class ResolvedTool(BaseModel):
 
 
 class VendorResolver:
-    def __init__(self, vendor_dir: Path, allow_path_tools: bool = False) -> None:
+    def __init__(self, vendor_dir: Path, allow_path_tools: bool = True) -> None:
         self.vendor_dir = vendor_dir
         self.allow_path_tools = allow_path_tools
 

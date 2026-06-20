@@ -20,47 +20,6 @@
       "version_contains": "",
       "required": true,
       "capability": "download"
-    },
-    {
-      "id": "whisper_cpu",
-      "display_name": "whisper.cpp CPU",
-      "executable": "whisper.cpp/cpu/whisper-cli.exe",
-      "dev_command": "whisper-cli",
-      "version_args": ["--help"],
-      "version_contains": "whisper",
-      "required": true,
-      "capability": "asr_cpu"
-    },
-    {
-      "id": "whisper_vulkan",
-      "display_name": "whisper.cpp Vulkan",
-      "executable": "whisper.cpp/vulkan/whisper-cli.exe",
-      "dev_command": "whisper-cli-vulkan",
-      "version_args": ["--help"],
-      "version_contains": "whisper",
-      "required": false,
-      "capability": "asr_vulkan"
-    },
-    {
-      "id": "piper",
-      "display_name": "Piper",
-      "executable": "piper/piper.exe",
-      "dev_command": "piper",
-      "version_args": ["--help"],
-      "version_contains": "piper",
-      "required": false,
-      "capability": "tts_local"
-    },
-    {
-      "id": "qwen3_asr",
-      "display_name": "Qwen3-ASR CPU",
-      "executable": "qwen3-asr/qwen3-asr.exe",
-      "dev_command": "qwen3-asr",
-      "version_args": ["--help"],
-      "version_contains": "qwen3",
-      "required": false,
-      "capability": "asr_qwen"
     }
   ]
 }
-

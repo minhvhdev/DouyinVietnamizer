@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from pathlib import Path
+import shutil
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -78,6 +81,123 @@ class JobService:
                 "error_message = 'The application closed while this step was running.' "
                 "WHERE status = 'running'"
             )
+
+    def rerun(self, job_id: str, keep_steps: list[str]) -> Job:
+        job = self.get(job_id)
+        if job.status not in {"completed", "failed", "interrupted"}:
+            raise AppError(
+                409,
+                ErrorInfo(
+                    code="JOB_NOT_RERUNNABLE",
+                    message="Only completed, failed, or stopped jobs can be rerun.",
+                    action="Cancel the running job first.",
+                ),
+            )
+
+        keep_set = set(keep_steps)
+        unknown = keep_set.difference(PIPELINE_STEPS)
+        if unknown:
+            raise AppError(
+                422,
+                ErrorInfo(
+                    code="INVALID_RERUN_STEPS",
+                    message="One or more keep_steps values are not valid pipeline steps.",
+                    action="Use step names from the pipeline in order.",
+                    detail=", ".join(sorted(unknown)),
+                ),
+            )
+
+        if keep_set:
+            max_kept_index = max(PIPELINE_STEPS.index(step_name) for step_name in keep_set)
+            expected_prefix = set(PIPELINE_STEPS[: max_kept_index + 1])
+            if keep_set != expected_prefix:
+                raise AppError(
+                    422,
+                    ErrorInfo(
+                        code="INVALID_RERUN_KEEP_PREFIX",
+                        message="Kept steps must form a continuous prefix from the start of the pipeline.",
+                        action="Keep earlier steps before keeping later ones.",
+                    ),
+                )
+
+        first_reset_idx: int | None = None
+        for index, step_name in enumerate(PIPELINE_STEPS):
+            if step_name not in keep_set:
+                first_reset_idx = index
+                break
+
+        if first_reset_idx is None:
+            raise AppError(
+                422,
+                ErrorInfo(
+                    code="RERUN_NOTHING_TO_RESET",
+                    message="At least one pipeline step must be rerun.",
+                    action="Uncheck the steps you want to execute again.",
+                ),
+            )
+
+        reset_steps = PIPELINE_STEPS[first_reset_idx:]
+        now = utc_now()
+        with self.database.connection:
+            self.database.connection.execute(
+                """
+                UPDATE jobs
+                SET status = 'queued', current_step = NULL,
+                    last_error_code = NULL, last_error_message = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (now, job_id),
+            )
+            for step_name in reset_steps:
+                self.database.connection.execute(
+                    """
+                    UPDATE job_steps
+                    SET status = 'pending', started_at = NULL, completed_at = NULL,
+                        error_code = NULL, error_message = NULL
+                    WHERE job_id = ? AND name = ?
+                    """,
+                    (job_id, step_name),
+                )
+
+        for step_name in reset_steps:
+            cp_f = checkpoint_path(self.data_dir, job_id, step_name)
+            if cp_f.is_file():
+                try:
+                    cp_f.unlink()
+                except OSError:
+                    pass
+
+        return self.get(job_id)
+
+    def redub(self, job_id: str) -> Job:
+        translate_index = PIPELINE_STEPS.index("translate")
+        keep_steps = list(PIPELINE_STEPS[: translate_index + 1])
+        return self.rerun(job_id, keep_steps)
+
+    def delete(self, job_id: str) -> None:
+        job = self.get(job_id)
+        if job.status == "running":
+            raise AppError(
+                409,
+                ErrorInfo(
+                    code="JOB_NOT_DELETABLE",
+                    message="A running job cannot be deleted.",
+                    action="Wait for the job to complete or cancel it first.",
+                ),
+            )
+        
+        with self.database.connection:
+            self.database.connection.execute("DELETE FROM job_steps WHERE job_id = ?", (job_id,))
+            self.database.connection.execute("DELETE FROM events WHERE job_id = ?", (job_id,))
+            self.database.connection.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+            
+        job_dir = self.data_dir / "jobs" / job_id
+        if job_dir.exists():
+            try:
+                shutil.rmtree(job_dir)
+            except OSError:
+                pass
 
     def _hydrate(self, row) -> Job:
         steps = self.database.connection.execute(

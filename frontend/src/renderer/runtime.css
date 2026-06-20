@@ -1,0 +1,186 @@
+.runtime{background:transparent;text-align:left;color:inherit}
+.runtime.warning i{background:#f2ba5b}.runtime.blocked i{background:#f16f7e}
+button:disabled{cursor:not-allowed;opacity:.45}
+.overlay{position:fixed;inset:0;background:#080a0dcc;display:flex;justify-content:flex-end;z-index:10}
+.runtime-panel{width:min(520px,100%);height:100%;background:#12151c;border-left:1px solid #303746;padding:28px;overflow:auto}
+.runtime-head{display:flex;justify-content:space-between;gap:18px}.runtime-head p{color:#8170ff;font-weight:600;margin:0 0 5px}.runtime-head h2{margin:0 0 5px;text-transform:capitalize}.runtime-head small{color:#7e8798}.runtime-head button{background:transparent;color:#9098a9}
+.runtime-checks{display:grid;gap:10px;margin:28px 0}.runtime-check{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;border:1px solid #2c3340;border-radius:12px;padding:14px;align-items:start;background:#141820}.runtime-check.ready{border-color:#275542;background:#111b19}.runtime-check.warning{border-color:#5a4827;background:#1b1711}.runtime-check.optional{border-color:#3c4561;background:#151925}.runtime-check.blocked{border-color:#61323d;background:#1d1518}.runtime-check strong{font-size:14px}.runtime-check p{font-size:13px;margin:6px 0 4px;color:#a7afbd}.runtime-check small{font-size:12px;color:#747e90}
+.runtime-check-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.runtime-kind{border:1px solid #344057;border-radius:999px;padding:3px 7px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;color:#aab5c8;background:#19202c}.runtime-kind.required{color:#dfe7f7;border-color:#46536d}.runtime-kind.optional{color:#c2cdf2;border-color:#414f86;background:#181d33}.runtime-status-pill{border-radius:999px;padding:5px 8px;font-size:10px;text-transform:uppercase;font-style:normal;font-weight:800;letter-spacing:.03em;white-space:nowrap;color:#929aaa;background:#1a202b}.runtime-status-pill.ready{color:#68e6a6;background:#123023}.runtime-status-pill.warning{color:#ffd27a;background:#352812}.runtime-status-pill.optional{color:#aebdff;background:#202747}.runtime-status-pill.blocked{color:#ff98a6;background:#3b1720}
+.check-icon{display:grid;place-items:center;width:32px;height:32px;border-radius:999px;color:#5bdd9a;background:#123023}.check-icon.warning{color:#f2ba5b;background:#352812}.check-icon.optional{color:#aebdff;background:#202747}.check-icon.blocked{color:#f16f7e;background:#3b1720}
+.smoke-button{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:13px;border-radius:10px;background:#7258f6;font-weight:600}
+
+/* Setup Wizard Styles */
+.wizard-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  width: 100vw;
+  background: radial-gradient(circle at top left, #121522, #07090d);
+  color: #fff;
+  font-family: inherit;
+  padding: 20px;
+}
+.wizard-card {
+  width: 100%;
+  max-width: 650px;
+  background: linear-gradient(145deg, #131622, #0c0d16);
+  border: 1px solid rgba(129, 112, 255, 0.15);
+  box-shadow: 0 15px 40px rgba(0, 0, 0, 0.4), 0 0 30px rgba(129, 112, 255, 0.05);
+  border-radius: 16px;
+  padding: 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.wizard-header {
+  text-align: center;
+}
+.wizard-header h1 {
+  font-size: 26px;
+  font-weight: 700;
+  margin: 0 0 8px;
+  background: linear-gradient(135deg, #fff, #a79aff);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.wizard-header p {
+  color: #8f97a6;
+  font-size: 14px;
+  margin: 0;
+}
+.specs-panel {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.spec-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 14px;
+}
+.spec-item .label {
+  color: #8f97a6;
+}
+.spec-item .value {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.spec-item .value.supported {
+  color: #5bdd9a;
+}
+.spec-item .value.unsupported {
+  color: #f16f7e;
+}
+.profile-selection {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+.profile-card {
+  border: 1px solid #303746;
+  background: #11131a;
+  border-radius: 12px;
+  padding: 20px;
+  cursor: pointer;
+  transition: all 0.2s ease-in-out;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: left;
+}
+.profile-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(129, 112, 255, 0.4);
+}
+.profile-card.selected {
+  border-color: #8170ff;
+  background: rgba(129, 112, 255, 0.05);
+  box-shadow: 0 0 20px rgba(129, 112, 255, 0.1);
+}
+.profile-card h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+.profile-card p {
+  margin: 0;
+  font-size: 12.5px;
+  color: #8f97a6;
+  line-height: 1.4;
+}
+.profile-badge {
+  align-self: flex-start;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  background: rgba(129, 112, 255, 0.15);
+  color: #a79aff;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.progress-container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.progress-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13.5px;
+  color: #8f97a6;
+}
+.progress-bar-bg {
+  height: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #8170ff, #00d1b2);
+  box-shadow: 0 0 10px rgba(129, 112, 255, 0.5);
+  transition: width 0.3s ease;
+}
+.logs-panel {
+  background: #08090d;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  padding: 16px;
+  height: 160px;
+  overflow-y: auto;
+  font-family: monospace;
+  font-size: 11.5px;
+  color: #a7afbd;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.log-line {
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+.wizard-success {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 20px 0;
+}
+.wizard-success .icon {
+  color: #5bdd9a;
+  filter: drop-shadow(0 0 15px rgba(91, 221, 154, 0.3));
+}
+.wizard-success h2 {
+  margin: 0;
+  font-size: 20px;
+}
+

@@ -1,6 +1,19 @@
 {
-  "name": "douyin-vietnamizer-portable",
+  "name": "douyin-vietnamizer",
   "private": true,
-  "workspaces": ["desktop"]
+  "packageManager": "pnpm@10.12.1",
+  "scripts": {
+    "setup": "pnpm install && pnpm run setup:backend",
+    "setup:backend": "cd backend && uv sync --group dev",
+    "dev": "pnpm dlx kill-port 8765 && concurrently -k -n backend,ui -c blue,magenta \"pnpm run dev:backend\" \"pnpm run dev:frontend\"",
+    "dev:backend": "cd backend && uv run python -m dv_backend.main",
+    "dev:frontend": "pnpm --filter frontend dev",
+    "test": "pnpm run test:backend && pnpm run test:frontend",
+    "test:backend": "cd backend && uv run pytest -v",
+    "test:frontend": "pnpm --filter frontend test",
+    "build": "pnpm --filter frontend build"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
 }
-
