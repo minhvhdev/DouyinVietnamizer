@@ -16,16 +16,26 @@ from .config import AppConfig
 from .database import Database
 from .errors import AppError
 from .models import ErrorInfo
-from .checkpoints import save_checkpoint, load_checkpoint
+from .checkpoints import load_checkpoint, save_checkpoint
+from .checkpoint_compat import ASR_ALIGNMENT_SCHEMA_VERSION
 from .vendor import VendorManifest, VendorResolver
 from .adapters.translation import GoogleFreeTranslator
-from .adapters.tts import VieNeuTtsAdapter
+from .adapters.tts import create_tts_adapter
 from .adapters.asr import reset_model_cache, transcribe_audio
 from .adapters.separation import MIX_MODE_SEPARATE, separate_vocals
 from .adapters.subtitles import ffmpeg_subtitles_filter, probe_video_dimensions, write_ass_file
 from .adapters.gemini import GeminiKeyPool, GeminiTranslator
+from .source_urls import (
+    fallback_playlist_video_url,
+    is_douyin_user_profile_url,
+    normalize_source_url,
+)
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_EXACT_TIMING_TOLERANCE_MS = 40
+DEFAULT_EXACT_TIMING_ENABLED = True
+DEFAULT_EXACT_TIMING_MAX_STRETCH = 1.8
 
 
 def yt_dlp_cookie_args(database: Database) -> list[str]:
@@ -39,11 +49,7 @@ def yt_dlp_cookie_args(database: Database) -> list[str]:
 
 
 def normalize_douyin_url(source_url: str) -> str:
-    parsed = urllib.parse.urlparse(source_url)
-    modal_id = urllib.parse.parse_qs(parsed.query).get("modal_id", [None])[0]
-    if parsed.netloc.endswith("douyin.com") and modal_id and modal_id.isdigit():
-        return f"https://www.douyin.com/video/{modal_id}"
-    return source_url
+    return normalize_source_url(source_url)
 
 
 def save_setting(database: Database, key: str, value) -> None:
@@ -244,7 +250,20 @@ def call_openai_tts(api_base: str, api_key: str, model: str, voice: str, text: s
 # Steps implementation
 def resolve_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
     row = database.connection.execute("SELECT source_url FROM jobs WHERE id = ?", (job_id,)).fetchone()
-    source_url = normalize_douyin_url(row["source_url"])
+    source_url = normalize_source_url(row["source_url"])
+
+    if is_douyin_user_profile_url(source_url):
+        raise AppError(
+            422,
+            ErrorInfo(
+                code="DOUYIN_USER_URL_NOT_SUPPORTED",
+                message="Douyin user profile URLs cannot be listed with yt-dlp.",
+                action=(
+                    "Use a single video link (douyin.com/video/ID) or a short share link. "
+                    "Channel/user listing is not supported yet."
+                ),
+            ),
+        )
     
     yt_dlp_path = resolve_tool_path(config, "yt_dlp")
     
@@ -265,7 +284,7 @@ def resolve_step(job_id: str, config: AppConfig, database: Database, runner) -> 
             500,
             ErrorInfo(
                 code="YT_DLP_RESOLVE_FAILED",
-                message="Failed to resolve Douyin video/channel URL.",
+                message="Failed to resolve video URL.",
                 action="Ensure URL is valid and public.",
                 detail=e.stderr or e.stdout
             )
@@ -279,7 +298,7 @@ def resolve_step(job_id: str, config: AppConfig, database: Database, runner) -> 
         for entry in entries:
             if not entry:
                 continue
-            video_url = entry.get("url") or f"https://www.douyin.com/video/{entry.get('id')}"
+            video_url = fallback_playlist_video_url(entry, source_url)
             videos.append({
                 "id": entry.get("id"),
                 "title": entry.get("title") or "Untitled Video",
@@ -569,15 +588,23 @@ def asr_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
     project_root = Path(__file__).resolve().parents[2]
     vendor_dir = Path(os.environ.get("DV_VENDOR_DIR", project_root / "vendor"))
 
-    segments = transcribe_audio(
+    asr_result = transcribe_audio(
         audio_16k,
         vendor_dir=vendor_dir,
         asr_model=str(settings.get("qwen3_asr_model", "") or ""),
         aligner_model=str(settings.get("qwen3_aligner_model", "") or ""),
         device=str(settings.get("qwen3_device", "cuda:0") or "cuda:0"),
         language="Chinese",
-        speaker_diarization=bool(settings.get("speaker_diarization", False)),
+        speaker_diarization=False,
+        include_alignment=True,
     )
+
+    if isinstance(asr_result, dict):
+        segments = asr_result.get("segments", [])
+        aligned_units = asr_result.get("aligned_units", [])
+    else:
+        segments = asr_result
+        aligned_units = []
 
     if not segments:
         raise AppError(
@@ -590,18 +617,79 @@ def asr_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
         )
         
     checkpoint_data = {
-        "schema_version": 1,
+        "schema_version": ASR_ALIGNMENT_SCHEMA_VERSION,
         "job_id": job_id,
         "step_name": "asr",
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "segments": segments
+        "segments": segments,
+        "aligned_units": aligned_units,
+        "alignment_required_for_diarization": False,
     }
     save_checkpoint(config.data_dir, job_id, "asr", checkpoint_data)
+    reset_model_cache()
     return checkpoint_data
+
+
+def _split_long_asr_segments_with_vad(
+    raw_segments: list[dict],
+    speech_regions: list[dict],
+    *,
+    max_segment_seconds: float = 20.0,
+) -> list[dict]:
+    if not raw_segments or not speech_regions:
+        return raw_segments
+
+    split_segments: list[dict] = []
+    for segment in raw_segments:
+        text = str(segment.get("text") or "").strip()
+        start = float(segment.get("start", 0.0) or 0.0)
+        end = float(segment.get("end", start) or start)
+        if not text or end - start <= max_segment_seconds:
+            split_segments.append(segment)
+            continue
+
+        overlapping_regions = [
+            {
+                "start": max(start, float(region.get("start", 0.0) or 0.0)),
+                "end": min(end, float(region.get("end", 0.0) or 0.0)),
+            }
+            for region in speech_regions
+            if float(region.get("end", 0.0) or 0.0) > start
+            and float(region.get("start", 0.0) or 0.0) < end
+        ]
+        overlapping_regions = [region for region in overlapping_regions if region["end"] > region["start"]]
+        if len(overlapping_regions) < 2:
+            split_segments.append(segment)
+            continue
+
+        total_region_duration = sum(region["end"] - region["start"] for region in overlapping_regions)
+        cursor = 0
+        for index, region in enumerate(overlapping_regions):
+            if index == len(overlapping_regions) - 1:
+                chunk_text = text[cursor:].strip()
+            else:
+                ratio = (region["end"] - region["start"]) / total_region_duration
+                next_cursor = max(cursor + 1, min(len(text), round(cursor + len(text[cursor:]) * ratio)))
+                chunk_text = text[cursor:next_cursor].strip()
+                cursor = next_cursor
+            if not chunk_text:
+                continue
+            split_segment = dict(segment)
+            split_segment.update(
+                {
+                    "start": round(region["start"], 2),
+                    "end": round(region["end"], 2),
+                    "text": chunk_text,
+                }
+            )
+            split_segments.append(split_segment)
+
+    return split_segments
 
 
 def normalize_segments_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
     asr_cp = load_checkpoint(config.data_dir, job_id, "asr")
+
     vad_cp = load_checkpoint(config.data_dir, job_id, "vad")
     
     if not asr_cp or not vad_cp:
@@ -614,7 +702,10 @@ def normalize_segments_step(job_id: str, config: AppConfig, database: Database, 
             )
         )
         
-    raw_segments = asr_cp.get("segments", [])
+    raw_segments = _split_long_asr_segments_with_vad(
+        asr_cp.get("segments", []),
+        vad_cp.get("speech_regions", []),
+    )
     total_duration = vad_cp.get("total_duration", 0.0)
     
     segments = []
@@ -626,7 +717,6 @@ def normalize_segments_step(job_id: str, config: AppConfig, database: Database, 
             "start": float(seg["start"]),
             "end": float(seg["end"]),
             "text": text,
-            **({"speaker_id": str(seg["speaker_id"])} if seg.get("speaker_id") is not None else {}),
         })
         
     segments.sort(key=lambda x: x["start"])
@@ -664,6 +754,11 @@ def normalize_segments_step(job_id: str, config: AppConfig, database: Database, 
             "translation": None,
             "tts_duration": None,
             **({"speaker_id": curr["speaker_id"]} if curr.get("speaker_id") is not None else {}),
+            **(
+                {"speaker_confidence": curr["speaker_confidence"]}
+                if curr.get("speaker_confidence") is not None
+                else {}
+            ),
         })
         
     checkpoint_data = {
@@ -813,25 +908,54 @@ def translate_step(job_id: str, config: AppConfig, database: Database, runner) -
     return checkpoint_data
 
 
-def _vieneu_tts_adapter(settings: dict) -> VieNeuTtsAdapter:
-    return VieNeuTtsAdapter(
-        device=str(settings.get("vieneu_device", "cuda") or "cuda"),
-    )
+def _default_tts_voice(settings: dict) -> str:
+    instruct = str(settings.get("omnivoice_instruct") or "").strip()
+    if instruct:
+        return f"instruct:{instruct}"
+    ref_audio = str(settings.get("omnivoice_ref_audio") or "").strip()
+    if ref_audio:
+        return ref_audio
+    return "auto"
 
 
-def _resolve_segment_voice(settings: dict, segment: dict) -> str:
-    default_voice = str(settings.get("vieneu_voice", "Xuân Vĩnh") or "Xuân Vĩnh")
-    speaker_id = segment.get("speaker_id")
-    if speaker_id is None:
-        return default_voice
-    speaker_voices = settings.get("speaker_voices") or {}
-    if not isinstance(speaker_voices, dict):
-        return default_voice
-    mapped = speaker_voices.get(str(speaker_id))
-    if mapped is None:
-        return default_voice
-    voice = str(mapped).strip()
-    return voice or default_voice
+def _synthesize_segment_tts(
+    settings: dict,
+    *,
+    text: str,
+    output_path: Path,
+    segment: dict,
+    config: AppConfig,
+    runner,
+) -> None:
+    voice = _default_tts_voice(settings)
+    ref_text = str(segment.get("text") or "").strip() or None
+    last_error: AppError | None = None
+    for attempt in range(2):
+        if attempt:
+            reset_model_cache()
+            try:
+                import gc
+                import torch
+
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+        try:
+            create_tts_adapter(settings, data_dir=config.data_dir, runner=runner).synthesize(
+                text,
+                output_path,
+                voice=voice,
+                ref_text=ref_text,
+            )
+            return
+        except AppError as error:
+            last_error = error
+            if not error.info.retryable or attempt:
+                raise
+    if last_error is not None:
+        raise last_error
 
 
 def _convert_tts_to_final_wav(
@@ -850,6 +974,54 @@ def _convert_tts_to_final_wav(
         str(final_tts),
     ]
     run_subprocess_with_cancel(cmd_conv, job_id, runner)
+
+
+def _build_atempo_chain(speed_factor: float) -> str:
+    factor = max(0.1, float(speed_factor))
+    filters: list[str] = []
+    while factor > 2.0:
+        filters.append("atempo=2.0")
+        factor /= 2.0
+    while factor < 0.5:
+        filters.append("atempo=0.5")
+        factor *= 2.0
+    filters.append(f"atempo={factor:.5f}")
+    return ",".join(filters)
+
+
+def _run_ffmpeg_audio_filter(
+    ffmpeg_path: Path,
+    input_path: Path,
+    output_path: Path,
+    *,
+    filter_expr: str,
+    job_id: str,
+    runner,
+) -> None:
+    cmd = [
+        str(ffmpeg_path), "-y",
+        "-i", str(input_path),
+        "-filter:a", filter_expr,
+        str(output_path),
+    ]
+    run_subprocess_with_cancel(cmd, job_id, runner)
+
+
+def _normalize_exact_timing_settings(settings: dict) -> tuple[bool, float, float]:
+    enabled = bool(settings.get("exact_timing_enabled", DEFAULT_EXACT_TIMING_ENABLED))
+    tolerance_ms = settings.get("exact_timing_tolerance_ms", DEFAULT_EXACT_TIMING_TOLERANCE_MS)
+    max_stretch = settings.get("exact_timing_max_stretch", DEFAULT_EXACT_TIMING_MAX_STRETCH)
+    try:
+        tolerance_ms = float(tolerance_ms)
+    except (TypeError, ValueError):
+        tolerance_ms = float(DEFAULT_EXACT_TIMING_TOLERANCE_MS)
+    try:
+        max_stretch = float(max_stretch)
+    except (TypeError, ValueError):
+        max_stretch = float(DEFAULT_EXACT_TIMING_MAX_STRETCH)
+    tolerance_sec = max(0.0, tolerance_ms / 1000.0)
+    max_stretch = max(1.0, min(3.0, max_stretch))
+    return enabled, tolerance_sec, max_stretch
 
 
 def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
@@ -874,7 +1046,6 @@ def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
     settings = {r["key"]: json.loads(r["value"]) for r in rows}
     ffmpeg_path = resolve_tool_path(config, "ffmpeg")
     reset_model_cache()
-    vieneu_tts = _vieneu_tts_adapter(settings)
     
     for s in segments:
         idx = s["index"]
@@ -888,10 +1059,13 @@ def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
         if final_tts.is_file():
             final_tts.unlink()
 
-        vieneu_tts.synthesize(
-            text,
-            raw_tts,
-            voice=_resolve_segment_voice(settings, s),
+        _synthesize_segment_tts(
+            settings,
+            text=text,
+            output_path=raw_tts,
+            segment=s,
+            config=config,
+            runner=runner,
         )
         _convert_tts_to_final_wav(ffmpeg_path, raw_tts, final_tts, job_id, runner)
         if raw_tts.is_file():
@@ -929,6 +1103,7 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
     
     rows = database.connection.execute("SELECT key, value FROM settings").fetchall()
     settings = {r["key"]: json.loads(r["value"]) for r in rows}
+    exact_enabled, tolerance_sec, max_stretch = _normalize_exact_timing_settings(settings)
     
     ffmpeg_path = resolve_tool_path(config, "ffmpeg")
     
@@ -942,8 +1117,7 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
         if repaired_file.is_file():
             repaired_file.unlink()
             
-        if tts_dur <= budget + 0.1:
-            import shutil
+        if not exact_enabled and tts_dur <= budget + 0.1:
             shutil.copy(orig_file, repaired_file)
             s["repaired_method"] = "none"
             s["repaired_duration"] = tts_dur
@@ -975,11 +1149,13 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                     temp_wav.unlink()
 
                 raw_temp = tts_dir / f"tts_temp_raw_{idx}.wav"
-                vieneu_tts = _vieneu_tts_adapter(settings)
-                vieneu_tts.synthesize(
+                tts_adapter = create_tts_adapter(settings, data_dir=config.data_dir, runner=runner)
+                ref_text = str(s.get("text") or "").strip() or None
+                tts_adapter.synthesize(
                     new_translation,
                     raw_temp,
-                    voice=_resolve_segment_voice(settings, s),
+                    voice=_default_tts_voice(settings),
+                    ref_text=ref_text,
                 )
                 _convert_tts_to_final_wav(ffmpeg_path, raw_temp, temp_wav, job_id, runner)
                 if raw_temp.is_file():
@@ -998,20 +1174,55 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
             except Exception:
                 pass
                 
-        if not shortened:
-            speed_factor = tts_dur / budget
-            speed_factor = min(1.4, max(1.0, speed_factor))
-            
-            cmd = [
-                str(ffmpeg_path), "-y",
-                "-i", str(orig_file),
-                "-filter:a", f"atempo={speed_factor}",
-                str(repaired_file)
-            ]
-            run_subprocess_with_cancel(cmd, job_id, runner)
-            
-            s["repaired_method"] = f"time_stretch_{round(speed_factor, 2)}x"
-            s["repaired_duration"] = round(get_wav_duration(repaired_file), 2)
+        input_for_fit = repaired_file if shortened and repaired_file.is_file() else orig_file
+        current_duration = get_wav_duration(input_for_fit)
+        fit_methods: list[str] = []
+
+        if budget > 0 and abs(current_duration - budget) > tolerance_sec:
+            speed_factor = current_duration / budget
+            speed_factor = min(max_stretch, max(1.0 / max_stretch, speed_factor))
+            stretched_file = tts_dir / f"tts_stretch_{idx}.wav"
+            if stretched_file.is_file():
+                stretched_file.unlink()
+            _run_ffmpeg_audio_filter(
+                ffmpeg_path,
+                input_for_fit,
+                stretched_file,
+                filter_expr=_build_atempo_chain(speed_factor),
+                job_id=job_id,
+                runner=runner,
+            )
+            input_for_fit = stretched_file
+            current_duration = get_wav_duration(stretched_file)
+            fit_methods.append(f"time_stretch_{round(speed_factor, 2)}x")
+
+        if budget > 0 and abs(current_duration - budget) > tolerance_sec:
+            exact_file = tts_dir / f"tts_exact_{idx}.wav"
+            if exact_file.is_file():
+                exact_file.unlink()
+            target_dur = max(0.05, float(budget))
+            exact_filter = f"apad=pad_dur={target_dur + 0.2:.3f},atrim=0:{target_dur:.3f}"
+            _run_ffmpeg_audio_filter(
+                ffmpeg_path,
+                input_for_fit,
+                exact_file,
+                filter_expr=exact_filter,
+                job_id=job_id,
+                runner=runner,
+            )
+            input_for_fit = exact_file
+            current_duration = get_wav_duration(exact_file)
+            fit_methods.append("exact_trim_pad")
+
+        if repaired_file.is_file():
+            repaired_file.unlink()
+        shutil.copy(input_for_fit, repaired_file)
+        s["repaired_duration"] = round(get_wav_duration(repaired_file), 2)
+        if not fit_methods:
+            s["repaired_method"] = "none" if not shortened else "llm_shorten"
+        else:
+            prefix = "llm_shorten+" if shortened else ""
+            s["repaired_method"] = prefix + "+".join(fit_methods)
             
     checkpoint_data = {
         "schema_version": 1,
@@ -1101,7 +1312,7 @@ def mix_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
             vocals_out=vocals_wav,
             bgm_out=bgm_wav,
             ffmpeg_path=ffmpeg_path,
-            device=str(settings.get("vieneu_device", "cuda") or "cuda"),
+            device=str(settings.get("omnivoice_device", "cuda:0") or "cuda:0"),
             job_id=job_id,
             runner=runner,
         )
@@ -1300,8 +1511,9 @@ def qc_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
                 "repaired_duration": s.get("repaired_duration"),
             })
                 
+
     checkpoint_data = {
-        "schema_version": 1,
+        "schema_version": 2,
         "job_id": job_id,
         "step_name": "qc",
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1310,7 +1522,8 @@ def qc_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
         "shortened_count": shortened_segments,
         "stretched_count": stretched_segments,
         "warnings": warnings,
-        "output_video_path": output_path
+        "output_video_path": output_path,
+        "diarization": diarization_qc,
     }
     
     save_checkpoint(config.data_dir, job_id, "qc", checkpoint_data)
@@ -1329,6 +1542,17 @@ def qc_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
         "</tr>"
         for warning in warnings
     ) or "<tr><td colspan='4'>No timing warnings</td></tr>"
+    diar = checkpoint_data.get("diarization") or {}
+    diar_rows = ""
+    if diar:
+        diar_rows = (
+            "<h2>Diarization</h2>"
+            f"<p>Backend: {html.escape(str(diar.get('backend')))} | "
+            f"Speakers: {diar.get('speaker_count')} | "
+            f"Low confidence ratio: {diar.get('low_confidence_ratio')} | "
+            f"Overlap ratio: {diar.get('overlap_ratio')} | "
+            f"Demucs fallback: {diar.get('demucs_used')}</p>"
+        )
     artifacts_html = artifacts_qc.with_suffix(".html")
     artifacts_html.write_text(
         "<!doctype html><html><head><meta charset='utf-8'>"
@@ -1336,6 +1560,7 @@ def qc_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
         "<h1>Douyin Vietnamizer QC Report</h1>"
         f"<p>Total segments: {total_segments}</p>"
         f"<p>Output: {html.escape(str(output_path))}</p>"
+        f"{diar_rows}"
         "<table><thead><tr><th>Segment</th><th>Repair</th><th>Budget</th>"
         f"<th>Result</th></tr></thead><tbody>{warning_rows}</tbody></table>"
         "</body></html>",

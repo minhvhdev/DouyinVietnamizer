@@ -20,8 +20,9 @@ from .adapters.subtitles import (
     normalize_hex_color,
     normalize_position,
 )
-from .adapters.tts import LEGACY_INVALID_PRESET_VOICES, VIENEU_PRESET_VOICES
+from .adapters.tts import SUPPORTED_TTS_BACKENDS, OMNIVOICE_DEFAULT_MODEL
 from .database import Database
+
 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
@@ -29,10 +30,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "translation_backend": "google_free",
     "translation_source_language": "zh-CN",
     "translation_target_language": "vi",
-    "tts_backend": "vieneu",
-    "vieneu_voice": "Xuân Vĩnh",
-    "vieneu_device": "cuda",
-    "vieneu_model": "pnnbao-ump/VieNeu-TTS-v3-Turbo",
+    "omnivoice_model": OMNIVOICE_DEFAULT_MODEL,
+    "omnivoice_device": "cuda:0",
+    "omnivoice_ref_audio": "",
+    "omnivoice_instruct": "",
+    "omnivoice_auto_voice": True,
+    "omnivoice_num_steps": 32,
+    "omnivoice_batch_size": 4,
+    "omnivoice_batch_flush_ms": 150,
+    "omnivoice_cache_enabled": True,
     "mix_mode": "duck",
     "gemini_api_keys": [],
     "gemini_key_cursor": 0,
@@ -41,12 +47,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "qwen3_asr_model": "Qwen/Qwen3-ASR-1.7B",
     "qwen3_aligner_model": "Qwen/Qwen3-ForcedAligner-0.6B",
     "qwen3_device": "cuda:0",
-    "speaker_diarization": False,
-    "speaker_voices": {
-        "0": "Xuân Vĩnh",
-        "1": "Ngọc Linh",
-        "2": "Gia Bảo",
-    },
+    "exact_timing_enabled": True,
+    "exact_timing_tolerance_ms": 40,
+    "exact_timing_max_stretch": 1.8,
     "subtitles_enabled": True,
     "subtitle_font_size": DEFAULT_SUBTITLE_FONT_SIZE,
     "subtitle_font_color": DEFAULT_SUBTITLE_FONT_COLOR,
@@ -80,28 +83,8 @@ class SettingsService:
                     (key, json.dumps(value), now),
                 )
             self._migrate_legacy_pending_gemini_key(now)
-            self._migrate_legacy_vieneu_voice(now)
 
-    def _migrate_legacy_vieneu_voice(self, now: str) -> None:
-        row = self.database.connection.execute(
-            "SELECT value FROM settings WHERE key = 'vieneu_voice'"
-        ).fetchone()
-        if row is None:
-            return
-        try:
-            voice = str(json.loads(row["value"])).strip()
-        except (TypeError, json.JSONDecodeError):
-            return
-        if voice in LEGACY_INVALID_PRESET_VOICES or (
-            not voice.lower().endswith(".wav") and voice not in VIENEU_PRESET_VOICES
-        ):
-            self.database.connection.execute(
-                """
-                INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-                """,
-                ("vieneu_voice", json.dumps(DEFAULT_SETTINGS["vieneu_voice"]), now),
-            )
+
 
     def _migrate_legacy_pending_gemini_key(self, now: str) -> None:
         row = self.database.connection.execute(
@@ -172,6 +155,20 @@ class SettingsService:
                 "mix_mode must be one of: " + ", ".join(sorted(SUPPORTED_MIX_MODES))
             )
 
+        if values.get("exact_timing_tolerance_ms") is not None:
+            try:
+                tolerance_ms = float(values["exact_timing_tolerance_ms"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("exact_timing_tolerance_ms must be a number.") from error
+            values["exact_timing_tolerance_ms"] = max(0.0, min(300.0, tolerance_ms))
+
+        if values.get("exact_timing_max_stretch") is not None:
+            try:
+                max_stretch = float(values["exact_timing_max_stretch"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("exact_timing_max_stretch must be a number.") from error
+            values["exact_timing_max_stretch"] = max(1.0, min(3.0, max_stretch))
+
         subtitle_position = values.get("subtitle_position")
         if subtitle_position is not None:
             values["subtitle_position"] = normalize_position(subtitle_position)
@@ -211,6 +208,83 @@ class SettingsService:
             values["subtitle_edge_margin"] = normalize_edge_margin(
                 values["subtitle_edge_margin"]
             )
+
+        diarization_backend = values.get("diarization_backend")
+        if diarization_backend is not None and diarization_backend not in SUPPORTED_DIARIZATION_BACKENDS:
+            raise ValueError(
+                "diarization_backend must be one of: "
+                + ", ".join(sorted(SUPPORTED_DIARIZATION_BACKENDS))
+            )
+
+        fallback_backend = values.get("diarization_fallback_backend")
+        if fallback_backend is not None and fallback_backend not in SUPPORTED_DIARIZATION_FALLBACK_BACKENDS:
+            raise ValueError(
+                "diarization_fallback_backend must be one of: "
+                + ", ".join(sorted(SUPPORTED_DIARIZATION_FALLBACK_BACKENDS))
+            )
+
+        demucs_mode = values.get("diarization_demucs_mode")
+        if demucs_mode is not None and demucs_mode not in SUPPORTED_DIARIZATION_DEMUCS_MODES:
+            raise ValueError(
+                "diarization_demucs_mode must be one of: "
+                + ", ".join(sorted(SUPPORTED_DIARIZATION_DEMUCS_MODES))
+            )
+
+        for float_key, low, high in (
+            ("speaker_assignment_min_coverage", 0.0, 1.0),
+            ("speaker_assignment_min_margin", 0.0, 1.0),
+            ("speaker_overlap_flag_threshold", 0.0, 1.0),
+            ("speaker_review_confidence_threshold", 0.0, 1.0),
+        ):
+            if values.get(float_key) is not None:
+                try:
+                    parsed = float(values[float_key])
+                except (TypeError, ValueError) as error:
+                    raise ValueError(f"{float_key} must be a number.") from error
+                values[float_key] = max(low, min(high, parsed))
+
+        if values.get("speaker_profile_min_seconds") is not None:
+            try:
+                min_seconds = float(values["speaker_profile_min_seconds"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("speaker_profile_min_seconds must be a number.") from error
+            values["speaker_profile_min_seconds"] = max(0.5, min(30.0, min_seconds))
+
+        if values.get("speaker_merge_gap_sec") is not None:
+            try:
+                gap = float(values["speaker_merge_gap_sec"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("speaker_merge_gap_sec must be a number.") from error
+            values["speaker_merge_gap_sec"] = max(0.0, min(2.0, gap))
+
+        for int_key, low, high in (
+            ("diarization_min_speakers", 1, 12),
+            ("diarization_max_speakers", 1, 12),
+        ):
+            if values.get(int_key) is not None:
+                try:
+                    parsed = int(values[int_key])
+                except (TypeError, ValueError) as error:
+                    raise ValueError(f"{int_key} must be an integer.") from error
+                values[int_key] = max(low, min(high, parsed))
+
+        min_spk = values.get("diarization_min_speakers")
+        max_spk = values.get("diarization_max_speakers")
+        if min_spk is not None and max_spk is not None and int(min_spk) > int(max_spk):
+            raise ValueError("diarization_min_speakers cannot exceed diarization_max_speakers.")
+
+        tts_backend = values.get("tts_backend")
+        if tts_backend is not None and tts_backend not in SUPPORTED_TTS_BACKENDS:
+            raise ValueError(
+                "tts_backend must be one of: " + ", ".join(SUPPORTED_TTS_BACKENDS)
+            )
+
+        if values.get("omnivoice_num_steps") is not None:
+            try:
+                steps = int(values["omnivoice_num_steps"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("omnivoice_num_steps must be an integer.") from error
+            values["omnivoice_num_steps"] = max(8, min(64, steps))
 
         values = dict(values)
         add_gemini_key = values.pop("gemini_api_key_add", None)

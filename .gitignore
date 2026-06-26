@@ -27,6 +27,10 @@ vendor/*
 !vendor/manifest.json
 
 # Local / generated data
+.data/
+.data*/
+backend/.data/
+backend/.data*/
 *.db
 *.sqlite
 *.sqlite3
@@ -51,6 +55,7 @@ Desktop.ini
 
 # Editor
 .idea/
+.vscode/
 *.swp
 *.swo
 *~

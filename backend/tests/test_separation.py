@@ -47,7 +47,7 @@ def test_separate_vocals_writes_stems(
         runner=runner,
     )
 
-    mock_get_model.assert_called_once_with("htdemucs")
+    mock_get_model.assert_called_once_with("htdemucs_ft")
     mock_apply_model.assert_called_once()
     assert mock_normalize.call_count == 2
 

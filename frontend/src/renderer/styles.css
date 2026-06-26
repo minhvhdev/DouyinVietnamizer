@@ -478,3 +478,463 @@ select.settings-input {
   transform: translateY(1px);
 }
 
+/* Dashboard layout — full width + responsive job cards */
+.shell {
+  grid-template-columns: 230px minmax(0, 1fr);
+}
+
+main {
+  max-width: none;
+  width: 100%;
+  min-width: 0;
+  padding: clamp(20px, 2.5vw, 42px) clamp(16px, 3vw, 48px);
+}
+
+header {
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+h1 {
+  font-size: clamp(28px, 3.2vw, 38px);
+}
+
+.jobs,
+.new-job,
+.job-list {
+  width: 100%;
+}
+
+.job-list {
+  display: grid;
+  gap: 12px;
+}
+
+.job-card {
+  width: 100%;
+  min-width: 0;
+}
+
+.job-top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px 24px;
+  align-items: start;
+}
+
+.job-top-main {
+  min-width: 0;
+}
+
+.job-title {
+  margin: 8px 0 4px;
+  font-size: 16px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-subtitle {
+  color: #747d90;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: #626b7d;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-top-actions {
+  text-align: right;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* One row for any pipeline step count (was fixed at 12 columns) */
+.timeline {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  margin-top: 18px;
+  width: 100%;
+  min-width: 0;
+}
+
+.timeline div {
+  flex: 1 1 0;
+  min-width: 2px;
+  height: 6px;
+  border-radius: 999px;
+}
+
+.settings-page-layout {
+  max-width: none;
+  width: 100%;
+}
+
+.settings-shell {
+  width: 100%;
+  min-width: 0;
+}
+
+.settings-page-layout--tabbed {
+  display: block;
+  width: 100%;
+  grid-template-columns: unset;
+}
+
+.settings-header-compact {
+  margin-bottom: 8px;
+}
+
+.settings-toolbar {
+  display: flex;
+  align-items: stretch;
+  gap: 12px 16px;
+  margin-bottom: 18px;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  padding: 10px 0 12px;
+  background: linear-gradient(180deg, #0c0e13 78%, rgba(12, 14, 19, 0));
+  backdrop-filter: blur(6px);
+}
+
+.settings-save-slot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  align-self: center;
+}
+
+.settings-save-slot .save-settings-button {
+  padding: 12px 22px;
+  white-space: nowrap;
+}
+
+.settings-tabs {
+  display: flex;
+  gap: 6px;
+  padding-bottom: 2px;
+  overflow-x: auto;
+  flex-shrink: 0;
+  scrollbar-width: thin;
+}
+
+.settings-tabs--grow {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.settings-tabs--grow .settings-tab-btn {
+  flex: 1 1 0;
+  min-width: max(120px, 0);
+  justify-content: center;
+  text-align: center;
+}
+
+.settings-tab-btn {
+  flex: 0 0 auto;
+  padding: 10px 16px;
+  border-radius: 10px;
+  background: #161a22;
+  border: 1px solid #292f3b;
+  color: #8f97a6;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.settings-tab-btn:hover {
+  border-color: #434c5e;
+  color: #c9d1d9;
+}
+
+.settings-tab-btn.active {
+  background: #221f35;
+  border-color: #6244f7;
+  color: #c4b8ff;
+}
+
+.settings-tab-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+  gap: 16px;
+  width: 100%;
+  align-items: start;
+}
+
+.settings-card--full {
+  grid-column: 1 / -1;
+}
+
+.settings-tab-panel-footer {
+  grid-column: 1 / -1;
+}
+
+.settings-page-layout--tabbed .settings-card {
+  padding: 18px;
+  gap: 14px;
+  height: 100%;
+}
+
+.card-description--compact {
+  margin: -6px 0 0 !important;
+  font-size: 12px;
+}
+
+.settings-field-grid {
+  display: grid;
+  gap: 12px 16px;
+}
+
+.settings-field-grid--2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.settings-field-grid--3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.settings-field-grid__span-2 {
+  grid-column: 1 / -1;
+}
+
+.settings-label--inline {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-hint {
+  margin-top: 4px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
+  font-size: 12px;
+  color: #8b949e;
+  line-height: 1.45;
+}
+
+.settings-hint summary {
+  cursor: pointer;
+  color: #a79aff;
+  font-weight: 600;
+  user-select: none;
+}
+
+.settings-hint p {
+  margin: 8px 0 0;
+}
+
+.settings-hint--full {
+  grid-column: 1 / -1;
+}
+
+.speaker-voice-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px 14px;
+  margin-top: 12px;
+}
+
+.gemini-keys-list--scroll {
+  max-height: min(48vh, 420px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.settings-tab-link {
+  align-self: flex-start;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  color: #a79aff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.settings-tab-link:hover {
+  color: #c4b8ff;
+  text-decoration: underline;
+}
+
+@media (min-width: 1400px) {
+  .settings-field-grid--2 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .speaker-voice-grid {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .settings-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .settings-save-slot {
+    justify-content: flex-end;
+    padding-top: 4px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .settings-tabs--grow .settings-tab-btn {
+    flex: 0 0 auto;
+    min-width: max(130px, 0);
+  }
+}
+
+@media (max-width: 720px) {
+  .settings-field-grid--2,
+  .settings-field-grid--3 {
+    grid-template-columns: 1fr;
+  }
+
+  .speaker-voice-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-tab-panel {
+    grid-template-columns: 1fr;
+  }
+}
+
+.outputs-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
+  gap: 20px;
+  width: 100%;
+}
+
+@media (max-width: 900px) {
+  .job-top {
+    grid-template-columns: 1fr;
+  }
+
+  .job-top-actions {
+    text-align: left;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 16px;
+  }
+
+  .job-top-actions br {
+    display: none;
+  }
+}
+
+@media (max-width: 600px) {
+  .new-job form {
+    flex-direction: column;
+  }
+
+  .new-job button {
+    padding: 14px;
+    justify-content: center;
+  }
+
+  .job-title,
+  .job-subtitle {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+}
+
+
+/* Local video import */
+.import-job form {
+  display: grid;
+  gap: 12px;
+}
+
+.import-dropzone {
+  min-height: 92px;
+  padding: 18px !important;
+  border: 1px dashed #5a6478 !important;
+  background: rgba(114, 88, 246, 0.06) !important;
+  cursor: pointer;
+  transition: border-color .2s, background .2s, transform .2s;
+}
+
+.import-dropzone:hover {
+  border-color: #8e7bff !important;
+  background: rgba(114, 88, 246, 0.11) !important;
+  transform: translateY(-1px);
+}
+
+.import-dropzone svg {
+  color: #a79aff;
+  flex-shrink: 0;
+}
+
+.import-dropzone-info {
+  display: grid;
+  gap: 4px;
+}
+
+.import-dropzone-info strong {
+  color: #f5f7ff;
+}
+
+.import-dropzone-info span,
+.import-title-field span {
+  color: #8e96a7;
+  font-size: 13px;
+}
+
+.import-title-field {
+  align-items: stretch !important;
+  display: grid !important;
+  gap: 6px !important;
+  padding: 10px 14px !important;
+}
+
+.import-title-field input {
+  padding: 4px 0 8px !important;
+}
+
+.import-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #ffbcc9;
+  background: rgba(241, 111, 126, 0.08);
+  border: 1px solid rgba(241, 111, 126, 0.2);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+.import-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.import-actions button {
+  min-height: 46px;
+  justify-content: center;
+}
+
+.import-cancel {
+  background: rgba(255, 255, 255, 0.06) !important;
+  color: #c9ceda !important;
+}

@@ -10,6 +10,7 @@ from .checkpoints import PIPELINE_STEPS, checkpoint_path
 from .database import Database
 from .errors import AppError
 from .models import ErrorInfo, Job, JobStep
+from .source_urls import is_supported_source_host
 
 
 def utc_now() -> str:
@@ -17,19 +18,66 @@ def utc_now() -> str:
 
 
 class JobService:
+    SUPPORTED_IMPORT_EXTENSIONS = (
+        ".mp4", ".mov", ".m4v", ".mkv", ".webm", ".flv", ".avi", ".ts",
+        ".mp3", ".wav", ".m4a", ".ogg", ".opus",
+    )
+    IMPORTED_SOURCE_PREFIX = "import://"
+    SKIP_STEPS_FOR_IMPORT = ("resolve", "download")
+
     def __init__(self, database: Database, data_dir: Path) -> None:
         self.database = database
         self.data_dir = data_dir
+        self._sync_pipeline_steps()
+
+    def _sync_pipeline_steps(self) -> None:
+        """Keep persisted jobs aligned with the current pipeline definition."""
+        valid_steps = set(PIPELINE_STEPS)
+        job_rows = self.database.connection.execute("SELECT id FROM jobs").fetchall()
+        with self.database.connection:
+            self.database.connection.execute(
+                "DELETE FROM job_steps WHERE name NOT IN (%s)"
+                % ",".join("?" for _ in PIPELINE_STEPS),
+                tuple(PIPELINE_STEPS),
+            )
+            for job_row in job_rows:
+                job_id = job_row["id"]
+                existing = {
+                    row["name"]
+                    for row in self.database.connection.execute(
+                        "SELECT name FROM job_steps WHERE job_id = ?", (job_id,)
+                    ).fetchall()
+                    if row["name"] in valid_steps
+                }
+                for position, step_name in enumerate(PIPELINE_STEPS):
+                    if step_name in existing:
+                        self.database.connection.execute(
+                            "UPDATE job_steps SET position = ? WHERE job_id = ? AND name = ?",
+                            (position, job_id, step_name),
+                        )
+                    else:
+                        self.database.connection.execute(
+                            """
+                            INSERT INTO job_steps (job_id, name, position, status, checkpoint_path)
+                            VALUES (?, ?, ?, 'pending', ?)
+                            """,
+                            (
+                                job_id,
+                                step_name,
+                                position,
+                                str(checkpoint_path(self.data_dir, job_id, step_name)),
+                            ),
+                        )
 
     def create(self, source_url: str) -> Job:
         host = (urlparse(source_url).hostname or "").lower()
-        if host != "douyin.com" and not host.endswith(".douyin.com"):
+        if not is_supported_source_host(host):
             raise AppError(
                 422,
                 ErrorInfo(
-                    code="INVALID_DOUYIN_URL",
-                    message="The URL is not a recognized Douyin link.",
-                    action="Paste a video, share, or channel URL from douyin.com.",
+                    code="INVALID_SOURCE_URL",
+                    message="The URL is not a recognized Douyin or Bilibili link.",
+                    action="Paste a video or share URL from douyin.com or bilibili.com.",
                 ),
             )
         job_id = str(uuid4())
@@ -46,6 +94,98 @@ class JobService:
                     for position, name in enumerate(PIPELINE_STEPS)
                 ],
             )
+        return self.get(job_id)
+
+    def create_imported(
+        self,
+        file_path: Path,
+        *,
+        original_filename: str,
+        title: str | None = None,
+    ) -> Job:
+        """Create a job from a local video file.
+
+        The uploaded file is copied into the job artifacts directory
+        as original.mp4 and the resolve + download steps are marked
+        as completed so the pipeline picks up at extract_audio.
+        """
+        if not file_path.is_file():
+            raise AppError(
+                400,
+                ErrorInfo(
+                    code="IMPORT_FILE_MISSING",
+                    message="The uploaded file is missing or could not be read.",
+                    action="Pick a valid video file and try again.",
+                ),
+            )
+
+        suffix = file_path.suffix.lower()
+        if suffix not in self.SUPPORTED_IMPORT_EXTENSIONS:
+            raise AppError(
+                415,
+                ErrorInfo(
+                    code="IMPORT_UNSUPPORTED_FORMAT",
+                    message=f"Unsupported file format: {suffix or '(none)'}",
+                    action=f"Use one of: {', '.join(self.SUPPORTED_IMPORT_EXTENSIONS)}",
+                ),
+            )
+
+        job_id = str(uuid4())
+        now = utc_now()
+        job_dir = self.data_dir / 'jobs' / job_id
+        artifacts_dir = job_dir / 'artifacts'
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+        stored_path = artifacts_dir / 'original.mp4'
+        try:
+            shutil.copy2(file_path, stored_path)
+        except OSError as exc:
+            raise AppError(
+                500,
+                ErrorInfo(
+                    code="IMPORT_FILE_SAVE_FAILED",
+                    message="Failed to save the imported file to the job workspace.",
+                    action="Check disk space and write permissions, then try again.",
+                    detail=str(exc),
+                ),
+            )
+
+        safe_filename = Path(original_filename or 'imported').name or 'imported'
+        source_url = f'{self.IMPORTED_SOURCE_PREFIX}{safe_filename}'
+        resolved_title = (title or '').strip() or Path(safe_filename).stem
+
+        skip_set = set(self.SKIP_STEPS_FOR_IMPORT)
+        first_active_idx = 0
+        for i, name in enumerate(PIPELINE_STEPS):
+            if name not in skip_set:
+                first_active_idx = i
+                break
+
+        with self.database.connection:
+            self.database.connection.execute(
+                "INSERT INTO jobs (id, source_url, title, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, 'queued', ?, ?)",
+                (job_id, source_url, resolved_title, now, now),
+            )
+            self.database.connection.executemany(
+                "INSERT INTO job_steps (job_id, name, position, status, checkpoint_path) "
+                "VALUES (?, ?, ?, 'pending', ?)",
+                [
+                    (job_id, name, position, str(checkpoint_path(self.data_dir, job_id, name)))
+                    for position, name in enumerate(PIPELINE_STEPS)
+                ],
+            )
+            for step_name in self.SKIP_STEPS_FOR_IMPORT:
+                self.database.connection.execute(
+                    "UPDATE job_steps SET status = 'completed', completed_at = ? "
+                    "WHERE job_id = ? AND name = ?",
+                    (now, job_id, step_name),
+                )
+            self.database.connection.execute(
+                "UPDATE jobs SET current_step = ?, updated_at = ? WHERE id = ?",
+                (PIPELINE_STEPS[first_active_idx], now, job_id),
+            )
+
         return self.get(job_id)
 
     def list(self) -> list[Job]:
@@ -204,8 +344,9 @@ class JobService:
             "SELECT name, position, status, checkpoint_path FROM job_steps WHERE job_id = ? ORDER BY position",
             (row["id"],),
         ).fetchall()
+        valid_steps = set(PIPELINE_STEPS)
         return Job(
             **dict(row),
-            steps=[JobStep(**dict(step)) for step in steps],
+            steps=[JobStep(**dict(step)) for step in steps if step["name"] in valid_steps],
         )
 

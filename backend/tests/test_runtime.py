@@ -15,6 +15,10 @@ READY_ESPEAK = RuntimeCheck(
     id="espeak", display_name="eSpeak NG", status="ready", required=True,
     message="ok", action="none",
 )
+READY_PYANNOTE = RuntimeCheck(
+    id="pyannote_model", display_name="Pyannote Community-1", status="ready", required=True,
+    message="ok", action="none",
+)
 
 
 def write_manifest(path: Path, required: bool = True) -> Path:
@@ -49,6 +53,7 @@ def service(tmp_path: Path, required: bool = True, allow_path: bool = True):
 def test_smoke_test_ready_and_persisted(tmp_path: Path) -> None:
     with (
         patch("dv_backend.adapters.asr.cuda_available", return_value=True),
+        patch("dv_backend.runtime.RuntimeSmokeTestService._check_pyannote_model", return_value=READY_PYANNOTE),
         patch("dv_backend.runtime.RuntimeSmokeTestService._check_vieneu", return_value=READY_VIENEU),
         patch("dv_backend.runtime.RuntimeSmokeTestService._check_espeak", return_value=READY_ESPEAK),
     ):
@@ -57,6 +62,7 @@ def test_smoke_test_ready_and_persisted(tmp_path: Path) -> None:
     assert report.checks[-1].source == "path"
     with (
         patch("dv_backend.adapters.asr.cuda_available", return_value=True),
+        patch("dv_backend.runtime.RuntimeSmokeTestService._check_pyannote_model", return_value=READY_PYANNOTE),
         patch("dv_backend.runtime.RuntimeSmokeTestService._check_vieneu", return_value=READY_VIENEU),
         patch("dv_backend.runtime.RuntimeSmokeTestService._check_espeak", return_value=READY_ESPEAK),
     ):
@@ -71,6 +77,7 @@ def test_missing_required_tool_blocks_runtime(tmp_path: Path) -> None:
 def test_missing_optional_tool_only_warns(tmp_path: Path) -> None:
     with (
         patch("dv_backend.adapters.asr.cuda_available", return_value=True),
+        patch("dv_backend.runtime.RuntimeSmokeTestService._check_pyannote_model", return_value=READY_PYANNOTE),
         patch("dv_backend.runtime.RuntimeSmokeTestService._check_vieneu", return_value=READY_VIENEU),
         patch("dv_backend.runtime.RuntimeSmokeTestService._check_espeak", return_value=READY_ESPEAK),
     ):

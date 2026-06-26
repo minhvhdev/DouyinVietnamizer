@@ -72,4 +72,3 @@ class Database:
         if "title_vi" not in columns:
             self.connection.execute("ALTER TABLE jobs ADD COLUMN title_vi TEXT")
         self.connection.commit()
-

@@ -1,17 +1,14 @@
 from unittest.mock import Mock
 
-from fastapi import FastAPI
-
 from dv_backend import main
 
 
-def test_main_passes_concrete_app_to_uvicorn(monkeypatch) -> None:
-    app = FastAPI()
+def test_main_uses_factory_app_entrypoint(monkeypatch) -> None:
     run = Mock()
-    monkeypatch.setattr(main, "create_app", lambda: app)
     monkeypatch.setattr(main.uvicorn, "run", run)
 
     main.main()
 
-    assert run.call_args.args[0] is app
-    assert "factory" not in run.call_args.kwargs
+    assert run.call_args.args[0] == "dv_backend.api:create_app"
+    assert run.call_args.kwargs["factory"] is True
+    assert run.call_args.kwargs["host"] == "127.0.0.1"

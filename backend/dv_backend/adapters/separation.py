@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 MIX_MODE_DUCK = "duck"
 MIX_MODE_SEPARATE = "separate"
 SUPPORTED_MIX_MODES = {MIX_MODE_DUCK, MIX_MODE_SEPARATE}
+DEFAULT_DEMUCS_MODEL = "htdemucs_ft"
+FALLBACK_DEMUCS_MODEL = "htdemucs"
 
 
 def _save_stem_wav(path: Path, wav: torch.Tensor, sample_rate: int) -> None:
@@ -80,7 +82,15 @@ def separate_vocals(
         demucs_device,
     )
     try:
-        model = get_model("htdemucs")
+        try:
+            model = get_model(DEFAULT_DEMUCS_MODEL)
+        except Exception:
+            logger.warning(
+                "Demucs model %s unavailable, falling back to %s",
+                DEFAULT_DEMUCS_MODEL,
+                FALLBACK_DEMUCS_MODEL,
+            )
+            model = get_model(FALLBACK_DEMUCS_MODEL)
         model.to(demucs_device)
         model.eval()
 

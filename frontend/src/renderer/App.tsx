@@ -42,18 +42,7 @@ const PIPELINE_STEPS = [
   "qc",
 ] as const;
 
-const VIENEU_PRESET_VOICES = [
-  "Ngọc Lan",
-  "Gia Bảo",
-  "Thái Sơn",
-  "Đức Trí",
-  "Mỹ Duyên",
-  "Trúc Ly",
-  "Xuân Vĩnh",
-  "Trọng Hữu",
-  "Bình An",
-  "Ngọc Linh",
-] as const;
+const PRESET_VOICES = [] as const;
 
 const translateStatus = (status?: string) => {
   if (!status) return "đang kiểm tra";
@@ -191,17 +180,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     translation_backend: "google_free",
     translation_source_language: "zh-CN",
     translation_target_language: "vi",
-    tts_backend: "vieneu",
-    vieneu_voice: "Xuân Vĩnh",
-    vieneu_device: "cuda",
-    vieneu_model: "pnnbao-ump/VieNeu-TTS-v3-Turbo",
     mix_mode: "duck",
-    speaker_diarization: false,
-    speaker_voices: {
-      "0": "Xuân Vĩnh",
-      "1": "Ngọc Linh",
-      "2": "Gia Bảo",
-    },
     subtitles_enabled: true,
     subtitle_font_size: 48,
     subtitle_font_color: "#FFFFFF",
@@ -585,7 +564,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
         gemini_api_key_update,
         ...savePayload
       } = settings;
-      savePayload.tts_backend = "vieneu";
+      savePayload.tts_backend = "omnivoice";
       const pendingGeminiKey = newGeminiKey.trim();
       if (pendingGeminiKey) {
         savePayload.gemini_api_key_add = pendingGeminiKey;
@@ -1008,7 +987,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                     <h3>Thêm Giọng Nhân Bản Mới</h3>
                   </div>
                   <p className="card-description">
-                    Tải lên một tệp âm thanh mẫu (tần số tối ưu là 16kHz - 48kHz, định dạng .wav, dài từ 3-10 giây) để sử dụng với VieNeu-TTS.
+                    Tải lên một tệp âm thanh mẫu (tần số tối ưu là 16kHz - 48kHz, định dạng .wav, dài từ 3-10 giây) để sử dụng với OmniVoice.
                   </p>
                   
                   <form onSubmit={handleUploadVoice} style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
@@ -1189,7 +1168,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
             <header className="settings-header">
               <div>
                 <h1>Cài đặt ứng dụng</h1>
-                <p className="settings-subtitle">Cấu hình dịch thuật, giọng đọc VieNeu-TTS và quản lý khóa API Gemini.</p>
+                <p className="settings-subtitle">Cấu hình dịch thuật, OmniVoice và quản lý khóa API Gemini.</p>
               </div>
             </header>
             <form onSubmit={handleSaveSettings} className="settings-page-layout">
@@ -1335,108 +1314,45 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                 <section className="settings-card">
                   <div className="card-header-accent">
                     <span className="accent-bar"></span>
-                    <h3>Lồng tiếng VieNeu-TTS</h3>
+                    <h3>Lồng tiếng OmniVoice</h3>
                   </div>
                   <p className="card-description">
-                    Lồng tiếng offline với <strong>VieNeu-TTS v3 Turbo</strong> (48 kHz). Hỗ trợ giọng có sẵn và clone giọng từ tệp mẫu.
+                    OmniVoice là engine TTS duy nhất. Chọn audio tham chiếu .wav, nhập voice design, hoặc để auto voice.
                   </p>
                   <div className="inputs-vertical-stack">
                     <label className="settings-label">
-                      <span>Giọng đọc VieNeu</span>
+                      <span>Audio tham chiếu (.wav)</span>
                       <select
                         className="settings-input"
-                        value={settings.vieneu_voice ?? "Xuân Vĩnh"}
-                        onChange={(e) => setSettings({ ...settings, vieneu_voice: e.target.value })}
+                        value={settings.omnivoice_ref_audio ?? ""}
+                        onChange={(e) => setSettings({ ...settings, omnivoice_ref_audio: e.target.value })}
                       >
-                        <optgroup label="Giọng đọc có sẵn">
-                          {VIENEU_PRESET_VOICES.map((voice) => (
-                            <option key={voice} value={voice}>{voice}</option>
-                          ))}
-                        </optgroup>
-                        {clonedVoices.length > 0 && (
-                          <optgroup label="Giọng clone của bạn">
-                            {clonedVoices.map((voice) => (
-                              <option key={voice.id} value={voice.wav_path}>
-                                {voice.name}
-                              </option>
-                            ))}
-                          </optgroup>
-                        )}
+                        <option value="">Không dùng / Auto voice</option>
+                        {clonedVoices.map((voice) => (
+                          <option key={voice.id} value={voice.wav_path}>
+                            {voice.name}
+                          </option>
+                        ))}
                       </select>
                     </label>
                     <label className="settings-label">
-                      <span>Hoặc nhập đường dẫn tệp .wav clone thủ công</span>
+                      <span>Voice design (tùy chọn)</span>
                       <input
                         className="settings-input"
-                        placeholder="C:\thu-muc\giong-mau.wav"
-                        value={
-                          settings.vieneu_voice &&
-                          settings.vieneu_voice.endsWith(".wav") &&
-                          !clonedVoices.some((v) => v.wav_path === settings.vieneu_voice)
-                            ? settings.vieneu_voice
-                            : ""
-                        }
-                        onChange={(e) => setSettings({ ...settings, vieneu_voice: e.target.value })}
+                        placeholder="female, low pitch"
+                        value={settings.omnivoice_instruct ?? ""}
+                        onChange={(e) => setSettings({ ...settings, omnivoice_instruct: e.target.value })}
                       />
                     </label>
-                    <div className="alert-info-box info">
-                      <CircleAlert size={14} style={{ flexShrink: 0, marginTop: "2px" }} />
-                      <span>
-                        VieNeu-TTS v3 Turbo chạy offline trên GPU CUDA (bắt buộc). RTX 50-series cần PyTorch <strong>cu128</strong>.
-                      </span>
-                    </div>
+                    <label className="settings-label" style={{ flexDirection: "row", alignItems: "center", gap: "10px" }}>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(settings.omnivoice_auto_voice ?? true)}
+                        onChange={(e) => setSettings({ ...settings, omnivoice_auto_voice: e.target.checked })}
+                      />
+                      <span>Auto voice khi không có audio tham chiếu</span>
+                    </label>
                   </div>
-                </section>
-
-                <section className="settings-card">
-                  <div className="card-header-accent">
-                    <span className="accent-bar"></span>
-                    <h3>Phân biệt người nói</h3>
-                  </div>
-                  <p className="card-description">
-                    Dùng FunASR + CampPlus để gán nhãn người nói cho từng câu, rồi lồng tiếng bằng giọng VieNeu khác nhau.
-                  </p>
-                  <label className="settings-label" style={{ flexDirection: "row", alignItems: "center", gap: "10px" }}>
-                    <input
-                      type="checkbox"
-                      checked={Boolean(settings.speaker_diarization)}
-                      onChange={(e) => setSettings({ ...settings, speaker_diarization: e.target.checked })}
-                    />
-                    <span>Bật phân biệt người nói (FunASR diarization)</span>
-                  </label>
-                  {settings.speaker_diarization && (
-                    <div className="inputs-vertical-stack" style={{ marginTop: "12px" }}>
-                      {(["0", "1", "2"] as const).map((speakerId) => (
-                        <label key={speakerId} className="settings-label">
-                          <span>Giọng lồng tiếng cho người nói {Number(speakerId) + 1} (Speaker {speakerId})</span>
-                          <select
-                            className="settings-input"
-                            value={(settings.speaker_voices ?? {})[speakerId] ?? "Xuân Vĩnh"}
-                            onChange={(e) =>
-                              setSettings({
-                                ...settings,
-                                speaker_voices: {
-                                  ...(settings.speaker_voices ?? {}),
-                                  [speakerId]: e.target.value,
-                                },
-                              })
-                            }
-                          >
-                            {VIENEU_PRESET_VOICES.map((voice) => (
-                              <option key={voice} value={voice}>{voice}</option>
-                            ))}
-                          </select>
-                        </label>
-                      ))}
-                      <div className="alert-info-box warning">
-                        <CircleAlert size={14} style={{ flexShrink: 0, marginTop: "2px" }} />
-                        <span>
-                          Bước ASR sẽ chậm hơn và tốn thêm VRAM. Chỉ bật khi video có nhiều người nói xen kẽ.
-                          Tạo tiến trình mới để áp dụng (không áp dụng cho job đã chạy ASR trước đó).
-                        </span>
-                      </div>
-                    </div>
-                  )}
                 </section>
 
                 <section className="settings-card">

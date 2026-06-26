@@ -8,6 +8,8 @@ from pydantic import BaseModel
 
 from .config import AppConfig
 from .database import Database
+from .pyannote_vendor import huggingface_token, pyannote_bootstrap_action, pyannote_model_dir, validate_pyannote_model_dir
+from .settings import SettingsService
 from .tool_probe import probe_executable
 from .vendor import VendorManifest, VendorResolver
 
@@ -58,8 +60,7 @@ class RuntimeSmokeTestService:
             self._check_storage(),
             self._check_sqlite(),
             self._check_qwen3_asr(),
-            self._check_vieneu(),
-            self._check_espeak(),
+            self._check_omnivoice(),
         ]
         try:
             manifest = VendorManifest.load(self.manifest_path)
@@ -156,28 +157,51 @@ class RuntimeSmokeTestService:
                 detail=str(error),
             )
 
-    def _check_vieneu(self) -> RuntimeCheck:
-        try:
-            import vieneu  # noqa: F401
+    def _check_omnivoice(self) -> RuntimeCheck:
+        from .omnivoice_env import is_omnivoice_available, omnivoice_venv_root
+        from .adapters.omnivoice_client import acquire_client, release_all_clients
 
+        if not is_omnivoice_available():
             return RuntimeCheck(
-                id="vieneu",
-                display_name="VieNeu-TTS",
-                status="ready",
-                required=True,
-                message="VieNeu-TTS Python package is installed.",
-                action="No action required.",
-            )
-        except ImportError as error:
-            return RuntimeCheck(
-                id="vieneu",
-                display_name="VieNeu-TTS",
+                id="omnivoice",
+                display_name="OmniVoice",
                 status="blocked",
                 required=True,
-                message="VieNeu-TTS is not installed in the backend environment.",
-                action="Run 'uv sync' in the backend folder, then rerun the smoke test.",
-                detail=str(error),
+                message="OmniVoice is not installed in the isolated virtualenv.",
+                action="Run 'python scripts/setup_omnivoice.py' in the backend folder.",
+                resolved_path=str(omnivoice_venv_root()),
             )
+        try:
+            client = acquire_client(
+                data_dir=self.config.data_dir,
+                model="k2-fsa/OmniVoice",
+                device="cpu",
+                num_steps=8,
+            )
+            client._ensure_alive()
+        except Exception as exc:  # noqa: BLE001
+            return RuntimeCheck(
+                id="omnivoice",
+                display_name="OmniVoice",
+                status="blocked",
+                required=True,
+                message="OmniVoice worker could not be started.",
+                action="Re-run 'python scripts/setup_omnivoice.py' and verify the worker script.",
+                resolved_path=str(omnivoice_venv_root()),
+                detail=str(exc),
+            )
+        finally:
+            release_all_clients()
+        return RuntimeCheck(
+            id="omnivoice",
+            display_name="OmniVoice",
+            status="ready",
+            required=True,
+            message="OmniVoice isolated environment and worker are operational.",
+            action="No action required.",
+            resolved_path=str(omnivoice_venv_root()),
+        )
+
 
     def _check_espeak(self) -> RuntimeCheck:
         from .hardware import detect_espeak
@@ -196,8 +220,8 @@ class RuntimeSmokeTestService:
             display_name="eSpeak NG",
             status="warning",
             required=False,
-            message="eSpeak NG was not found (optional for VieNeu-TTS v3).",
-            action="No action required for VieNeu-TTS v3 Turbo.",
+            message="eSpeak NG was not found.",
+            action="No action required.",
         )
 
     @staticmethod

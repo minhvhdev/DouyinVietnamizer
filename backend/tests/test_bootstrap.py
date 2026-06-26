@@ -40,7 +40,8 @@ def test_bootstrap_downloads_and_extracts(tmp_path):
 
     with patch("urllib.request.urlopen", side_effect=mock_urlopen), \
          patch("urllib.request.Request"), \
-         patch("dv_backend.bootstrap.BootstrapManager._download_qwen_models") as mock_qwen:
+         patch("dv_backend.bootstrap.BootstrapManager._download_qwen_models") as mock_qwen, \
+         patch("dv_backend.bootstrap.BootstrapManager._download_pyannote_models") as mock_pyannote:
 
          vendor_dir = tmp_path / "vendor"
          default_manifest = tmp_path / "default_manifest.json"
@@ -76,3 +77,4 @@ def test_bootstrap_downloads_and_extracts(tmp_path):
          assert (vendor_dir / "ffmpeg" / "ffprobe.exe").is_file()
          assert (vendor_dir / "yt-dlp" / "yt-dlp.exe").is_file()
          mock_qwen.assert_called_once_with(vendor_dir)
+         mock_pyannote.assert_called_once_with(vendor_dir)

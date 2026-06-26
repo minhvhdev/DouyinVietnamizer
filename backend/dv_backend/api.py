@@ -15,11 +15,67 @@ from .config import AppConfig
 from .database import Database
 from .errors import AppError, app_error_handler
 from .jobs import JobService
+from .local_env import load_repo_dotenv
 from .models import ErrorInfo, Job, JobCreate, JobRerun
 from .runtime import RuntimeReport, default_runtime_service
 from .runner import JobRunner
-from .checkpoints import load_checkpoint, save_checkpoint
+from .checkpoints import load_checkpoint
 from .settings import SettingsService
+
+
+def _synthesize_voice_preview(
+    *,
+    voice: str,
+    text: str,
+    settings: dict[str, Any],
+    output_suffix: str,
+) -> Path:
+    from .adapters.tts import OMNIVOICE_INSTRUCT_PREFIX, create_tts_adapter
+
+    cleaned_text = (text or "").strip()
+    if not cleaned_text:
+        raise AppError(
+            400,
+            ErrorInfo(
+                code="PREVIEW_TEXT_EMPTY",
+                message="Preview text is required.",
+                action="Enter a short sentence to synthesize.",
+            ),
+        )
+
+    tts = create_tts_adapter(settings)
+    output_wav = Path(tempfile.gettempdir()) / f"voice_preview_{output_suffix}_{uuid4().hex}.wav"
+    preview_voice = voice
+    instruct = str(settings.get("omnivoice_instruct") or "").strip()
+    if instruct and not voice.lower().endswith(".wav"):
+        preview_voice = f"{OMNIVOICE_INSTRUCT_PREFIX}{instruct}"
+    try:
+        tts.synthesize(text=cleaned_text, output_path=output_wav, voice=preview_voice)
+    except AppError:
+        raise
+    except Exception as exc:
+        code = "OMNIVOICE_SYNTHESIZE_FAILED"
+        label = "OmniVoice"
+        raise AppError(
+            502,
+            ErrorInfo(
+                code=code,
+                message=f"Failed to synthesize preview audio using {label}.",
+                action="Run 'python scripts/setup_omnivoice.py' for OmniVoice.",
+                detail=str(exc),
+            ),
+        ) from exc
+
+    if not output_wav.is_file() or output_wav.stat().st_size == 0:
+        raise AppError(
+            500,
+            ErrorInfo(
+                code="SYNTHESIZED_EMPTY",
+                message="Synthesized audio is empty.",
+                action="Try another text sentence.",
+            ),
+        )
+    return output_wav
 
 
 class VideoSelect(BaseModel):
@@ -31,6 +87,7 @@ class BootstrapPayload(BaseModel):
 
 
 def create_app(config: AppConfig | None = None) -> FastAPI:
+    load_repo_dotenv()
     config = config or AppConfig.from_env()
     config.ensure_directories()
     database = Database(config.database_path)
@@ -61,6 +118,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.get("/api/capabilities")
     def capabilities() -> dict:
+        from .adapters.tts import SUPPORTED_TTS_BACKENDS
+
         runtime_status = runtime.latest()
         return {
             "cpu_mode": False,
@@ -71,7 +130,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 "normalize_segments", "translate", "tts", "duration_repair",
                 "mix", "render", "qc"
             ],
-            "tts_backend": "vieneu",
+            "tts_backend": "omnivoice",
+            "tts_backends": list(SUPPORTED_TTS_BACKENDS),
             "runtime_status": runtime_status.status if runtime_status else "not_run",
         }
 
@@ -105,6 +165,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         )
         return {"status": "started" if success else "already_running"}
 
+    @app.post("/api/runtime/bootstrap-pyannote")
+    def bootstrap_pyannote() -> dict:
+        from .bootstrap import BootstrapManager
+
+        project_root = Path(__file__).resolve().parents[2]
+        vendor_dir = Path(os.environ.get("DV_VENDOR_DIR", project_root / "vendor"))
+        success = BootstrapManager.start_pyannote_bootstrap(vendor_dir)
+        return {"status": "started" if success else "already_running"}
+
     @app.get("/api/runtime/bootstrap-progress")
     def bootstrap_progress() -> dict:
         from .bootstrap import BootstrapManager
@@ -118,6 +187,61 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     def create_job(payload: JobCreate) -> Job:
         job = jobs.create(payload.source_url)
         # Automatically trigger job run
+        runner.start_job(job.id)
+        return jobs.get(job.id)
+
+    @app.post("/api/jobs/import", status_code=201, response_model=Job)
+    def import_job(
+        file: UploadFile = File(...),
+        title: str | None = Form(default=None),
+    ) -> Job:
+        original_filename = file.filename or 'imported'
+        safe_filename = Path(original_filename).name or 'imported'
+        suffix = Path(safe_filename).suffix.lower()
+        if suffix not in JobService.SUPPORTED_IMPORT_EXTENSIONS:
+            raise AppError(
+                415,
+                ErrorInfo(
+                    code="IMPORT_UNSUPPORTED_FORMAT",
+                    message=f"Unsupported file format: {suffix or (none)}",
+                    action=f"Use one of: {', '.join(JobService.SUPPORTED_IMPORT_EXTENSIONS)}",
+                ),
+            )
+
+        tmp_dir = Path(tempfile.gettempdir()) / 'dv_imports'
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = tmp_dir / f"{uuid4().hex}{suffix}"
+        try:
+            with tmp_path.open('wb') as buffer:
+                shutil.copyfileobj(file.file, buffer)
+        except Exception as exc:
+            raise AppError(
+                500,
+                ErrorInfo(
+                    code="IMPORT_FILE_SAVE_FAILED",
+                    message="Failed to save the uploaded file.",
+                    action="Check disk space and write permissions, then try again.",
+                    detail=str(exc),
+                ),
+            )
+        finally:
+            try:
+                file.file.close()
+            except Exception:
+                pass
+
+        try:
+            job = jobs.create_imported(
+                tmp_path,
+                original_filename=safe_filename,
+                title=title.strip() if title else None,
+            )
+        finally:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
         runner.start_job(job.id)
         return jobs.get(job.id)
 
@@ -358,6 +482,22 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    class VoicePreviewPayload(BaseModel):
+        voice: str
+        text: str
+
+    @app.post("/api/voices/preview")
+    def preview_voice(payload: VoicePreviewPayload) -> FileResponse:
+        voice = (payload.voice or "").strip()
+        raw_settings = settings.get_raw_all()
+        output_wav = _synthesize_voice_preview(
+            voice=voice,
+            text=payload.text,
+            settings=raw_settings,
+            output_suffix="omnivoice",
+        )
+        return FileResponse(str(output_wav), media_type="audio/wav", filename="preview_omnivoice.wav")
+
     @app.get("/api/cloned-voices")
     def list_cloned_voices() -> list[dict]:
         rows = database.connection.execute(
@@ -508,45 +648,18 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     action="Re-upload the reference WAV file."
                 )
             )
-            
-        from .adapters.tts import VieNeuTtsAdapter
+
         raw_settings = settings.get_raw_all()
-        vieneu_tts = VieNeuTtsAdapter(
-            device=str(raw_settings.get("vieneu_device", "cuda") or "cuda"),
-        )
-        
-        temp_dir = Path(tempfile.gettempdir())
-        output_wav = temp_dir / f"test_synthesize_{voice_id}_{uuid4().hex}.wav"
-        
         try:
-            vieneu_tts.synthesize(
+            output_wav = _synthesize_voice_preview(
+                voice=str(wav_path),
                 text=payload.text,
-                output_path=output_wav,
-                voice=str(wav_path)
+                settings=raw_settings,
+                output_suffix=f"clone_{voice_id}",
             )
         except AppError as e:
             raise e
-        except Exception as e:
-            raise AppError(
-                502,
-                ErrorInfo(
-                    code="VIENEU_SYNTHESIZE_FAILED",
-                    message="Failed to synthesize test audio using VieNeu-TTS.",
-                    action="Ensure VieNeu-TTS is installed and configured properly.",
-                    detail=str(e)
-                )
-            )
-            
-        if not output_wav.is_file() or output_wav.stat().st_size == 0:
-            raise AppError(
-                500,
-                ErrorInfo(
-                    code="SYNTHESIZED_EMPTY",
-                    message="Synthesized audio is empty.",
-                    action="Try another text sentence."
-                )
-            )
-            
+
         return FileResponse(str(output_wav), media_type="audio/wav", filename="test_output.wav")
 
     app.state.config = config
