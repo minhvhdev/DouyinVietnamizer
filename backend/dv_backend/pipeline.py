@@ -20,7 +20,7 @@ from .checkpoints import load_checkpoint, save_checkpoint
 from .checkpoint_compat import ASR_ALIGNMENT_SCHEMA_VERSION
 from .vendor import VendorManifest, VendorResolver
 from .adapters.translation import GoogleFreeTranslator
-from .adapters.tts import create_tts_adapter
+from .adapters.tts import VOXCPM_INSTRUCT_PREFIX, create_tts_adapter
 from .adapters.asr import reset_model_cache, transcribe_audio
 from .adapters.separation import MIX_MODE_SEPARATE, separate_vocals
 from .adapters.subtitles import ffmpeg_subtitles_filter, probe_video_dimensions, write_ass_file
@@ -909,10 +909,10 @@ def translate_step(job_id: str, config: AppConfig, database: Database, runner) -
 
 
 def _default_tts_voice(settings: dict) -> str:
-    instruct = str(settings.get("omnivoice_instruct") or "").strip()
+    instruct = str(settings.get("voxcpm_instruct") or "").strip()
     if instruct:
-        return f"instruct:{instruct}"
-    ref_audio = str(settings.get("omnivoice_ref_audio") or "").strip()
+        return f"{VOXCPM_INSTRUCT_PREFIX}{instruct}"
+    ref_audio = str(settings.get("voxcpm_ref_audio") or "").strip()
     if ref_audio:
         return ref_audio
     return "auto"
@@ -1312,7 +1312,7 @@ def mix_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
             vocals_out=vocals_wav,
             bgm_out=bgm_wav,
             ffmpeg_path=ffmpeg_path,
-            device=str(settings.get("omnivoice_device", "cuda:0") or "cuda:0"),
+            device=str(settings.get("voxcpm_device", "cuda:0") or "cuda:0"),
             job_id=job_id,
             runner=runner,
         )

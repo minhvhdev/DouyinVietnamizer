@@ -30,7 +30,7 @@ def _synthesize_voice_preview(
     settings: dict[str, Any],
     output_suffix: str,
 ) -> Path:
-    from .adapters.tts import OMNIVOICE_INSTRUCT_PREFIX, create_tts_adapter
+    from .adapters.tts import VOXCPM_INSTRUCT_PREFIX, create_tts_adapter
 
     cleaned_text = (text or "").strip()
     if not cleaned_text:
@@ -46,22 +46,22 @@ def _synthesize_voice_preview(
     tts = create_tts_adapter(settings)
     output_wav = Path(tempfile.gettempdir()) / f"voice_preview_{output_suffix}_{uuid4().hex}.wav"
     preview_voice = voice
-    instruct = str(settings.get("omnivoice_instruct") or "").strip()
+    instruct = str(settings.get("voxcpm_instruct") or "").strip()
     if instruct and not voice.lower().endswith(".wav"):
-        preview_voice = f"{OMNIVOICE_INSTRUCT_PREFIX}{instruct}"
+        preview_voice = f"{VOXCPM_INSTRUCT_PREFIX}{instruct}"
     try:
         tts.synthesize(text=cleaned_text, output_path=output_wav, voice=preview_voice)
     except AppError:
         raise
     except Exception as exc:
-        code = "OMNIVOICE_SYNTHESIZE_FAILED"
-        label = "OmniVoice"
+        code = "VOXCPM_SYNTHESIZE_FAILED"
+        label = "VoxCPM2"
         raise AppError(
             502,
             ErrorInfo(
                 code=code,
                 message=f"Failed to synthesize preview audio using {label}.",
-                action="Run 'python scripts/setup_omnivoice.py' for OmniVoice.",
+                action="Run 'python scripts/setup_voxcpm.py' for VoxCPM2.",
                 detail=str(exc),
             ),
         ) from exc
@@ -130,7 +130,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 "normalize_segments", "translate", "tts", "duration_repair",
                 "mix", "render", "qc"
             ],
-            "tts_backend": "omnivoice",
+            "tts_backend": "voxcpm",
             "tts_backends": list(SUPPORTED_TTS_BACKENDS),
             "runtime_status": runtime_status.status if runtime_status else "not_run",
         }
@@ -494,9 +494,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             voice=voice,
             text=payload.text,
             settings=raw_settings,
-            output_suffix="omnivoice",
+            output_suffix="voxcpm",
         )
-        return FileResponse(str(output_wav), media_type="audio/wav", filename="preview_omnivoice.wav")
+        return FileResponse(str(output_wav), media_type="audio/wav", filename="preview_voxcpm.wav")
 
     @app.get("/api/cloned-voices")
     def list_cloned_voices() -> list[dict]:
