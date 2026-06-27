@@ -56,6 +56,110 @@ pub fn parse_uvicorn_stderr(s: &str) -> String {
     }
 }
 
+use std::time::Duration;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum BackendStartError {
+    #[error("failed to spawn uvicorn: {0}")]
+    Spawn(String),
+    #[error("backend did not become ready within {0:?}")]
+    Timeout(Duration),
+    #[error("backend crashed (code={code:?}); stderr:\n{stderr}")]
+    Crashed { code: Option<i32>, stderr: String },
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BackendStatus {
+    pub base_url: String,
+    pub kind: BackendStatusKind,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BackendStatusKind {
+    Starting,
+    Ready,
+    Crashed { stderr: String },
+    AlreadyRunning,
+}
+
+// Backward-compatible alias used by callers that expected the prior internal name.
+pub type _BackendStatus = BackendStatus;
+
+/// Spawn `uv run python -m dv_backend.main` with `current_dir = backend_dir`.
+/// When `dev_profile` is true, sets `DV_RELOAD=1` so uvicorn watches source files.
+pub fn spawn_uvicorn(backend_dir: &Path, dev_profile: bool) -> Result<std::process::Child, BackendStartError> {
+    use std::process::Stdio;
+    let mut cmd = std::process::Command::new("uv");
+    cmd.args(["run", "python", "-m", "dv_backend.main"])
+        .current_dir(backend_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if dev_profile {
+        cmd.env("DV_RELOAD", "1");
+    } else {
+        cmd.env("DV_RELOAD", "0");
+    }
+    cmd.spawn().map_err(|e| BackendStartError::Spawn(e.to_string()))
+}
+
+/// Poll `GET {base_url}/health` every 100ms up to `timeout`. On timeout, kill child.
+/// If child exits during polling, drain stderr and return Crashed.
+pub async fn wait_for_ready(
+    base_url: &str,
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<(), BackendStartError> {
+    let poll_interval = Duration::from_millis(100);
+    let start = std::time::Instant::now();
+    loop {
+        if is_health_ok(base_url).await {
+            return Ok(());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stderr = drain_stderr(child);
+                return Err(BackendStartError::Crashed {
+                    code: status.code(),
+                    stderr: parse_uvicorn_stderr(&stderr),
+                });
+            }
+            Ok(None) => { /* still running */ }
+            Err(e) => return Err(BackendStartError::Spawn(e.to_string())),
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            return Err(BackendStartError::Timeout(timeout));
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
+pub async fn is_health_ok(base_url: &str) -> bool {
+    let url = format!("{}/health", base_url.trim_end_matches('/'));
+    match reqwest::Client::builder()
+        .timeout(Duration::from_millis(200))
+        .build()
+    {
+        Ok(client) => client.get(&url).send().await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+fn drain_stderr(child: &mut std::process::Child) -> String {
+    use std::io::Read;
+    if let Some(mut s) = child.stderr.take() {
+        let mut buf = String::new();
+        let _ = s.read_to_string(&mut buf);
+        return buf;
+    }
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,5 +205,29 @@ mod tests {
         assert!(out.contains("[truncated]"));
         assert!(out.starts_with("..."));
         assert!(out.len() <= 8192);
+    }
+
+    #[tokio::test]
+    async fn is_health_ok_returns_false_for_unbound_port() {
+        // Port 1 is reserved and almost never listening; any connection attempt fails fast.
+        assert!(!is_health_ok("http://127.0.0.1:1").await);
+    }
+
+    #[tokio::test]
+    async fn is_health_ok_returns_true_for_listening_server() {
+        use tokio::io::{AsyncWriteExt, AsyncReadExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            // Accept one connection, respond with HTTP/1.1 200, then close.
+            if let Ok((mut s, _)) = listener.accept().await {
+                let mut req = [0u8; 1024];
+                let _ = s.read(&mut req).await;
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+                let _ = s.shutdown().await;
+            }
+        });
+        assert!(is_health_ok(&format!("http://127.0.0.1:{}", port)).await);
     }
 }
