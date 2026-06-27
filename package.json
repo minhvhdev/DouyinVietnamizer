@@ -3,6 +3,8 @@
   "private": true,
   "packageManager": "pnpm@10.12.1",
   "scripts": {
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
     "setup": "pnpm install && pnpm run setup:backend",
     "setup:backend": "cd backend && uv sync --group dev",
     "dev": "pnpm dlx kill-port 8765 && concurrently -k -n backend,ui -c blue,magenta \"pnpm run dev:backend\" \"pnpm run dev:frontend\"",
@@ -14,6 +16,7 @@
     "build": "pnpm --filter frontend build"
   },
   "devDependencies": {
-    "concurrently": "^9.2.1"
+    "concurrently": "^9.2.1",
+    "@tauri-apps/cli": "^2"
   }
 }
