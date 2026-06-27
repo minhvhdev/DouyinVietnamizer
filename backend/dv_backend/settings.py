@@ -20,7 +20,7 @@ from .adapters.subtitles import (
     normalize_hex_color,
     normalize_position,
 )
-from .adapters.tts import SUPPORTED_TTS_BACKENDS, OMNIVOICE_DEFAULT_MODEL
+from .adapters.tts import SUPPORTED_TTS_BACKENDS, VOXCPM_DEFAULT_MODEL
 from .database import Database
 
 
@@ -30,15 +30,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "translation_backend": "google_free",
     "translation_source_language": "zh-CN",
     "translation_target_language": "vi",
-    "omnivoice_model": OMNIVOICE_DEFAULT_MODEL,
-    "omnivoice_device": "cuda:0",
-    "omnivoice_ref_audio": "",
-    "omnivoice_instruct": "",
-    "omnivoice_auto_voice": True,
-    "omnivoice_num_steps": 32,
-    "omnivoice_batch_size": 4,
-    "omnivoice_batch_flush_ms": 150,
-    "omnivoice_cache_enabled": True,
+    "voxcpm_model": VOXCPM_DEFAULT_MODEL,
+    "voxcpm_device": "cuda:0",
+    "voxcpm_ref_audio": "",
+    "voxcpm_instruct": "",
+    "voxcpm_auto_voice": True,
+    "voxcpm_num_steps": 10,
+    "voxcpm_batch_size": 4,
+    "voxcpm_batch_flush_ms": 150,
+    "voxcpm_cache_enabled": True,
     "mix_mode": "duck",
     "gemini_api_keys": [],
     "gemini_key_cursor": 0,
@@ -279,12 +279,12 @@ class SettingsService:
                 "tts_backend must be one of: " + ", ".join(SUPPORTED_TTS_BACKENDS)
             )
 
-        if values.get("omnivoice_num_steps") is not None:
+        if values.get("voxcpm_num_steps") is not None:
             try:
-                steps = int(values["omnivoice_num_steps"])
+                steps = int(values["voxcpm_num_steps"])
             except (TypeError, ValueError) as error:
-                raise ValueError("omnivoice_num_steps must be an integer.") from error
-            values["omnivoice_num_steps"] = max(8, min(64, steps))
+                raise ValueError("voxcpm_num_steps must be an integer.") from error
+            values["voxcpm_num_steps"] = max(4, min(64, steps))
 
         values = dict(values)
         add_gemini_key = values.pop("gemini_api_key_add", None)

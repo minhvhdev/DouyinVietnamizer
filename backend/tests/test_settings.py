@@ -18,8 +18,8 @@ def test_defaults_use_free_portable_pipeline(tmp_path: Path) -> None:
 
     assert settings.get_all()["cookies_browser"] == "none"
     assert settings.get_all()["translation_backend"] == "google_free"
-    assert settings.get_all()["omnivoice_model"] == "k2-fsa/OmniVoice"
-    assert settings.get_all()["omnivoice_device"] == "cuda:0"
+    assert settings.get_all()["voxcpm_model"] == "openbmb/VoxCPM2"
+    assert settings.get_all()["voxcpm_device"] == "cuda:0"
     assert settings.get_all()["mix_mode"] == "duck"
     assert settings.get_all()["exact_timing_enabled"] is True
     assert settings.get_all()["exact_timing_tolerance_ms"] == 40
@@ -87,15 +87,15 @@ def test_subtitle_settings_accepts_supported_values(tmp_path: Path) -> None:
 
 def test_update_does_not_replace_unrelated_settings(tmp_path: Path) -> None:
     settings = service(tmp_path)
-    settings.update({"omnivoice_ref_audio": "C:/voice.wav"})
+    settings.update({"voxcpm_ref_audio": "C:/voice.wav"})
 
     rows = settings.database.connection.execute(
-        "SELECT key, value FROM settings WHERE key IN ('omnivoice_ref_audio', 'translation_backend')"
+        "SELECT key, value FROM settings WHERE key IN ('voxcpm_ref_audio', 'translation_backend')"
     ).fetchall()
     values = {row["key"]: json.loads(row["value"]) for row in rows}
 
     assert values == {
-        "omnivoice_ref_audio": "C:/voice.wav",
+        "voxcpm_ref_audio": "C:/voice.wav",
         "translation_backend": "google_free",
     }
 
