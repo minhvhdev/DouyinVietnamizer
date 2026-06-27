@@ -17,6 +17,7 @@ from dv_backend.adapters.tts import (
 )
 from dv_backend.adapters.voxcpm_cache import VoxCPMCache, cache_key
 from dv_backend.errors import AppError
+import dv_backend.voxcpm_env as voxcpm_env
 
 
 # ---------------------------------------------------------------------------
@@ -85,3 +86,30 @@ def test_cache_miss_returns_false(tmp_path: Path) -> None:
     dest = tmp_path / "dest.wav"
     assert cache.materialize(key, dest) is False
     assert not dest.exists()
+
+
+# ---------------------------------------------------------------------------
+# voxcpm_env resolver
+# ---------------------------------------------------------------------------
+
+
+def test_voxcpm_venv_root_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DV_VOXCPM_VENV", raising=False)
+    root = voxcpm_env.voxcpm_venv_root()
+    assert root.name == ".venv-voxcpm"
+
+
+def test_voxcpm_venv_root_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("DV_VOXCPM_VENV", str(tmp_path))
+    assert voxcpm_env.voxcpm_venv_root() == tmp_path
+
+
+def test_resolve_voxcpm_python_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("DV_VOXCPM_VENV", str(tmp_path))
+    with pytest.raises(FileNotFoundError):
+        voxcpm_env.resolve_voxcpm_python()
+
+
+def test_is_voxcpm_available_when_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("DV_VOXCPM_VENV", str(tmp_path))
+    assert voxcpm_env.is_voxcpm_available() is False
