@@ -24,6 +24,8 @@ import {
 
 import type { Job, JobsApi, OutputItem, RuntimeCheck, RuntimeReport, ClonedVoice } from "../shared/contracts";
 import { api as defaultApi } from "../shared/api";
+import { invokeOpenDevtools, subscribeBackendEvents, waitForBackend, type BackendStatus } from "../lib/tauri-bridge";
+import { SetupWizard } from "./SetupWizard";
 import "./styles.css";
 import "./runtime.css";
 
@@ -159,6 +161,10 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   const [bootstrapProgress, setBootstrapProgress] = useState<any>(null);
   const [bootstrapRunning, setBootstrapRunning] = useState<boolean>(false);
 
+  // Tauri-side backend status (Python server managed by the Rust shell)
+  const [backend, setBackend] = useState<BackendStatus | null>(null);
+  const [backendError, setBackendError] = useState<string | null>(null);
+
   // Selected job details modal state
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
@@ -288,6 +294,23 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
 
     return () => clearInterval(interval);
   }, [api, selectedJobId, activeTab]);
+
+  // Tauri bridge: wait for Python backend to be ready, subscribe to crash events
+  useEffect(() => {
+    waitForBackend({ timeoutMs: 30_000 })
+      .then((baseUrl) => setBackend({ kind: "ready", base_url: baseUrl }))
+      .catch((e) => {
+        if (e && typeof e === "object" && "kind" in e) {
+          setBackend(e as BackendStatus);
+        } else {
+          setBackendError(String(e));
+        }
+      });
+    const unlisten = subscribeBackendEvents({
+      onCrashed: (stderr) => setBackend({ kind: "crashed", stderr }),
+    });
+    return () => { unlisten?.(); };
+  }, []);
 
   async function refreshClonedVoices() {
     try {
@@ -646,6 +669,37 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
   }
 
+  if (backend?.kind === "setup_required" || backend?.kind === "crashed") {
+    return (
+      <SetupWizard
+        status={backend}
+        onComplete={(baseUrl) => setBackend({ kind: "ready", base_url: baseUrl })}
+        onOpenBackendFolder={() => {
+          // Best-effort: open via Tauri shell plugin if available; otherwise copy path
+          if (typeof window !== "undefined") {
+            window.alert("Open the backend/ folder in your file manager.");
+          }
+        }}
+        onCopyError={(text) => navigator.clipboard?.writeText(text)}
+      />
+    );
+  }
+
+  if (backendError) {
+    return (
+      <div className="p-6 text-red-600">
+        Could not reach backend: {backendError}
+        <button onClick={() => location.reload()} className="ml-3 underline">Retry</button>
+      </div>
+    );
+  }
+
+  if (!backend || backend.kind === "starting") {
+    return (
+      <div className="p-6 text-zinc-600">Starting backend…</div>
+    );
+  }
+
   if (runtime?.status === "blocked") {
     return (
       <div className="wizard-container">
@@ -813,6 +867,12 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
 
   return (
     <div className="shell">
+      <button
+        onClick={() => invokeOpenDevtools().catch(() => {})}
+        className="fixed top-2 right-2 px-2 py-1 text-xs rounded bg-zinc-200 hover:bg-zinc-300 z-50"
+      >
+        Devtools
+      </button>
       <aside>
         <div className="brand">
           <span>DV</span>
