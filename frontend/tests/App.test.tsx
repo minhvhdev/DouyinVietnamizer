@@ -152,13 +152,13 @@ test("runtime panel distinguishes required and optional warnings", async () => {
   expect(screen.getByText("Thiáº¿u tuá»³ chá»n")).toBeInTheDocument();
 });
 
-test("shows translation and OmniVoice settings with browser cookie disclosure", async () => {
+test("shows translation and VoxCPM2 settings with browser cookie disclosure", async () => {
   const api: JobsApi = {
     ...baseApi,
     getSettings: vi.fn().mockResolvedValue({
       cookies_browser: "none",
       translation_backend: "google_free",
-      tts_backend: "omnivoice",
+      tts_backend: "voxcpm",
     })
   };
   render(<App api={api} />);
@@ -169,7 +169,7 @@ test("shows translation and OmniVoice settings with browser cookie disclosure", 
   expect(screen.getByText(/cookie dÃ¹ng cho yt-dlp/i)).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: "Giá»ng & Speaker" }));
-  expect(screen.getByText("Lá»“ng tiáº¿ng OmniVoice")).toBeInTheDocument();
+  expect(screen.getByText("Lá»“ng tiáº¿ng VoxCPM2")).toBeInTheDocument();
 });
 
 test("manages Gemini API key pool from settings", async () => {
@@ -189,7 +189,7 @@ test("manages Gemini API key pool from settings", async () => {
     getSettings: vi.fn().mockResolvedValue({
       cookies_browser: "none",
       translation_backend: "gemini",
-      tts_backend: "omnivoice",
+      tts_backend: "voxcpm",
       gemini_api_keys: [{ id: "key-1", masked: "AIza...7890", label: "Studio quota 1" }],
       gemini_translation_model: "gemini-2.5-flash",
     })
@@ -233,7 +233,7 @@ test("saves a pending Gemini key when saving settings", async () => {
     getSettings: vi.fn().mockResolvedValue({
       cookies_browser: "none",
       translation_backend: "gemini",
-      tts_backend: "omnivoice",
+      tts_backend: "voxcpm",
       gemini_api_keys: []
     })
   };
@@ -265,7 +265,7 @@ test("does not resend stale Gemini key command fields from settings", async () =
     getSettings: vi.fn().mockResolvedValue({
       cookies_browser: "none",
       translation_backend: "gemini",
-      tts_backend: "omnivoice",
+      tts_backend: "voxcpm",
       gemini_api_keys: [],
       gemini_api_key_add: "AIzaSyStaleSecret1234567890"
     })

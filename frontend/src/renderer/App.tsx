@@ -564,7 +564,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
         gemini_api_key_update,
         ...savePayload
       } = settings;
-      savePayload.tts_backend = "omnivoice";
+      savePayload.tts_backend = "voxcpm";
       const pendingGeminiKey = newGeminiKey.trim();
       if (pendingGeminiKey) {
         savePayload.gemini_api_key_add = pendingGeminiKey;
@@ -987,7 +987,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                     <h3>Thêm Giọng Nhân Bản Mới</h3>
                   </div>
                   <p className="card-description">
-                    Tải lên một tệp âm thanh mẫu (tần số tối ưu là 16kHz - 48kHz, định dạng .wav, dài từ 3-10 giây) để sử dụng với OmniVoice.
+                    Tải lên một tệp âm thanh mẫu (tần số tối ưu là 16kHz - 48kHz, định dạng .wav, dài từ 3-10 giây) để sử dụng với VoxCPM2.
                   </p>
                   
                   <form onSubmit={handleUploadVoice} style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
@@ -1168,7 +1168,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
             <header className="settings-header">
               <div>
                 <h1>Cài đặt ứng dụng</h1>
-                <p className="settings-subtitle">Cấu hình dịch thuật, OmniVoice và quản lý khóa API Gemini.</p>
+                <p className="settings-subtitle">Cấu hình dịch thuật, VoxCPM2 và quản lý khóa API Gemini.</p>
               </div>
             </header>
             <form onSubmit={handleSaveSettings} className="settings-page-layout">
@@ -1314,18 +1314,18 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                 <section className="settings-card">
                   <div className="card-header-accent">
                     <span className="accent-bar"></span>
-                    <h3>Lồng tiếng OmniVoice</h3>
+                    <h3>Lồng tiếng VoxCPM2</h3>
                   </div>
                   <p className="card-description">
-                    OmniVoice là engine TTS duy nhất. Chọn audio tham chiếu .wav, nhập voice design, hoặc để auto voice.
+                    VoxCPM2 là engine TTS duy nhất. Chọn audio tham chiếu .wav, nhập voice design, hoặc để auto voice.
                   </p>
                   <div className="inputs-vertical-stack">
                     <label className="settings-label">
                       <span>Audio tham chiếu (.wav)</span>
                       <select
                         className="settings-input"
-                        value={settings.omnivoice_ref_audio ?? ""}
-                        onChange={(e) => setSettings({ ...settings, omnivoice_ref_audio: e.target.value })}
+                        value={settings.voxcpm_ref_audio ?? ""}
+                        onChange={(e) => setSettings({ ...settings, voxcpm_ref_audio: e.target.value })}
                       >
                         <option value="">Không dùng / Auto voice</option>
                         {clonedVoices.map((voice) => (
@@ -1340,15 +1340,15 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                       <input
                         className="settings-input"
                         placeholder="female, low pitch"
-                        value={settings.omnivoice_instruct ?? ""}
-                        onChange={(e) => setSettings({ ...settings, omnivoice_instruct: e.target.value })}
+                        value={settings.voxcpm_instruct ?? ""}
+                        onChange={(e) => setSettings({ ...settings, voxcpm_instruct: e.target.value })}
                       />
                     </label>
                     <label className="settings-label" style={{ flexDirection: "row", alignItems: "center", gap: "10px" }}>
                       <input
                         type="checkbox"
-                        checked={Boolean(settings.omnivoice_auto_voice ?? true)}
-                        onChange={(e) => setSettings({ ...settings, omnivoice_auto_voice: e.target.checked })}
+                        checked={Boolean(settings.voxcpm_auto_voice ?? true)}
+                        onChange={(e) => setSettings({ ...settings, voxcpm_auto_voice: e.target.checked })}
                       />
                       <span>Auto voice khi không có audio tham chiếu</span>
                     </label>
