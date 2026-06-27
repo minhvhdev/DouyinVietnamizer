@@ -113,3 +113,43 @@ def test_resolve_voxcpm_python_missing(monkeypatch: pytest.MonkeyPatch, tmp_path
 def test_is_voxcpm_available_when_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("DV_VOXCPM_VENV", str(tmp_path))
     assert voxcpm_env.is_voxcpm_available() is False
+
+
+# ---------------------------------------------------------------------------
+# Worker regression: must call model.generate with VoxCPM2 kwargs
+# ---------------------------------------------------------------------------
+
+
+def test_worker_generate_uses_real_voxcpm_api(monkeypatch) -> None:
+    """Regression: worker must call model.generate with VoxCPM2 kwargs."""
+    from dv_backend.adapters import voxcpm_worker
+
+    class FakeEngine:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def generate(self, text, **kwargs):
+            self.calls.append((text, kwargs))
+            return b"audio"
+
+    fake_voxcpm = type("FakeVoxCPMModule", (), {"VoxCPM": type("VoxCPM", (), {})})
+    monkeypatch.setitem(__import__("sys").modules, "voxcpm", fake_voxcpm)
+    engine = FakeEngine()
+
+    result = voxcpm_worker._generate(
+        engine,
+        "(female, low pitch)Xin chao",
+        prompt_wav_path="ref.wav",
+        prompt_text="hello",
+        voice_design="female, low pitch",
+        cfg_value=2.0,
+        inference_timesteps=10,
+    )
+
+    assert result == b"audio"
+    text, kwargs = engine.calls[0]
+    assert text == "(female, low pitch)Xin chao"
+    assert kwargs["prompt_wav_path"] == "ref.wav"
+    assert kwargs["prompt_text"] == "hello"
+    assert kwargs["cfg_value"] == 2.0
+    assert kwargs["inference_timesteps"] == 10
