@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Douyin Vietnamizer",
+  "version": "0.1.0",
+  "identifier": "com.douyinvietnamizer.app",
+  "build": {
+    "beforeDevCommand": "pnpm --filter frontend dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "pnpm --filter frontend build",
+    "frontendDist": "../frontend/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Douyin Vietnamizer",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "msi",
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico"
+    ]
+  }
+}
