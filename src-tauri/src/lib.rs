@@ -1,1 +1,12 @@
-// placeholder — real entry is src/main.rs added in Task 2
+pub mod backend;
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .setup(|_app| Ok(()))
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
