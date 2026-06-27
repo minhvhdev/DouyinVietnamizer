@@ -59,7 +59,7 @@ pub fn parse_uvicorn_stderr(s: &str) -> String {
 use std::time::Duration;
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, serde::Serialize)]
 pub enum BackendStartError {
     #[error("failed to spawn uvicorn: {0}")]
     Spawn(String),
@@ -89,9 +89,9 @@ pub type _BackendStatus = BackendStatus;
 
 /// Spawn `uv run python -m dv_backend.main` with `current_dir = backend_dir`.
 /// When `dev_profile` is true, sets `DV_RELOAD=1` so uvicorn watches source files.
-pub fn spawn_uvicorn(backend_dir: &Path, dev_profile: bool) -> Result<std::process::Child, BackendStartError> {
+pub fn spawn_uvicorn(backend_dir: &Path, dev_profile: bool) -> Result<tokio::process::Child, BackendStartError> {
     use std::process::Stdio;
-    let mut cmd = std::process::Command::new("uv");
+    let mut cmd = tokio::process::Command::new("uv");
     cmd.args(["run", "python", "-m", "dv_backend.main"])
         .current_dir(backend_dir)
         .stdin(Stdio::null())
@@ -109,7 +109,7 @@ pub fn spawn_uvicorn(backend_dir: &Path, dev_profile: bool) -> Result<std::proce
 /// If child exits during polling, drain stderr and return Crashed.
 pub async fn wait_for_ready(
     base_url: &str,
-    child: &mut std::process::Child,
+    child: &mut tokio::process::Child,
     timeout: Duration,
 ) -> Result<(), BackendStartError> {
     let poll_interval = Duration::from_millis(100);
@@ -120,7 +120,7 @@ pub async fn wait_for_ready(
         }
         match child.try_wait() {
             Ok(Some(status)) => {
-                let stderr = drain_stderr(child);
+                let stderr = drain_stderr(child).await;
                 return Err(BackendStartError::Crashed {
                     code: status.code(),
                     stderr: parse_uvicorn_stderr(&stderr),
@@ -130,7 +130,7 @@ pub async fn wait_for_ready(
             Err(e) => return Err(BackendStartError::Spawn(e.to_string())),
         }
         if start.elapsed() >= timeout {
-            let _ = child.kill();
+            let _ = child.start_kill();
             return Err(BackendStartError::Timeout(timeout));
         }
         tokio::time::sleep(poll_interval).await;
@@ -150,8 +150,8 @@ pub async fn is_health_ok(base_url: &str) -> bool {
     }
 }
 
-fn drain_stderr(child: &mut std::process::Child) -> String {
-    use std::io::Read;
+async fn drain_stderr(child: &mut tokio::process::Child) -> String {
+    use tokio::io::AsyncReadExt;
     if let Some(mut s) = child.stderr.take() {
         let mut buf = String::new();
         let _ = s.read_to_string(&mut buf);

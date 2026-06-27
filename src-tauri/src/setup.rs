@@ -11,7 +11,7 @@ pub struct SetupProgress {
     pub pct: u8,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, serde::Serialize)]
 pub enum SetupError {
     #[error("uv is not installed; see https://docs.astral.sh/uv/")]
     UvNotInstalled,
