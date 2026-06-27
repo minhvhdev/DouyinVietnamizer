@@ -35,6 +35,17 @@ pnpm test
 
 Development state defaults to `%LOCALAPPDATA%\DouyinVietnamizer`. Set `DV_DATA_DIR` to override it.
 
+## Tauri desktop app
+
+`pnpm tauri:dev` opens the app in a Tauri window. Rust spawns the Python backend as a child process on `127.0.0.1:8765`. On first launch, a setup wizard runs `uv python install 3.12` and `uv sync` automatically.
+
+Hot-reload during development:
+- Edit `frontend/src/renderer/**` — Vite HMR refreshes the window.
+- Edit `backend/dv_backend/**` — uvicorn's `--reload` (already enabled) picks it up.
+- Edit `src-tauri/src/**` — Cargo rebuilds the affected crate, window refreshes.
+
+`pnpm tauri:build` produces `src-tauri/target/release/bundle/msi/*.msi`. Install in a clean VM to verify the first-run wizard end-to-end. Existing `pnpm dev` and `pnpm test` workflows remain available for non-Tauri work.
+
 ## Vendor tools
 
 `vendor/manifest.json` declares FFmpeg and yt-dlp.
