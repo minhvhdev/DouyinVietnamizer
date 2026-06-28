@@ -335,7 +335,7 @@ If a Windows CI workflow already exists, **add the `dist-portable/.../douyin-vie
 ## Error handling
 
 - **CI build fail on macOS**: log all steps; upload `dist-portable/macos-staging/` partial output for debugging. Do not silently fail.
-- **Tauri icon missing**: the `tauri build` step requires `icon.icns`; if missing, generate via `png2icns` in a prep step from `icons/icon.png` (or commit a hand-made one).
+- **Tauri icon missing**: the `tauri build` step requires `icon.icns`. The maintainer generates it once from `icons/icon.png` (using `png2icns icons/icon.png icons/icon.icns` on any platform) and commits it to `src-tauri/icons/icon.icns`. No runtime generation in CI.
 - **Port conflict on macOS**: `kill_port_listeners_macos` (lsof + kill -9) handles leftover uvicorn. `lsof` is in macOS base system.
 - **Python deps fail to resolve**: macOS arm64 wheels exist for torch (MPS build), torchaudio, transformers, demucs, funasr, pyannote-audio, onnxruntime, qwen-asr, scipy. The build script uses default PyPI index (no CUDA extras) to avoid the cu128 mismatch.
 - **Model download fail**: `huggingface_hub` retries on transient errors; cache key includes pyproject hash so a stable cache is reused.
