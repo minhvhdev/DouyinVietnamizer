@@ -28,7 +28,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "resources": ["../vendor/portable-runtime"],
     "icon": [
       "icons/icon.png",
       "icons/icon.ico",
