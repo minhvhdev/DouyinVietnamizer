@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from .config import AppConfig
 from .database import Database
+from .error_logging import configure_error_logging
 from .errors import AppError, app_error_handler
 from .jobs import JobService
 from .local_env import load_repo_dotenv
@@ -90,6 +91,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     load_repo_dotenv()
     config = config or AppConfig.from_env()
     config.ensure_directories()
+    configure_error_logging(config)
     database = Database(config.database_path)
     database.migrate()
 
