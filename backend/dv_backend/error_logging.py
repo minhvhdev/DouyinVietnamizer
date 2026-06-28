@@ -46,7 +46,7 @@ def _build_handler(path: Path) -> logging.handlers.RotatingFileHandler:
     return handler
 
 
-def _excepthook(handler: logging.Handler, previous) -> None:
+def _excepthook(previous) -> None:
     def hook(exc_type, exc_value, exc_tb) -> None:
         try:
             logging.getLogger(_MARKER).error(
@@ -79,5 +79,5 @@ def configure_error_logging(config: AppConfig) -> logging.Handler:
     handler._dv_error_handler = True  # type: ignore[attr-defined]
     root.addHandler(handler)
 
-    sys.excepthook = _excepthook(handler, sys.excepthook)
+    sys.excepthook = _excepthook(sys.excepthook)
     return handler
