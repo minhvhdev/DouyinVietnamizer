@@ -17,7 +17,7 @@ if [ ! -x "$RUNTIME/python/bin/python3" ]; then
   echo ">>> Downloading python-build-standalone CPython $PY_VERSION (arm64 macOS)..."
   mkdir -p "$RUNTIME"
   curl -fL "$PBS_URL" -o "$STAGING/pbs.tar.gz"
-  tar -xzf "$STAGING/pbs.tar.gz" -C "$RUNTIME" --strip-components=1
+  tar -xzf "$STAGING/pbs.tar.gz" -C "$RUNTIME"
   rm "$STAGING/pbs.tar.gz"
 fi
 PY="$RUNTIME/python/bin/python3"
