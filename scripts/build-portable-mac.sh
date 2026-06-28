@@ -6,7 +6,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DST_NAME="DouyinVietnamizer-0.1.0-portable"
 DST="$REPO_ROOT/dist-portable/$DST_NAME"
 STAGING_RUNTIME="$REPO_ROOT/dist-portable/macos-staging/portable-runtime"
-APP_PATH="$REPO_ROOT/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/DouyinVietnamizer.app"
+APP_PATH="$REPO_ROOT/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Douyin Vietnamizer.app"
 
 if [ ! -d "$APP_PATH" ]; then
   echo "ERROR: $APP_PATH not found. Run 'pnpm tauri build --target aarch64-apple-darwin' first." >&2

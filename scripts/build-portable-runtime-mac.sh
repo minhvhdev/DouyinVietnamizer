@@ -6,10 +6,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STAGING="$REPO_ROOT/dist-portable/macos-staging"
 RUNTIME="$STAGING/portable-runtime"
-PY_VERSION="3.12.7"
-PY_TAG="20240909"
+PY_VERSION="3.12.13"
+PY_TAG="20260623"
 PBS_BASE="https://github.com/astral-sh/python-build-standalone/releases/download"
-PBS_URL="$PBS_BASE/$PY_TAG/cpython-$PY_VERSION+aarch64-apple-darwin-install_only.tar.gz"
+PBS_URL="$PBS_BASE/$PY_TAG/cpython-$PY_VERSION+$PY_TAG-aarch64-apple-darwin-install_only.tar.gz"
 
 mkdir -p "$STAGING"
 
