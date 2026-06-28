@@ -117,13 +117,24 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn make_runtime(root: &Path) {
-        fs::create_dir_all(root.join(".venv/Scripts")).unwrap();
-        fs::write(root.join(".venv/Scripts/python.exe"), b"").unwrap();
+        let python = test_python(root);
+        fs::create_dir_all(python.parent().unwrap()).unwrap();
+        fs::write(python, b"").unwrap();
         fs::create_dir_all(root.join("backend/dv_backend")).unwrap();
         fs::create_dir_all(root.join("tools/ffmpeg")).unwrap();
         fs::create_dir_all(root.join("tools/yt-dlp")).unwrap();
         fs::create_dir_all(root.join("models/qwen3-asr")).unwrap();
         fs::create_dir_all(root.join("models/voxcpm2")).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn test_python(root: &Path) -> PathBuf {
+        root.join(".venv/Scripts/python.exe")
+    }
+
+    #[cfg(not(windows))]
+    fn test_python(root: &Path) -> PathBuf {
+        root.join(".venv/bin/python")
     }
 
     #[test]
@@ -175,10 +186,14 @@ mod tests {
 
     #[test]
     fn prepends_tool_path() {
-        let got = prepend_path(Path::new("C:/rt/tools"), Some(OsString::from("C:/Windows")));
+        let dir = tempdir().unwrap();
+        let tools = dir.path().join("tools");
+        let system = dir.path().join("system");
+        let current = env::join_paths([system.clone()]).unwrap();
+        let got = prepend_path(&tools, Some(current));
         let parts = env::split_paths(&got).collect::<Vec<_>>();
-        assert_eq!(parts[0], PathBuf::from("C:/rt/tools"));
-        assert_eq!(parts[1], PathBuf::from("C:/Windows"));
+        assert_eq!(parts[0], tools);
+        assert_eq!(parts[1], system);
     }
 
     #[cfg(target_os = "macos")]
