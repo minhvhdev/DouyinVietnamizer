@@ -4,7 +4,7 @@
     {
       "id": "ffmpeg",
       "display_name": "FFmpeg",
-      "executable": "ffmpeg/ffmpeg.exe",
+      "executable": "tools/ffmpeg/ffmpeg.exe",
       "dev_command": "ffmpeg",
       "version_args": ["-version"],
       "version_contains": "ffmpeg",
@@ -14,7 +14,7 @@
     {
       "id": "yt_dlp",
       "display_name": "yt-dlp",
-      "executable": "yt-dlp/yt-dlp.exe",
+      "executable": "tools/yt-dlp/yt-dlp.exe",
       "dev_command": "yt-dlp",
       "version_args": ["--version"],
       "version_contains": "",

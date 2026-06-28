@@ -5,6 +5,7 @@
   "scripts": {
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
+    "tauri:build:portable": "powershell -ExecutionPolicy Bypass -File scripts/build-portable.ps1",
     "setup": "pnpm install && pnpm run setup:backend",
     "setup:backend": "cd backend && uv sync --group dev",
     "dev": "pnpm dlx kill-port 8765 && concurrently -k -n backend,ui -c blue,magenta \"pnpm run dev:backend\" \"pnpm run dev:frontend\"",
