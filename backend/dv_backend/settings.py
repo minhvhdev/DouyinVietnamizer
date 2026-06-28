@@ -3,7 +3,6 @@ import json
 from typing import Any
 import uuid
 
-from .adapters.separation import SUPPORTED_MIX_MODES
 from .adapters.subtitles import (
     DEFAULT_SUBTITLE_BACKGROUND_COLOR,
     DEFAULT_SUBTITLE_BACKGROUND_OPACITY,
@@ -20,8 +19,9 @@ from .adapters.subtitles import (
     normalize_hex_color,
     normalize_position,
 )
-from .adapters.tts import LEGACY_INVALID_PRESET_VOICES, VIENEU_PRESET_VOICES
+from .adapters.tts import SUPPORTED_TTS_BACKENDS, VOXCPM_DEFAULT_MODEL
 from .database import Database
+
 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
@@ -29,10 +29,16 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "translation_backend": "google_free",
     "translation_source_language": "zh-CN",
     "translation_target_language": "vi",
-    "tts_backend": "vieneu",
-    "vieneu_voice": "Xuân Vĩnh",
-    "vieneu_device": "cuda",
-    "vieneu_model": "pnnbao-ump/VieNeu-TTS-v3-Turbo",
+    "voxcpm_model": VOXCPM_DEFAULT_MODEL,
+    "voxcpm_device": "cuda:0",
+    "voxcpm_ref_audio": "",
+    "voxcpm_instruct": "",
+    "voxcpm_auto_voice": True,
+    "voxcpm_num_steps": 10,
+    "voxcpm_batch_size": 4,
+    "voxcpm_batch_flush_ms": 150,
+    "voxcpm_cache_enabled": True,
+    "voxcpm_clone_mode": "reference",
     "mix_mode": "duck",
     "gemini_api_keys": [],
     "gemini_key_cursor": 0,
@@ -41,12 +47,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "qwen3_asr_model": "Qwen/Qwen3-ASR-1.7B",
     "qwen3_aligner_model": "Qwen/Qwen3-ForcedAligner-0.6B",
     "qwen3_device": "cuda:0",
-    "speaker_diarization": False,
-    "speaker_voices": {
-        "0": "Xuân Vĩnh",
-        "1": "Ngọc Linh",
-        "2": "Gia Bảo",
-    },
+    "exact_timing_enabled": True,
+    "exact_timing_tolerance_ms": 40,
+    "exact_timing_max_stretch": 1.8,
     "subtitles_enabled": True,
     "subtitle_font_size": DEFAULT_SUBTITLE_FONT_SIZE,
     "subtitle_font_color": DEFAULT_SUBTITLE_FONT_COLOR,
@@ -58,6 +61,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 }
 
 SUPPORTED_COOKIE_BROWSERS = {"none", "edge", "chrome", "firefox", "brave"}
+SUPPORTED_MIX_MODES = {"duck"}
+SUPPORTED_VOXCPM_CLONE_MODES = {"reference", "ultimate"}
 
 
 def mask_api_key(api_key: str) -> str:
@@ -80,28 +85,8 @@ class SettingsService:
                     (key, json.dumps(value), now),
                 )
             self._migrate_legacy_pending_gemini_key(now)
-            self._migrate_legacy_vieneu_voice(now)
 
-    def _migrate_legacy_vieneu_voice(self, now: str) -> None:
-        row = self.database.connection.execute(
-            "SELECT value FROM settings WHERE key = 'vieneu_voice'"
-        ).fetchone()
-        if row is None:
-            return
-        try:
-            voice = str(json.loads(row["value"])).strip()
-        except (TypeError, json.JSONDecodeError):
-            return
-        if voice in LEGACY_INVALID_PRESET_VOICES or (
-            not voice.lower().endswith(".wav") and voice not in VIENEU_PRESET_VOICES
-        ):
-            self.database.connection.execute(
-                """
-                INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-                """,
-                ("vieneu_voice", json.dumps(DEFAULT_SETTINGS["vieneu_voice"]), now),
-            )
+
 
     def _migrate_legacy_pending_gemini_key(self, now: str) -> None:
         row = self.database.connection.execute(
@@ -172,6 +157,26 @@ class SettingsService:
                 "mix_mode must be one of: " + ", ".join(sorted(SUPPORTED_MIX_MODES))
             )
 
+        clone_mode = values.get("voxcpm_clone_mode")
+        if clone_mode is not None and str(clone_mode).strip().lower() not in SUPPORTED_VOXCPM_CLONE_MODES:
+            raise ValueError(
+                "voxcpm_clone_mode must be one of: "
+                + ", ".join(sorted(SUPPORTED_VOXCPM_CLONE_MODES))
+            )
+        if values.get("exact_timing_tolerance_ms") is not None:
+            try:
+                tolerance_ms = float(values["exact_timing_tolerance_ms"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("exact_timing_tolerance_ms must be a number.") from error
+            values["exact_timing_tolerance_ms"] = max(0.0, min(300.0, tolerance_ms))
+
+        if values.get("exact_timing_max_stretch") is not None:
+            try:
+                max_stretch = float(values["exact_timing_max_stretch"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("exact_timing_max_stretch must be a number.") from error
+            values["exact_timing_max_stretch"] = max(1.0, min(3.0, max_stretch))
+
         subtitle_position = values.get("subtitle_position")
         if subtitle_position is not None:
             values["subtitle_position"] = normalize_position(subtitle_position)
@@ -211,6 +216,19 @@ class SettingsService:
             values["subtitle_edge_margin"] = normalize_edge_margin(
                 values["subtitle_edge_margin"]
             )
+
+        tts_backend = values.get("tts_backend")
+        if tts_backend is not None and tts_backend not in SUPPORTED_TTS_BACKENDS:
+            raise ValueError(
+                "tts_backend must be one of: " + ", ".join(SUPPORTED_TTS_BACKENDS)
+            )
+
+        if values.get("voxcpm_num_steps") is not None:
+            try:
+                steps = int(values["voxcpm_num_steps"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("voxcpm_num_steps must be an integer.") from error
+            values["voxcpm_num_steps"] = max(4, min(64, steps))
 
         values = dict(values)
         add_gemini_key = values.pop("gemini_api_key_add", None)

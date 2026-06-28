@@ -1,8 +1,10 @@
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
 from dv_backend.api import create_app
+from dv_backend.checkpoints import PIPELINE_STEPS, save_checkpoint
 from dv_backend.config import AppConfig
 
 
@@ -19,7 +21,7 @@ def test_health_and_capabilities(tmp_path: Path) -> None:
     assert health.json()["status"] == "ok"
     assert capabilities.json()["cpu_mode"] is False
     assert capabilities.json()["asr_backend"] == "qwen3_asr"
-    assert len(capabilities.json()["implemented_steps"]) == 12
+    assert capabilities.json()["implemented_steps"] == list(PIPELINE_STEPS)
 
 
 def test_create_and_list_job(tmp_path: Path) -> None:
@@ -30,7 +32,19 @@ def test_create_and_list_job(tmp_path: Path) -> None:
 
     assert created.status_code == 201
     assert listed.json()[0]["id"] == created.json()["id"]
-    assert len(created.json()["steps"]) == 12
+    assert [step["name"] for step in created.json()["steps"]] == list(PIPELINE_STEPS)
+
+
+def test_create_bilibili_job(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+
+    created = client.post(
+        "/api/jobs",
+        json={"source_url": "https://www.bilibili.com/video/BV1MEJw6qE8b/"},
+    )
+
+    assert created.status_code == 201
+    assert created.json()["source_url"] == "https://www.bilibili.com/video/BV1MEJw6qE8b/"
 
 
 def test_delete_finished_job(tmp_path: Path) -> None:
@@ -72,7 +86,7 @@ def test_invalid_url_returns_actionable_error(tmp_path: Path) -> None:
     response = client.post("/api/jobs", json={"source_url": "https://example.com/video"})
 
     assert response.status_code == 422
-    assert response.json()["error"]["code"] == "INVALID_DOUYIN_URL"
+    assert response.json()["error"]["code"] == "INVALID_SOURCE_URL"
     assert response.json()["error"]["action"]
     assert response.json()["error"]["retryable"] is False
 
@@ -110,7 +124,7 @@ def test_invalid_url_returns_actionable_error(tmp_path: Path) -> None:
     response = client.post("/api/jobs", json={"source_url": "https://example.com/video"})
 
     assert response.status_code == 422
-    assert response.json()["error"]["code"] == "INVALID_DOUYIN_URL"
+    assert response.json()["error"]["code"] == "INVALID_SOURCE_URL"
     assert response.json()["error"]["action"]
     assert response.json()["error"]["retryable"] is False
 
@@ -194,6 +208,45 @@ def test_cloned_voices_crud(tmp_path: Path) -> None:
     assert resp.json() == []
 
 
+def test_list_preset_voices(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+
+    resp = client.get("/api/voices/presets")
+    assert resp.status_code == 200
+    presets = resp.json()
+    assert len(presets) == 10
+    assert presets[0] == {"id": "Ngọc Lan", "name": "Ngọc Lan", "kind": "preset"}
+
+
+@patch("dv_backend.api._synthesize_voice_preview")
+def test_preview_preset_voice(mock_preview: MagicMock, tmp_path: Path) -> None:
+    output_wav = tmp_path / "preview.wav"
+    output_wav.write_bytes(b"RIFFfake")
+    mock_preview.return_value = output_wav
+    client = make_client(tmp_path)
+
+    resp = client.post(
+        "/api/voices/preview",
+        json={"voice": "Ngọc Lan", "text": "Xin chào"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.content == b"RIFFfake"
+    mock_preview.assert_called_once()
+    assert mock_preview.call_args.kwargs["voice"] == "Ngọc Lan"
+
+
+def test_preview_preset_voice_rejects_unknown(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+
+    resp = client.post(
+        "/api/voices/preview",
+        json={"voice": "Không tồn tại", "text": "Xin chào"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "INVALID_PRESET_VOICE"
+
+
 def test_job_files(tmp_path: Path) -> None:
     client = make_client(tmp_path)
     app = client.app
@@ -237,4 +290,41 @@ def test_job_files(tmp_path: Path) -> None:
     resp = client.get(f"/api/jobs/{job_id}/files/invalid_key")
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "INVALID_FILE_KEY"
+
+
+def test_update_segment_speaker_updates_checkpoints(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    app = client.app
+    job_id = app.state.jobs.create("https://v.douyin.com/demo/").id
+
+    client.put("/api/settings", json={"speaker_diarization": True})
+    checkpoint = {
+        "schema_version": 1,
+        "job_id": job_id,
+        "step_name": "normalize_segments",
+        "completed_at": "2026-06-18T00:00:00Z",
+        "segments": [
+            {
+                "index": 0,
+                "start": 0.0,
+                "end": 1.0,
+                "text": "你好",
+                "speaker_id": "0",
+                "speaker_confidence": 0.05,
+            }
+        ],
+    }
+    save_checkpoint(tmp_path, job_id, "normalize_segments", checkpoint)
+    save_checkpoint(tmp_path, job_id, "translate", {**checkpoint, "step_name": "translate", "title_vi": None})
+
+    response = client.patch(
+        f"/api/jobs/{job_id}/segments/0/speaker",
+        json={"speaker_id": "3"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["speaker_id"] == "3"
+    updated = client.get(f"/api/jobs/{job_id}/checkpoint/normalize_segments").json()
+    assert updated["segments"][0]["speaker_id"] == "3"
+    assert updated["segments"][0]["speaker_confidence"] == 1.0
 

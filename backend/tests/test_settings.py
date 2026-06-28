@@ -18,11 +18,12 @@ def test_defaults_use_free_portable_pipeline(tmp_path: Path) -> None:
 
     assert settings.get_all()["cookies_browser"] == "none"
     assert settings.get_all()["translation_backend"] == "google_free"
-    assert settings.get_all()["tts_backend"] == "vieneu"
-    assert settings.get_all()["vieneu_voice"] == "Xuân Vĩnh"
-    assert settings.get_all()["vieneu_device"] == "cuda"
+    assert settings.get_all()["voxcpm_model"] == "openbmb/VoxCPM2"
+    assert settings.get_all()["voxcpm_device"] == "cuda:0"
+    assert settings.get_all()["voxcpm_clone_mode"] == "reference"
     assert settings.get_all()["mix_mode"] == "duck"
-    assert settings.get_all()["speaker_diarization"] is False
+    assert settings.get_all()["exact_timing_enabled"] is True
+    assert settings.get_all()["exact_timing_tolerance_ms"] == 40
     assert settings.get_all()["subtitles_enabled"] is True
     assert settings.get_all()["subtitle_font_size"] == 48
     assert settings.get_all()["subtitle_position"] == "bottom"
@@ -41,14 +42,38 @@ def test_cookie_browser_accepts_only_supported_values(tmp_path: Path) -> None:
         settings.update({"cookies_browser": "opera"})
 
 
-def test_mix_mode_accepts_supported_values(tmp_path: Path) -> None:
+def test_mix_mode_accepts_only_duck(tmp_path: Path) -> None:
     settings = service(tmp_path)
 
-    settings.update({"mix_mode": "separate"})
-    assert settings.get_all()["mix_mode"] == "separate"
+    settings.update({"mix_mode": "duck"})
+    assert settings.get_all()["mix_mode"] == "duck"
 
     with pytest.raises(ValueError, match="mix_mode"):
-        settings.update({"mix_mode": "invalid"})
+        settings.update({"mix_mode": "separate"})
+
+
+def test_voxcpm_clone_mode_accepts_supported_values(tmp_path: Path) -> None:
+    settings = service(tmp_path)
+
+    settings.update({"voxcpm_clone_mode": "ultimate"})
+    assert settings.get_all()["voxcpm_clone_mode"] == "ultimate"
+
+    with pytest.raises(ValueError, match="voxcpm_clone_mode"):
+        settings.update({"voxcpm_clone_mode": "design"})
+
+
+def test_exact_timing_settings_are_normalized(tmp_path: Path) -> None:
+    settings = service(tmp_path)
+
+    updated = settings.update({
+        "exact_timing_tolerance_ms": 120.5,
+        "exact_timing_max_stretch": 4.2,
+    })
+    assert updated["exact_timing_tolerance_ms"] == 120.5
+    assert updated["exact_timing_max_stretch"] == 3.0
+
+    with pytest.raises(ValueError, match="exact_timing_tolerance_ms"):
+        settings.update({"exact_timing_tolerance_ms": "abc"})
 
 
 def test_subtitle_settings_accepts_supported_values(tmp_path: Path) -> None:
@@ -71,31 +96,17 @@ def test_subtitle_settings_accepts_supported_values(tmp_path: Path) -> None:
     assert updated["subtitle_edge_margin"] == 24
 
 
-def test_legacy_invalid_vieneu_voice_is_migrated(tmp_path: Path) -> None:
-    database = Database(tmp_path / "app.db")
-    database.migrate()
-    with database.connection:
-        database.connection.execute(
-            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
-            ("vieneu_voice", json.dumps("Phương Trang"), "now"),
-        )
-
-    settings = SettingsService(database)
-
-    assert settings.get_all()["vieneu_voice"] == "Xuân Vĩnh"
-
-
 def test_update_does_not_replace_unrelated_settings(tmp_path: Path) -> None:
     settings = service(tmp_path)
-    settings.update({"vieneu_voice": "Ngọc Linh"})
+    settings.update({"voxcpm_ref_audio": "C:/voice.wav"})
 
     rows = settings.database.connection.execute(
-        "SELECT key, value FROM settings WHERE key IN ('vieneu_voice', 'translation_backend')"
+        "SELECT key, value FROM settings WHERE key IN ('voxcpm_ref_audio', 'translation_backend')"
     ).fetchall()
     values = {row["key"]: json.loads(row["value"]) for row in rows}
 
     assert values == {
-        "vieneu_voice": "Ngọc Linh",
+        "voxcpm_ref_audio": "C:/voice.wav",
         "translation_backend": "google_free",
     }
 

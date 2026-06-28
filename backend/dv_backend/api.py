@@ -1,9 +1,12 @@
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 from typing import Any
+import wave
 from uuid import uuid4
 
 from fastapi import FastAPI, Request, UploadFile, File, Form
@@ -13,17 +16,211 @@ from pydantic import BaseModel
 
 from .config import AppConfig
 from .database import Database
+from .error_logging import configure_error_logging
 from .errors import AppError, app_error_handler
 from .jobs import JobService
+from .local_env import load_repo_dotenv
 from .models import ErrorInfo, Job, JobCreate, JobRerun
 from .runtime import RuntimeReport, default_runtime_service
 from .runner import JobRunner
-from .checkpoints import load_checkpoint, save_checkpoint
+from .checkpoints import PIPELINE_STEPS, load_checkpoint, save_checkpoint
 from .settings import SettingsService
+
+
+VOICE_UPLOAD_MIME_SUFFIXES = {
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/wave": ".wav",
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "video/mp2t": ".mp3",
+}
+VOICE_UPLOAD_SUFFIXES = frozenset({".wav", ".mp3"})
+
+
+def _voice_upload_suffix(file: UploadFile) -> str:
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix in VOICE_UPLOAD_SUFFIXES:
+        return suffix
+    content_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+    if content_type in VOICE_UPLOAD_MIME_SUFFIXES:
+        return VOICE_UPLOAD_MIME_SUFFIXES[content_type]
+    raise AppError(
+        415,
+        ErrorInfo(
+            code="VOICE_UNSUPPORTED_FORMAT",
+            message="Unsupported cloned voice audio format.",
+            action="Upload a .wav or .mp3 file.",
+        ),
+    )
+
+
+def _read_transcript_sidecar(wav_path: Path) -> str:
+    try:
+        return wav_path.with_suffix(".txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _convert_audio_to_wav(input_path: Path, output_path: Path) -> Path:
+    try:
+        from .pipeline import resolve_tool_path
+
+        ffmpeg_path = resolve_tool_path(AppConfig.from_env(), "ffmpeg")
+    except Exception:
+        ffmpeg_path = Path(shutil.which("ffmpeg") or "ffmpeg")
+    cmd = [
+        str(ffmpeg_path),
+        "-y",
+        "-i",
+        str(input_path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        str(output_path),
+    ]
+    try:
+        completed = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception as exc:
+        raise AppError(
+            422,
+            ErrorInfo(
+                code="VOICE_AUDIO_CONVERT_FAILED",
+                message="Failed to convert uploaded MP3 to WAV.",
+                action="Upload a valid short WAV or MP3 voice sample.",
+                detail=str(exc),
+            ),
+        ) from exc
+    if completed.returncode != 0 or not output_path.is_file() or output_path.stat().st_size == 0:
+        raise AppError(
+            422,
+            ErrorInfo(
+                code="VOICE_AUDIO_CONVERT_FAILED",
+                message="Failed to convert uploaded MP3 to WAV.",
+                action="Upload a valid short WAV or MP3 voice sample.",
+                detail=completed.stderr[-2000:],
+            ),
+        )
+    return output_path
+
+
+def _transcribe_anchor_for_voice(wav_path: Path) -> str:
+    try:
+        with wave.open(str(wav_path), "rb"):
+            pass
+    except Exception:
+        return ""
+    try:
+        from .adapters.asr import reset_model_cache, transcribe_audio
+
+        project_root = Path(__file__).resolve().parents[2]
+        vendor_dir = Path(os.environ.get("DV_VENDOR_DIR", project_root / "vendor"))
+        result = transcribe_audio(
+            wav_path,
+            vendor_dir=vendor_dir,
+            language="Vietnamese",
+        )
+        segments = result.get("segments", []) if isinstance(result, dict) else result
+        return " ".join(
+            str(segment.get("text", "")).strip()
+            for segment in segments
+            if str(segment.get("text", "")).strip()
+        ).strip()
+    except Exception:
+        return ""
+    finally:
+        try:
+            reset_model_cache()
+        except Exception:
+            pass
+
+
+def _synthesize_voice_preview(
+    *,
+    voice: str,
+    text: str,
+    settings: dict[str, Any],
+    output_suffix: str,
+    clone: bool = False,
+    clone_mode: str | None = None,
+    anchor_text: str | None = None,
+) -> Path:
+    from .adapters.tts import VOXCPM_INSTRUCT_PREFIX, create_tts_adapter
+
+    cleaned_text = (text or "").strip()
+    if not cleaned_text:
+        raise AppError(
+            400,
+            ErrorInfo(
+                code="PREVIEW_TEXT_EMPTY",
+                message="Preview text is required.",
+                action="Enter a short sentence to synthesize.",
+            ),
+        )
+
+    tts = create_tts_adapter(settings)
+    output_wav = Path(tempfile.gettempdir()) / f"voice_preview_{output_suffix}_{uuid4().hex}.wav"
+    preview_voice = voice
+    instruct = str(settings.get("voxcpm_instruct") or "").strip()
+    if instruct and not voice.lower().endswith(".wav"):
+        preview_voice = f"{VOXCPM_INSTRUCT_PREFIX}{instruct}"
+    try:
+        synthesize_kwargs = {
+            "text": cleaned_text,
+            "output_path": output_wav,
+            "voice": preview_voice,
+        }
+        if clone:
+            synthesize_kwargs.update(
+                clone=True,
+                clone_mode=clone_mode,
+                anchor_text=anchor_text,
+            )
+        tts.synthesize(**synthesize_kwargs)
+    except AppError:
+        raise
+    except Exception as exc:
+        code = "VOXCPM_SYNTHESIZE_FAILED"
+        label = "VoxCPM2"
+        raise AppError(
+            502,
+            ErrorInfo(
+                code=code,
+                message=f"Failed to synthesize preview audio using {label}.",
+                action="Run 'python scripts/setup_voxcpm.py' for VoxCPM2.",
+                detail=str(exc),
+            ),
+        ) from exc
+
+    if not output_wav.is_file() or output_wav.stat().st_size == 0:
+        raise AppError(
+            500,
+            ErrorInfo(
+                code="SYNTHESIZED_EMPTY",
+                message="Synthesized audio is empty.",
+                action="Try another text sentence.",
+            ),
+        )
+    return output_wav
 
 
 class VideoSelect(BaseModel):
     index: int
+
+
+class SegmentSpeakerPayload(BaseModel):
+    speaker_id: str
 
 
 class BootstrapPayload(BaseModel):
@@ -31,8 +228,10 @@ class BootstrapPayload(BaseModel):
 
 
 def create_app(config: AppConfig | None = None) -> FastAPI:
+    load_repo_dotenv()
     config = config or AppConfig.from_env()
     config.ensure_directories()
+    configure_error_logging(config)
     database = Database(config.database_path)
     database.migrate()
 
@@ -49,7 +248,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app = FastAPI(title="Douyin Vietnamizer Backend")
     app.add_middleware(
         CORSMiddleware,
-        allow_origin_regex=r"^(file://|http://(localhost|127\.0\.0\.1)(:\d+)?)$",
+        allow_origin_regex=r"^(file://|tauri://localhost|http://(localhost|127\.0\.0\.1|tauri\.localhost)(:\d+)?)$",
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -61,17 +260,16 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.get("/api/capabilities")
     def capabilities() -> dict:
+        from .adapters.tts import SUPPORTED_TTS_BACKENDS
+
         runtime_status = runtime.latest()
         return {
             "cpu_mode": False,
             "asr_backend": "qwen3_asr",
             "asr_model": "Qwen/Qwen3-ASR-1.7B",
-            "implemented_steps": [
-                "resolve", "download", "extract_audio", "vad", "asr",
-                "normalize_segments", "translate", "tts", "duration_repair",
-                "mix", "render", "qc"
-            ],
-            "tts_backend": "vieneu",
+            "implemented_steps": list(PIPELINE_STEPS),
+            "tts_backend": "voxcpm",
+            "tts_backends": list(SUPPORTED_TTS_BACKENDS),
             "runtime_status": runtime_status.status if runtime_status else "not_run",
         }
 
@@ -105,6 +303,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         )
         return {"status": "started" if success else "already_running"}
 
+    @app.post("/api/runtime/bootstrap-pyannote")
+    def bootstrap_pyannote() -> dict:
+        from .bootstrap import BootstrapManager
+
+        project_root = Path(__file__).resolve().parents[2]
+        vendor_dir = Path(os.environ.get("DV_VENDOR_DIR", project_root / "vendor"))
+        success = BootstrapManager.start_pyannote_bootstrap(vendor_dir)
+        return {"status": "started" if success else "already_running"}
+
     @app.get("/api/runtime/bootstrap-progress")
     def bootstrap_progress() -> dict:
         from .bootstrap import BootstrapManager
@@ -118,6 +325,61 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     def create_job(payload: JobCreate) -> Job:
         job = jobs.create(payload.source_url)
         # Automatically trigger job run
+        runner.start_job(job.id)
+        return jobs.get(job.id)
+
+    @app.post("/api/jobs/import", status_code=201, response_model=Job)
+    def import_job(
+        file: UploadFile = File(...),
+        title: str | None = Form(default=None),
+    ) -> Job:
+        original_filename = file.filename or 'imported'
+        safe_filename = Path(original_filename).name or 'imported'
+        suffix = Path(safe_filename).suffix.lower()
+        if suffix not in JobService.SUPPORTED_IMPORT_EXTENSIONS:
+            raise AppError(
+                415,
+                ErrorInfo(
+                    code="IMPORT_UNSUPPORTED_FORMAT",
+                    message=f"Unsupported file format: {suffix or '(none)'}",
+                    action=f"Use one of: {', '.join(JobService.SUPPORTED_IMPORT_EXTENSIONS)}",
+                ),
+            )
+
+        tmp_dir = Path(tempfile.gettempdir()) / 'dv_imports'
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = tmp_dir / f"{uuid4().hex}{suffix}"
+        try:
+            with tmp_path.open('wb') as buffer:
+                shutil.copyfileobj(file.file, buffer)
+        except Exception as exc:
+            raise AppError(
+                500,
+                ErrorInfo(
+                    code="IMPORT_FILE_SAVE_FAILED",
+                    message="Failed to save the uploaded file.",
+                    action="Check disk space and write permissions, then try again.",
+                    detail=str(exc),
+                ),
+            )
+        finally:
+            try:
+                file.file.close()
+            except Exception:
+                pass
+
+        try:
+            job = jobs.create_imported(
+                tmp_path,
+                original_filename=safe_filename,
+                title=title.strip() if title else None,
+            )
+        finally:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
         runner.start_job(job.id)
         return jobs.get(job.id)
 
@@ -202,6 +464,42 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             return JSONResponse(status_code=404, content={"message": "Checkpoint not found"})
         return data
 
+    @app.patch("/api/jobs/{job_id}/segments/{index}/speaker")
+    def update_segment_speaker(job_id: str, index: int, payload: SegmentSpeakerPayload) -> dict:
+        speaker_id = str(payload.speaker_id).strip()
+        if not speaker_id:
+            raise AppError(
+                422,
+                ErrorInfo(
+                    code="INVALID_SPEAKER_ID",
+                    message="Speaker id is required.",
+                    action="Choose a valid speaker id.",
+                ),
+            )
+        updated_segment = None
+        for step_name in ("normalize_segments", "translate"):
+            checkpoint = load_checkpoint(config.data_dir, job_id, step_name)
+            if not checkpoint:
+                continue
+            segments = checkpoint.get("segments") or []
+            for segment in segments:
+                if int(segment.get("index", -1)) == index:
+                    segment["speaker_id"] = speaker_id
+                    segment["speaker_confidence"] = 1.0
+                    updated_segment = segment
+                    break
+            save_checkpoint(config.data_dir, job_id, step_name, checkpoint)
+        if updated_segment is None:
+            raise AppError(
+                404,
+                ErrorInfo(
+                    code="SEGMENT_NOT_FOUND",
+                    message="The requested segment was not found.",
+                    action="Wait for segment normalization to finish, then try again.",
+                ),
+            )
+        return dict(updated_segment)
+
     @app.get("/api/jobs/{job_id}/output")
     def get_job_output(job_id: str) -> FileResponse:
         output_file = config.data_dir / "jobs" / job_id / "output" / "dubbed.mp4"
@@ -241,16 +539,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     def get_job_files(job_id: str) -> list[dict]:
         job_dir = config.data_dir / "jobs" / job_id
         files = []
-        
+
         candidates = [
             {"key": "dubbed_video", "name": "Video lồng tiếng (dubbed.mp4)", "path": job_dir / "output" / "dubbed.mp4", "media_type": "video/mp4", "url": f"/api/jobs/{job_id}/files/dubbed_video"},
             {"key": "original_video", "name": "Video gốc tải về (original.mp4)", "path": job_dir / "artifacts" / "original.mp4", "media_type": "video/mp4", "url": f"/api/jobs/{job_id}/files/original_video"},
-            {"key": "bgm", "name": "Nhạc nền tách ra (bgm.wav)", "path": job_dir / "artifacts" / "bgm.wav", "media_type": "audio/wav", "url": f"/api/jobs/{job_id}/files/bgm"},
-            {"key": "vocals", "name": "Giọng nói gốc (vocals.wav)", "path": job_dir / "artifacts" / "vocals.wav", "media_type": "audio/wav", "url": f"/api/jobs/{job_id}/files/vocals"},
+            {"key": "bgm", "name": "Nhạc nền gốc (bgm.wav)", "path": job_dir / "artifacts" / "bgm.wav", "media_type": "audio/wav", "url": f"/api/jobs/{job_id}/files/bgm"},
             {"key": "vietnamese_narration", "name": "Giọng lồng tiếng Việt (vietnamese_narration.wav)", "path": job_dir / "output" / "vietnamese_narration.wav", "media_type": "audio/wav", "url": f"/api/jobs/{job_id}/files/vietnamese_narration"},
             {"key": "subtitles", "name": "Phụ đề (subtitles.ass)", "path": job_dir / "output" / "subtitles.ass", "media_type": "text/plain", "url": f"/api/jobs/{job_id}/files/subtitles"},
         ]
-        
+
         for item in candidates:
             path = item["path"]
             if path.is_file():
@@ -275,7 +572,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "vietnamese_narration": (job_dir / "output" / "vietnamese_narration.wav", "audio/wav", "vietnamese_narration.wav"),
             "subtitles": (job_dir / "output" / "subtitles.ass", "text/plain", "subtitles.ass"),
         }
-        
+
         if key not in candidates:
             raise AppError(
                 400,
@@ -285,7 +582,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     action="Select a valid candidate file from the list."
                 )
             )
-            
+
         file_path, media_type, filename = candidates[key]
         if not file_path.is_file():
             raise AppError(
@@ -358,24 +655,68 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    class VoicePreviewPayload(BaseModel):
+        voice: str
+        text: str
+
+    @app.get("/api/voices/presets")
+    def list_preset_voices() -> list[dict]:
+        presets = [
+            "Ngọc Lan",
+            "Minh Anh",
+            "Hoài Nam",
+            "Thu Hà",
+            "Quang Huy",
+            "Mai Phương",
+            "Đức Anh",
+            "Bảo Trâm",
+            "Gia Hân",
+            "Tuấn Kiệt",
+        ]
+        return [{"id": voice, "name": voice, "kind": "preset"} for voice in presets]
+
+    @app.post("/api/voices/preview")
+    def preview_voice(payload: VoicePreviewPayload) -> FileResponse:
+        voice = (payload.voice or "").strip()
+        if voice not in {item["id"] for item in list_preset_voices()}:
+            raise AppError(
+                422,
+                ErrorInfo(
+                    code="INVALID_PRESET_VOICE",
+                    message="The selected preset voice is not available.",
+                    action="Choose a preset voice from the list.",
+                ),
+            )
+        raw_settings = settings.get_raw_all()
+        output_wav = _synthesize_voice_preview(
+            voice=voice,
+            text=payload.text,
+            settings=raw_settings,
+            output_suffix="voxcpm",
+        )
+        return FileResponse(str(output_wav), media_type="audio/wav", filename="preview_voxcpm.wav")
+
     @app.get("/api/cloned-voices")
     def list_cloned_voices() -> list[dict]:
         rows = database.connection.execute(
-            "SELECT id, name, wav_filename, created_at FROM cloned_voices ORDER BY created_at DESC"
+            "SELECT id, name, wav_filename, transcript, created_at FROM cloned_voices ORDER BY created_at DESC"
         ).fetchall()
-        
+
         cloned_dir = config.data_dir / "cloned_voices"
         cloned_dir.mkdir(exist_ok=True)
-        
+
         voices = []
         for r in rows:
             wav_path = cloned_dir / r["wav_filename"]
             if wav_path.is_file():
+                transcript = (r["transcript"] or _read_transcript_sidecar(wav_path)).strip()
                 voices.append({
                     "id": r["id"],
                     "name": r["name"],
                     "wav_filename": r["wav_filename"],
                     "wav_path": str(wav_path),
+                    "transcript": transcript,
+                    "transcribed": bool(transcript),
                     "created_at": r["created_at"]
                 })
         return voices
@@ -399,9 +740,19 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     def create_cloned_voice(name: str = Form(...), file: UploadFile = File(...)) -> dict:
         cloned_dir = config.data_dir / "cloned_voices"
         cloned_dir.mkdir(exist_ok=True)
-        
+        voice_name = name.strip()
+        if not voice_name:
+            raise AppError(
+                400,
+                ErrorInfo(
+                    code="VOICE_NAME_EMPTY",
+                    message="Voice name is required.",
+                    action="Enter a name for this cloned voice."
+                )
+            )
+
         existing = database.connection.execute(
-            "SELECT 1 FROM cloned_voices WHERE name = ?", (name,)
+            "SELECT 1 FROM cloned_voices WHERE name = ?", (voice_name,)
         ).fetchone()
         if existing:
             raise AppError(
@@ -412,37 +763,55 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     action="Please choose a different name for your voice."
                 )
             )
-            
+
+        suffix = _voice_upload_suffix(file)
         voice_id = str(uuid4())
         wav_filename = f"{voice_id}.wav"
         wav_path = cloned_dir / wav_filename
-        
+        upload_path = wav_path if suffix == ".wav" else cloned_dir / f"{voice_id}{suffix}"
+
         try:
-            with wav_path.open("wb") as buffer:
+            with upload_path.open("wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
+            if suffix == ".mp3":
+                _convert_audio_to_wav(upload_path, wav_path)
+                upload_path.unlink(missing_ok=True)
+        except AppError:
+            raise
         except Exception as e:
             raise AppError(
                 500,
                 ErrorInfo(
                     code="FILE_SAVE_FAILED",
-                    message="Failed to save the uploaded WAV file.",
+                    message="Failed to save the uploaded voice file.",
                     action="Ensure your storage has write permissions and try again.",
                     detail=str(e)
                 )
             )
-            
+        finally:
+            try:
+                file.file.close()
+            except Exception:
+                pass
+
+        transcript = _transcribe_anchor_for_voice(wav_path).strip()
+        if transcript:
+            wav_path.with_suffix(".txt").write_text(transcript, encoding="utf-8")
+
         now = datetime.now(timezone.utc).isoformat()
         with database.connection:
             database.connection.execute(
-                "INSERT INTO cloned_voices (id, name, wav_filename, created_at) VALUES (?, ?, ?, ?)",
-                (voice_id, name, wav_filename, now)
+                "INSERT INTO cloned_voices (id, name, wav_filename, transcript, created_at) VALUES (?, ?, ?, ?, ?)",
+                (voice_id, voice_name, wav_filename, transcript, now)
             )
-            
+
         return {
             "id": voice_id,
-            "name": name,
+            "name": voice_name,
             "wav_filename": wav_filename,
             "wav_path": str(wav_path),
+            "transcript": transcript,
+            "transcribed": bool(transcript),
             "created_at": now
         }
 
@@ -470,7 +839,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 wav_path.unlink()
             except OSError:
                 pass
-                
+        try:
+            wav_path.with_suffix(".txt").unlink(missing_ok=True)
+        except OSError:
+            pass
+
         with database.connection:
             database.connection.execute(
                 "DELETE FROM cloned_voices WHERE id = ?", (voice_id,)
@@ -480,11 +853,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     class VoiceTestPayload(BaseModel):
         text: str
+        mode: str | None = None
 
     @app.post("/api/cloned-voices/{voice_id}/test")
     def test_cloned_voice(voice_id: str, payload: VoiceTestPayload) -> FileResponse:
         row = database.connection.execute(
-            "SELECT wav_filename FROM cloned_voices WHERE id = ?", (voice_id,)
+            "SELECT wav_filename, transcript FROM cloned_voices WHERE id = ?", (voice_id,)
         ).fetchone()
         if not row:
             raise AppError(
@@ -495,7 +869,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     action="Verify that the voice ID is correct."
                 )
             )
-            
+
         wav_filename = row["wav_filename"]
         cloned_dir = config.data_dir / "cloned_voices"
         wav_path = cloned_dir / wav_filename
@@ -508,45 +882,32 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     action="Re-upload the reference WAV file."
                 )
             )
-            
-        from .adapters.tts import VieNeuTtsAdapter
+
+        clone_mode = (payload.mode or "reference").strip().lower()
+        if clone_mode not in {"reference", "ultimate"}:
+            raise AppError(
+                422,
+                ErrorInfo(
+                    code="INVALID_CLONE_MODE",
+                    message="Clone test mode must be reference or ultimate.",
+                    action="Choose reference or ultimate clone mode."
+                )
+            )
+        anchor_text = (row["transcript"] or _read_transcript_sidecar(wav_path)).strip()
         raw_settings = settings.get_raw_all()
-        vieneu_tts = VieNeuTtsAdapter(
-            device=str(raw_settings.get("vieneu_device", "cuda") or "cuda"),
-        )
-        
-        temp_dir = Path(tempfile.gettempdir())
-        output_wav = temp_dir / f"test_synthesize_{voice_id}_{uuid4().hex}.wav"
-        
         try:
-            vieneu_tts.synthesize(
+            output_wav = _synthesize_voice_preview(
+                voice=str(wav_path),
                 text=payload.text,
-                output_path=output_wav,
-                voice=str(wav_path)
+                settings=raw_settings,
+                output_suffix=f"clone_{voice_id}",
+                clone=True,
+                clone_mode=clone_mode,
+                anchor_text=anchor_text,
             )
         except AppError as e:
             raise e
-        except Exception as e:
-            raise AppError(
-                502,
-                ErrorInfo(
-                    code="VIENEU_SYNTHESIZE_FAILED",
-                    message="Failed to synthesize test audio using VieNeu-TTS.",
-                    action="Ensure VieNeu-TTS is installed and configured properly.",
-                    detail=str(e)
-                )
-            )
-            
-        if not output_wav.is_file() or output_wav.stat().st_size == 0:
-            raise AppError(
-                500,
-                ErrorInfo(
-                    code="SYNTHESIZED_EMPTY",
-                    message="Synthesized audio is empty.",
-                    action="Try another text sentence."
-                )
-            )
-            
+
         return FileResponse(str(output_wav), media_type="audio/wav", filename="test_output.wav")
 
     app.state.config = config

@@ -16,6 +16,18 @@ export const api: JobsApi = {
   listJobs: () => request<Job[]>("/api/jobs"),
   createJob: (sourceUrl) =>
     request<Job>("/api/jobs", { method: "POST", body: JSON.stringify({ source_url: sourceUrl }) }),
+  importJob: async (file: File, title?: string) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    if (title && title.trim()) formData.append("title", title.trim());
+    const response = await fetch(`${baseUrl}/api/jobs/import`, {
+      method: "POST",
+      body: formData
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error?.message ?? "Failed to import video");
+    return body as Job;
+  },
   runtimeStatus: () => request<RuntimeReport>("/api/runtime/status"),
   runSmokeTest: () => request<RuntimeReport>("/api/runtime/smoke-test", { method: "POST" }),
   startJob: (jobId) => request(`/api/jobs/${jobId}/start`, { method: "POST" }),
@@ -42,15 +54,27 @@ export const api: JobsApi = {
     return body;
   },
   deleteClonedVoice: (voiceId) => request(`/api/cloned-voices/${voiceId}`, { method: "DELETE" }),
-  testClonedVoice: async (voiceId, text) => {
+  testClonedVoice: async (voiceId, text, mode = "reference") => {
     const response = await fetch(`${baseUrl}/api/cloned-voices/${voiceId}/test`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text })
+      body: JSON.stringify({ text, mode })
     });
     if (!response.ok) {
       const body = await response.json();
       throw new Error(body.error?.message ?? "Failed to test cloned voice");
+    }
+    return response.blob();
+  },
+  previewPresetVoice: async (voice, text) => {
+    const response = await fetch(`${baseUrl}/api/voices/preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ voice, text })
+    });
+    if (!response.ok) {
+      const body = await response.json();
+      throw new Error(body.error?.message ?? "Failed to preview preset voice");
     }
     return response.blob();
   },
@@ -60,5 +84,6 @@ export const api: JobsApi = {
   getJobFiles: (jobId) => request(`/api/jobs/${jobId}/files`),
   detectHardware: () => request("/api/runtime/detect-hardware"),
   bootstrapVendor: (profile) => request("/api/runtime/bootstrap-vendor", { method: "POST", body: JSON.stringify({ profile }) }),
+  bootstrapPyannote: () => request("/api/runtime/bootstrap-pyannote", { method: "POST" }),
   bootstrapProgress: () => request("/api/runtime/bootstrap-progress")
 };

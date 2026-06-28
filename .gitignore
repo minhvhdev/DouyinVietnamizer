@@ -27,6 +27,10 @@ vendor/*
 !vendor/manifest.json
 
 # Local / generated data
+.data/
+.data*/
+backend/.data/
+backend/.data*/
 *.db
 *.sqlite
 *.sqlite3
@@ -38,6 +42,12 @@ vendor/*
 
 # Tooling caches
 graphify-out/
+.claude/
+.superpowers/
+
+# Local generated samples and portable builds
+sample/
+dist-portable/
 
 # Package managers
 package-lock.json
@@ -51,9 +61,14 @@ Desktop.ini
 
 # Editor
 .idea/
+.vscode/
 *.swp
 *.swo
 *~
 
 # Logs
 *.log
+
+# Tauri (Rust)
+src-tauri/target/
+src-tauri/gen/
