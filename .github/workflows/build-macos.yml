@@ -24,6 +24,8 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
+      - uses: astral-sh/setup-uv@v6
+
       - name: Cache macOS portable runtime
         uses: actions/cache@v4
         with:
