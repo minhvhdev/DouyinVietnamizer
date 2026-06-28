@@ -7,6 +7,71 @@ use thiserror::Error;
 
 use crate::portable::{prepend_path, PortableRuntime};
 
+/// Port the backend listens on. Duplicated from `state::BackendState::base_url` to avoid
+/// pulling tokio sync types into a pure parser.
+const BACKEND_PORT: u16 = 8765;
+
+/// Parse `netstat -ano -p TCP` output and return PIDs holding `LISTENING` sockets on `port`.
+/// Pure function; no IO. Excludes other ports (`87650` must not match `8765`) and non-LISTENING
+/// states.
+fn parse_listening_pids(text: &str, port: u16) -> Vec<u32> {
+    let needle = format!(":{} ", port);
+    let mut pids: Vec<u32> = text
+        .lines()
+        .filter(|l| l.contains("LISTENING"))
+        .filter(|l| l.contains(&needle))
+        .filter_map(|l| l.split_whitespace().last())
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
+/// On Windows, kill any leftover process bound to `port`. Best-effort: returns the number
+/// of processes successfully terminated. `Err` only if `netstat` itself cannot be invoked.
+#[cfg(windows)]
+fn kill_port_listeners_windows(port: u16) -> std::io::Result<usize> {
+    use std::process::Command;
+    let out = Command::new("netstat").args(["-ano", "-p", "TCP"]).output()?;
+    let pids = parse_listening_pids(&String::from_utf8_lossy(&out.stdout), port);
+    let mut killed = 0usize;
+    for pid in pids {
+        let status = Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .status()?;
+        if status.success() {
+            killed += 1;
+        }
+    }
+    Ok(killed)
+}
+
+/// On macOS, kill any leftover process bound to `port`. Best-effort: returns the
+/// number of processes successfully terminated. `Err` only if `lsof` itself
+/// cannot be invoked.
+#[cfg(target_os = "macos")]
+fn kill_port_listeners_macos(port: u16) -> std::io::Result<usize> {
+    use std::process::Command;
+    let out = Command::new("lsof")
+        .args(["-nP", "-tiTCP:", &port.to_string(), "-sTCP:LISTEN"])
+        .output()?;
+    let pids: Vec<u32> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+    let mut killed = 0usize;
+    for pid in pids {
+        let status = Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status()?;
+        if status.success() {
+            killed += 1;
+        }
+    }
+    Ok(killed)
+}
+
 /// Extracts the last 4KB of stderr for surfacing in error UI. Trims trailing whitespace.
 pub fn parse_uvicorn_stderr(s: &str) -> String {
     const MAX: usize = 4096;
@@ -74,18 +139,37 @@ pub fn build_backend_env(runtime: &PortableRuntime, dev_profile: bool) -> HashMa
 
 /// Spawn `python -m dv_backend.main` using the bundled portable Python runtime.
 /// When `dev_profile` is true, sets `DV_RELOAD=1` so uvicorn watches source files.
+/// On Windows, kills any leftover process bound to `BACKEND_PORT` first so a previous
+/// session's uvicorn doesn't block the bind.
 pub fn spawn_uvicorn(
     runtime: &PortableRuntime,
     source_backend_dir: &Path,
     dev_profile: bool,
 ) -> Result<tokio::process::Child, BackendStartError> {
     use std::process::Stdio;
+    #[cfg(windows)]
+    {
+        let _ = kill_port_listeners_windows(BACKEND_PORT);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = kill_port_listeners_macos(BACKEND_PORT);
+    }
     let mut cmd = tokio::process::Command::new(&runtime.python);
     cmd.args(["-m", "dv_backend.main"])
         .current_dir(backend_working_dir(runtime, source_backend_dir, dev_profile))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        // Hide the uvicorn console window. Without this, Rust spawns a visible
+        // `python.exe` console that the user can close by accident and silently
+        // kill the backend.
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
     for (key, value) in build_backend_env(runtime, dev_profile) {
         cmd.env(key, value);
     }
@@ -205,6 +289,19 @@ mod tests {
         assert!(out.len() <= 8192);
     }
 
+    #[test]
+    fn parse_listening_pids_filters_by_port_and_state() {
+        // 8765 LISTENING -> kept; 87650 LISTENING -> not matched (different port);
+        // 8765 TIME_WAIT -> dropped; dupes -> deduped.
+        let sample = "\
+  TCP    127.0.0.1:8765         0.0.0.0:0              LISTENING       111
+  TCP    127.0.0.1:87650        0.0.0.0:0              LISTENING       222
+  TCP    127.0.0.1:8765         127.0.0.1:55555        TIME_WAIT       0
+  TCP    0.0.0.0:8765           0.0.0.0:0              LISTENING       111
+";
+        assert_eq!(parse_listening_pids(sample, 8765), vec![111]);
+    }
+
     #[tokio::test]
     async fn is_health_ok_returns_false_for_unbound_port() {
         // Port 1 is reserved and almost never listening; any connection attempt fails fast.
@@ -228,5 +325,22 @@ mod tests {
             }
         });
         assert!(is_health_ok(&format!("http://127.0.0.1:{}", port)).await);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn parse_lsof_pids(text: &str) -> Vec<u32> {
+        text.lines()
+            .filter_map(|s| s.trim().parse().ok())
+            .collect()
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn parse_lsof_pids_extracts_unique_pids() {
+        let sample = "111\n222\n111\nabc\n";
+        let mut got = parse_lsof_pids(sample);
+        got.sort_unstable();
+        got.dedup();
+        assert_eq!(got, vec![111, 222]);
     }
 }

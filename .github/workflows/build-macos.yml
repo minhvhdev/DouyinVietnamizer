@@ -1,0 +1,64 @@
+name: Build macOS portable
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache macOS portable runtime
+        uses: actions/cache@v4
+        with:
+          path: dist-portable/macos-staging
+          key: macos-runtime-${{ hashFiles('backend/pyproject.toml', '.github/workflows/build-macos.yml') }}
+          restore-keys: macos-runtime-
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        run: pnpm --filter frontend build
+
+      - name: Cargo test (host x86_64)
+        run: cd src-tauri && cargo test --lib
+
+      - name: Tauri build (aarch64-apple-darwin)
+        run: pnpm tauri build --target aarch64-apple-darwin
+
+      - name: Build portable runtime
+        run: bash scripts/build-portable-runtime-mac.sh
+
+      - name: Assemble portable folder + zip
+        run: bash scripts/build-portable-mac.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DouyinVietnamizer-0.1.0-portable-macos
+          path: dist-portable/DouyinVietnamizer-0.1.0-portable-macos.zip
+
+      - name: Attach to GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist-portable/DouyinVietnamizer-0.1.0-portable-macos.zip

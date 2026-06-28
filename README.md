@@ -61,6 +61,34 @@ Hot-reload during development:
 
 `pnpm tauri:build` produces a Windows app bundle (NSIS) that includes the prepared portable runtime. For the folder-style portable release, copy the built `DouyinVietnamizer.exe` together with its sibling `portable-runtime/` directory. Target machines must be Windows x64 with compatible NVIDIA/CUDA drivers. Existing `pnpm dev` and `pnpm test` workflows remain available for non-Tauri work.
 
+## macOS portable (Apple Silicon)
+
+Pre-built portable zips are available on the [Releases page](../../releases) as `DouyinVietnamizer-0.1.0-portable-macos.zip` (arm64 only; macOS 12+).
+
+To use:
+
+1. Download the zip from the latest release.
+2. Unzip anywhere (e.g. `~/Applications/`).
+3. Open the resulting folder and double-click `DouyinVietnamizer.app`.
+4. **First launch only:** macOS Gatekeeper will block the unsigned app. Right-click `DouyinVietnamizer.app` → **Open** → confirm. Subsequent launches double-click normally.
+
+The `.app` looks for a sibling `portable-runtime/` folder with the bundled Python interpreter, models, and tools. Keep the folder intact.
+
+### Building from source (maintainers)
+
+The build runs in GitHub Actions on `macos-14` (M1). Trigger the **Build macOS portable** workflow from the Actions tab, or push a `v*` tag. The job uploads the zip as a workflow artifact and, on tag push, attaches it to the GitHub Release.
+
+Local Mac builds are also possible:
+
+```bash
+pnpm install
+pnpm tauri build --target aarch64-apple-darwin
+bash scripts/build-portable-runtime-mac.sh
+bash scripts/build-portable-mac.sh
+```
+
+The first run downloads ~11 GB of models; subsequent runs reuse `dist-portable/macos-staging/` and the GitHub Actions cache.
+
 ## Vendor tools
 
 `vendor/manifest.json` declares FFmpeg and yt-dlp.

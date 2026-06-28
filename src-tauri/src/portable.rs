@@ -70,11 +70,22 @@ pub fn validate_portable_runtime(root: &Path) -> Result<PortableRuntime, Portabl
 }
 
 pub fn python_executable(root: &Path) -> PathBuf {
-    let embedded = root.join("python").join("python.exe");
-    if embedded.exists() {
-        return embedded;
+    #[cfg(windows)]
+    {
+        let embedded = root.join("python").join("python.exe");
+        if embedded.exists() {
+            return embedded;
+        }
+        root.join(".venv").join("Scripts").join("python.exe")
     }
-    root.join(".venv").join("Scripts").join("python.exe")
+    #[cfg(target_os = "macos")]
+    {
+        let embedded = root.join("python").join("bin").join("python3");
+        if embedded.exists() {
+            return embedded;
+        }
+        root.join(".venv").join("bin").join("python")
+    }
 }
 
 pub fn prepend_path(dir: &Path, current: Option<OsString>) -> OsString {
@@ -168,5 +179,36 @@ mod tests {
         let parts = env::split_paths(&got).collect::<Vec<_>>();
         assert_eq!(parts[0], PathBuf::from("C:/rt/tools"));
         assert_eq!(parts[1], PathBuf::from("C:/Windows"));
+    }
+
+    #[cfg(target_os = "macos")]
+    fn make_runtime_macos(root: &Path) {
+        fs::create_dir_all(root.join(".venv/bin")).unwrap();
+        fs::write(root.join(".venv/bin/python"), b"").unwrap();
+        fs::create_dir_all(root.join("backend/dv_backend")).unwrap();
+        fs::create_dir_all(root.join("tools/ffmpeg")).unwrap();
+        fs::create_dir_all(root.join("tools/yt-dlp")).unwrap();
+        fs::create_dir_all(root.join("models/qwen3-asr")).unwrap();
+        fs::create_dir_all(root.join("models/voxcpm2")).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn python_executable_picks_venv_bin_python_on_macos() {
+        let dir = tempdir().unwrap();
+        make_runtime_macos(dir.path());
+        let p = python_executable(dir.path());
+        assert_eq!(p, dir.path().join(".venv").join("bin").join("python"));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn python_executable_prefers_embedded_python3_when_present() {
+        let dir = tempdir().unwrap();
+        make_runtime_macos(dir.path());
+        fs::create_dir_all(dir.path().join("python/bin")).unwrap();
+        fs::write(dir.path().join("python/bin/python3"), b"").unwrap();
+        let p = python_executable(dir.path());
+        assert_eq!(p, dir.path().join("python").join("bin").join("python3"));
     }
 }

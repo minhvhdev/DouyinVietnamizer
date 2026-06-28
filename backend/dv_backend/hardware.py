@@ -1,9 +1,12 @@
 import ctypes
 import os
+import sys
 from pathlib import Path
 
 def detect_vulkan() -> bool:
-    """Probes the system for Vulkan support by attempting to load vulkan-1.dll."""
+    """Probes the system for Vulkan support. Windows-only probe; returns False elsewhere."""
+    if sys.platform != "win32":
+        return False
     try:
         # Drivers supporting Vulkan place vulkan-1.dll in System32
         vulkan_lib = ctypes.windll.LoadLibrary("vulkan-1.dll")
@@ -12,38 +15,47 @@ def detect_vulkan() -> bool:
         return False
 
 def detect_cpu_avx2() -> bool:
-    """Checks if the CPU supports the AVX2 instruction set on Windows."""
-    try:
-        # PF_AVX2_INSTRUCTIONS_AVAILABLE = 40 in Windows SDK
-        kernel32 = ctypes.windll.kernel32
-        return kernel32.IsProcessorFeaturePresent(40) != 0
-    except Exception:
-        # Fallback to True or check AVX (36) if AVX2 call fails or is unsupported
+    """Checks if the CPU supports AVX2. Windows: IsProcessorFeaturePresent. Other: positive default."""
+    if sys.platform == "win32":
         try:
-            return kernel32.IsProcessorFeaturePresent(36) != 0
+            # PF_AVX2_INSTRUCTIONS_AVAILABLE = 40 in Windows SDK
+            kernel32 = ctypes.windll.kernel32
+            return kernel32.IsProcessorFeaturePresent(40) != 0
         except Exception:
-            return False
+            # Fallback to True or check AVX (36) if AVX2 call fails or is unsupported
+            try:
+                return kernel32.IsProcessorFeaturePresent(36) != 0
+            except Exception:
+                return False
+    # macOS / linux: assume modern CPU (Apple Silicon = ARMv8.4 with i8mm/dotprod).
+    return True
 
 def detect_espeak() -> bool:
-    """Checks if eSpeak NG is installed in standard Windows Program Files directories."""
-    program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
-    program_files_x86 = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
-    
-    paths_to_check = [
-        Path(program_files) / "eSpeak NG" / "libespeak-ng.dll",
-        Path(program_files_x86) / "eSpeak NG" / "libespeak-ng.dll",
-    ]
-    for p in paths_to_check:
-        if p.is_file():
-            return True
+    """Checks for eSpeak NG. Windows: Program Files scan. Other: returns False (optional dep)."""
+    if sys.platform == "win32":
+        program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
+        program_files_x86 = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
+
+        paths_to_check = [
+            Path(program_files) / "eSpeak NG" / "libespeak-ng.dll",
+            Path(program_files_x86) / "eSpeak NG" / "libespeak-ng.dll",
+        ]
+        for p in paths_to_check:
+            if p.is_file():
+                return True
+        return False
     return False
 
 def detect_cuda() -> bool:
-    """Checks whether CUDA is available for Qwen3-ASR GPU inference."""
+    """Returns True if a GPU backend is available: NVIDIA CUDA (any OS) or Apple MPS (macOS)."""
     try:
         import torch
 
-        return bool(torch.cuda.is_available())
+        if torch.cuda.is_available():
+            return True
+        if sys.platform == "darwin" and torch.backends.mps.is_available():
+            return True
+        return False
     except Exception:
         return False
 
