@@ -15,6 +15,10 @@ class AppConfig:
     def log_path(self) -> Path:
         return self.data_dir / "logs" / "backend.log"
 
+    @property
+    def error_log_path(self) -> Path:
+        return self.data_dir / "logs" / "backend-error.log"
+
     @classmethod
     def from_env(cls) -> "AppConfig":
         override = os.environ.get("DV_DATA_DIR")
