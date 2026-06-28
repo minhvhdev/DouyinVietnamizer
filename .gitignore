@@ -42,6 +42,12 @@ backend/.data*/
 
 # Tooling caches
 graphify-out/
+.claude/
+.superpowers/
+
+# Local generated samples and portable builds
+sample/
+dist-portable/
 
 # Package managers
 package-lock.json

@@ -3,7 +3,6 @@ import json
 from typing import Any
 import uuid
 
-from .adapters.separation import SUPPORTED_MIX_MODES
 from .adapters.subtitles import (
     DEFAULT_SUBTITLE_BACKGROUND_COLOR,
     DEFAULT_SUBTITLE_BACKGROUND_OPACITY,
@@ -39,6 +38,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "voxcpm_batch_size": 4,
     "voxcpm_batch_flush_ms": 150,
     "voxcpm_cache_enabled": True,
+    "voxcpm_clone_mode": "reference",
     "mix_mode": "duck",
     "gemini_api_keys": [],
     "gemini_key_cursor": 0,
@@ -61,6 +61,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 }
 
 SUPPORTED_COOKIE_BROWSERS = {"none", "edge", "chrome", "firefox", "brave"}
+SUPPORTED_MIX_MODES = {"duck"}
+SUPPORTED_VOXCPM_CLONE_MODES = {"reference", "ultimate"}
 
 
 def mask_api_key(api_key: str) -> str:
@@ -155,6 +157,12 @@ class SettingsService:
                 "mix_mode must be one of: " + ", ".join(sorted(SUPPORTED_MIX_MODES))
             )
 
+        clone_mode = values.get("voxcpm_clone_mode")
+        if clone_mode is not None and str(clone_mode).strip().lower() not in SUPPORTED_VOXCPM_CLONE_MODES:
+            raise ValueError(
+                "voxcpm_clone_mode must be one of: "
+                + ", ".join(sorted(SUPPORTED_VOXCPM_CLONE_MODES))
+            )
         if values.get("exact_timing_tolerance_ms") is not None:
             try:
                 tolerance_ms = float(values["exact_timing_tolerance_ms"])
@@ -208,70 +216,6 @@ class SettingsService:
             values["subtitle_edge_margin"] = normalize_edge_margin(
                 values["subtitle_edge_margin"]
             )
-
-        diarization_backend = values.get("diarization_backend")
-        if diarization_backend is not None and diarization_backend not in SUPPORTED_DIARIZATION_BACKENDS:
-            raise ValueError(
-                "diarization_backend must be one of: "
-                + ", ".join(sorted(SUPPORTED_DIARIZATION_BACKENDS))
-            )
-
-        fallback_backend = values.get("diarization_fallback_backend")
-        if fallback_backend is not None and fallback_backend not in SUPPORTED_DIARIZATION_FALLBACK_BACKENDS:
-            raise ValueError(
-                "diarization_fallback_backend must be one of: "
-                + ", ".join(sorted(SUPPORTED_DIARIZATION_FALLBACK_BACKENDS))
-            )
-
-        demucs_mode = values.get("diarization_demucs_mode")
-        if demucs_mode is not None and demucs_mode not in SUPPORTED_DIARIZATION_DEMUCS_MODES:
-            raise ValueError(
-                "diarization_demucs_mode must be one of: "
-                + ", ".join(sorted(SUPPORTED_DIARIZATION_DEMUCS_MODES))
-            )
-
-        for float_key, low, high in (
-            ("speaker_assignment_min_coverage", 0.0, 1.0),
-            ("speaker_assignment_min_margin", 0.0, 1.0),
-            ("speaker_overlap_flag_threshold", 0.0, 1.0),
-            ("speaker_review_confidence_threshold", 0.0, 1.0),
-        ):
-            if values.get(float_key) is not None:
-                try:
-                    parsed = float(values[float_key])
-                except (TypeError, ValueError) as error:
-                    raise ValueError(f"{float_key} must be a number.") from error
-                values[float_key] = max(low, min(high, parsed))
-
-        if values.get("speaker_profile_min_seconds") is not None:
-            try:
-                min_seconds = float(values["speaker_profile_min_seconds"])
-            except (TypeError, ValueError) as error:
-                raise ValueError("speaker_profile_min_seconds must be a number.") from error
-            values["speaker_profile_min_seconds"] = max(0.5, min(30.0, min_seconds))
-
-        if values.get("speaker_merge_gap_sec") is not None:
-            try:
-                gap = float(values["speaker_merge_gap_sec"])
-            except (TypeError, ValueError) as error:
-                raise ValueError("speaker_merge_gap_sec must be a number.") from error
-            values["speaker_merge_gap_sec"] = max(0.0, min(2.0, gap))
-
-        for int_key, low, high in (
-            ("diarization_min_speakers", 1, 12),
-            ("diarization_max_speakers", 1, 12),
-        ):
-            if values.get(int_key) is not None:
-                try:
-                    parsed = int(values[int_key])
-                except (TypeError, ValueError) as error:
-                    raise ValueError(f"{int_key} must be an integer.") from error
-                values[int_key] = max(low, min(high, parsed))
-
-        min_spk = values.get("diarization_min_speakers")
-        max_spk = values.get("diarization_max_speakers")
-        if min_spk is not None and max_spk is not None and int(min_spk) > int(max_spk):
-            raise ValueError("diarization_min_speakers cannot exceed diarization_max_speakers.")
 
         tts_backend = values.get("tts_backend")
         if tts_backend is not None and tts_backend not in SUPPORTED_TTS_BACKENDS:

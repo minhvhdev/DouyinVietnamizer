@@ -54,11 +54,11 @@ export const api: JobsApi = {
     return body;
   },
   deleteClonedVoice: (voiceId) => request(`/api/cloned-voices/${voiceId}`, { method: "DELETE" }),
-  testClonedVoice: async (voiceId, text) => {
+  testClonedVoice: async (voiceId, text, mode = "reference") => {
     const response = await fetch(`${baseUrl}/api/cloned-voices/${voiceId}/test`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text })
+      body: JSON.stringify({ text, mode })
     });
     if (!response.ok) {
       const body = await response.json();
@@ -66,7 +66,6 @@ export const api: JobsApi = {
     }
     return response.blob();
   },
-  listPresetVoices: () => request<{ id: string; name: string; kind: string }[]>("/api/voices/presets"),
   previewPresetVoice: async (voice, text) => {
     const response = await fetch(`${baseUrl}/api/voices/preview`, {
       method: "POST",

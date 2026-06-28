@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type BackendStatus =
-  | { kind: "setup_required"; stage: string }
+  | { kind: "portable_missing"; root: string; missing_items: string[] }
   | { kind: "starting" }
   | { kind: "ready"; base_url: string }
   | { kind: "crashed"; stderr: string }
@@ -10,6 +10,20 @@ export type BackendStatus =
 
 const DEFAULT_INTERVAL = 200;
 const DEFAULT_TIMEOUT = 30_000;
+const BACKEND_BASE = "http://127.0.0.1:8765";
+
+function isTauri(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+async function browserHealthCheck(): Promise<boolean> {
+  try {
+    const res = await fetch(`${BACKEND_BASE}/api/health`);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
 
 export async function waitForBackend(
   opts: { intervalMs?: number; timeoutMs?: number } = {},
@@ -19,10 +33,16 @@ export async function waitForBackend(
   const deadline = Date.now() + timeout;
   let last: BackendStatus | null = null;
   while (Date.now() < deadline) {
+    if (!isTauri()) {
+      if (await browserHealthCheck()) return BACKEND_BASE;
+      last = { kind: "starting" };
+      await new Promise((r) => setTimeout(r, interval));
+      continue;
+    }
     const s = (await invoke("get_backend_status")) as BackendStatus;
     last = s;
     if (s.kind === "ready") return s.base_url;
-    if (s.kind === "setup_required" || s.kind === "crashed") {
+    if (s.kind === "portable_missing" || s.kind === "crashed") {
       throw s;
     }
     await new Promise((r) => setTimeout(r, interval));
@@ -34,6 +54,7 @@ export function subscribeBackendEvents(handlers: {
   onReady?: (baseUrl: string) => void;
   onCrashed?: (stderr: string) => void;
 }): () => void {
+  if (!isTauri()) return () => {};
   const unsubs: UnlistenFn[] = [];
   listen<{ base_url: string }>("backend://ready", (e) => {
     handlers.onReady?.(e.payload.base_url);
@@ -45,14 +66,17 @@ export function subscribeBackendEvents(handlers: {
 }
 
 export async function invokeRestart(): Promise<void> {
+  if (!isTauri()) return;
   await invoke("restart_backend");
 }
 
 export async function invokeSetup(): Promise<void> {
+  if (!isTauri()) return;
   await invoke("run_first_time_setup_cmd");
 }
 
 export async function invokeOpenDevtools(): Promise<void> {
+  if (!isTauri()) return;
   await invoke("open_devtools");
 }
 
@@ -61,5 +85,6 @@ export type SetupProgress = { stage: string; pct: number };
 export async function subscribeSetupProgress(
   onProgress: (p: SetupProgress) => void,
 ): Promise<UnlistenFn> {
+  if (!isTauri()) return () => {};
   return await listen<SetupProgress>("setup://progress", (e) => onProgress(e.payload));
 }

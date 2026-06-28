@@ -25,7 +25,6 @@ import {
 import type { Job, JobsApi, OutputItem, RuntimeCheck, RuntimeReport, ClonedVoice } from "../shared/contracts";
 import { api as defaultApi } from "../shared/api";
 import { invokeOpenDevtools, subscribeBackendEvents, waitForBackend, type BackendStatus } from "../lib/tauri-bridge";
-import { SetupWizard } from "./SetupWizard";
 import "./styles.css";
 import "./runtime.css";
 
@@ -186,7 +185,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     translation_backend: "google_free",
     translation_source_language: "zh-CN",
     translation_target_language: "vi",
-    mix_mode: "duck",
     subtitles_enabled: true,
     subtitle_font_size: 48,
     subtitle_font_color: "#FFFFFF",
@@ -197,6 +195,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     subtitle_position: "bottom",
     gemini_api_keys: [],
     gemini_translation_model: "gemini-2.5-flash",
+    voxcpm_clone_mode: "reference",
   });
   const [newGeminiKey, setNewGeminiKey] = useState("");
   const [settingsSuccess, setSettingsSuccess] = useState(false);
@@ -207,9 +206,11 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   const [voiceFile, setVoiceFile] = useState<File | null>(null);
   const [voiceUploading, setVoiceUploading] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
   const [testText, setTestText] = useState<Record<string, string>>({});
   const [testSynthesizing, setTestSynthesizing] = useState<Record<string, boolean>>({});
   const [testAudioUrls, setTestAudioUrls] = useState<Record<string, string>>({});
+  const selectedClonedVoice = clonedVoices.find((voice) => voice.wav_path === settings.voxcpm_ref_audio);
 
   // Detect hardware when runtime is blocked
   useEffect(() => {
@@ -323,13 +324,20 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   async function handleUploadVoice(e: FormEvent) {
     e.preventDefault();
     if (!voiceName || !voiceFile) {
-      setVoiceError("Vui lòng nhập tên giọng và chọn tệp âm thanh mẫu (.wav).");
+      setVoiceError("Vui lòng nhập tên giọng và chọn tệp âm thanh mẫu (.wav hoặc .mp3).");
       return;
     }
     setVoiceUploading(true);
     setVoiceError(null);
+    setVoiceNotice(null);
     try {
-      await api.createClonedVoice(voiceName, voiceFile);
+      const created = await api.createClonedVoice(voiceName, voiceFile);
+      const transcriptLength = (created.transcript ?? "").length;
+      setVoiceNotice(
+        transcriptLength > 0
+          ? `Đã upload và transcript ${transcriptLength} ký tự. Giọng đã sẵn sàng cho ultimate clone.`
+          : "Đã upload giọng, nhưng ASR chưa tạo được transcript. Ultimate clone cần file .txt cạnh WAV."
+      );
       setVoiceName("");
       setVoiceFile(null);
       const fileInput = document.getElementById("voice-file-input") as HTMLInputElement;
@@ -358,7 +366,8 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     setTestSynthesizing(prev => ({ ...prev, [id]: true }));
     setVoiceError(null);
     try {
-      const blob = await api.testClonedVoice(id, text);
+      const mode = settings.voxcpm_clone_mode === "ultimate" ? "ultimate" : "reference";
+      const blob = await api.testClonedVoice(id, text, mode);
       const url = URL.createObjectURL(blob);
       setTestAudioUrls(prev => {
         if (prev[id]) URL.revokeObjectURL(prev[id]);
@@ -669,19 +678,32 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
   }
 
-  if (backend?.kind === "setup_required" || backend?.kind === "crashed") {
+  if (backend?.kind === "portable_missing") {
     return (
-      <SetupWizard
-        status={backend}
-        onComplete={(baseUrl) => setBackend({ kind: "ready", base_url: baseUrl })}
-        onOpenBackendFolder={() => {
-          // Best-effort: open via Tauri shell plugin if available; otherwise copy path
-          if (typeof window !== "undefined") {
-            window.alert("Open the backend/ folder in your file manager.");
-          }
-        }}
-        onCopyError={(text) => navigator.clipboard?.writeText(text)}
-      />
+      <div className="p-6 max-w-3xl mx-auto text-zinc-100">
+        <h1 className="text-xl font-semibold text-red-400">Portable package is incomplete</h1>
+        <p className="mt-2 text-zinc-300">The app could not find required bundled runtime files.</p>
+        <div className="mt-4 rounded bg-zinc-900 p-3">
+          <strong>Runtime path</strong>
+          <code className="block mt-1 text-sm text-zinc-300">{backend.root}</code>
+        </div>
+        <ul className="mt-4 list-disc pl-6 text-sm text-red-200">
+          {backend.missing_items.map((item) => <li key={item}>{item}</li>)}
+        </ul>
+        <button onClick={() => location.reload()} className="mt-4 underline">Retry after fixing the portable folder</button>
+      </div>
+    );
+  }
+
+  if (backend?.kind === "crashed") {
+    return (
+      <div className="p-6 max-w-3xl mx-auto text-zinc-100">
+        <h1 className="text-xl font-semibold text-red-400">Backend crashed</h1>
+        <pre className="mt-3 p-3 bg-zinc-900 text-zinc-100 text-sm overflow-auto rounded">
+          {backend.stderr || "(no stderr captured)"}
+        </pre>
+        <button onClick={() => location.reload()} className="mt-4 underline">Retry</button>
+      </div>
     );
   }
 
@@ -866,13 +888,15 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   }
 
   return (
-    <div className="shell">
+    <>
       <button
+        type="button"
         onClick={() => invokeOpenDevtools().catch(() => {})}
-        className="fixed top-2 right-2 px-2 py-1 text-xs rounded bg-zinc-200 hover:bg-zinc-300 z-50"
+        className="devtools-button"
       >
         Devtools
       </button>
+      <div className="shell">
       <aside>
         <div className="brand">
           <span>DV</span>
@@ -1021,7 +1045,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
             <header className="settings-header">
               <div>
                 <h1>Quản lý giọng nói nhân bản (Voice Cloning)</h1>
-                <p className="settings-subtitle">Thêm mới các giọng nói nhân bản từ tệp mẫu .wav và thực hiện các tổng hợp âm thanh thử nghiệm.</p>
+                <p className="settings-subtitle">Thêm giọng từ .wav hoặc .mp3; backend tự transcript ra file .txt cạnh WAV để dùng ultimate clone.</p>
               </div>
             </header>
 
@@ -1037,6 +1061,12 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                 </button>
               </div>
             )}
+            {voiceNotice && (
+              <div className="success" style={{ marginBottom: "20px" }}>
+                <CheckCircle2 size={18} />
+                <span>{voiceNotice}</span>
+              </div>
+            )}
 
             <div className="settings-page-layout">
               {/* Cột Trái: Tải lên giọng đọc mẫu */}
@@ -1047,7 +1077,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                     <h3>Thêm Giọng Nhân Bản Mới</h3>
                   </div>
                   <p className="card-description">
-                    Tải lên một tệp âm thanh mẫu (tần số tối ưu là 16kHz - 48kHz, định dạng .wav, dài từ 3-10 giây) để sử dụng với VoxCPM2.
+                    Tải lên một tệp âm thanh mẫu (.wav hoặc .mp3, dài 3-10 giây). Backend sẽ chuyển MP3 sang WAV và tự tạo transcript .txt cạnh file audio.
                   </p>
                   
                   <form onSubmit={handleUploadVoice} style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
@@ -1063,12 +1093,12 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                     </label>
 
                     <label className="settings-label">
-                      <span>Chọn tệp mẫu .wav</span>
+                      <span>Chọn tệp mẫu .wav hoặc .mp3</span>
                       <input
                         id="voice-file-input"
                         required
                         type="file"
-                        accept=".wav"
+                        accept=".wav,.mp3,audio/wav,audio/x-wav,audio/mpeg,audio/mp3"
                         className="settings-input"
                         onChange={(e) => setVoiceFile(e.target.files?.[0] || null)}
                         style={{ padding: "10px" }}
@@ -1117,6 +1147,15 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                           </div>
 
                           <div className="key-card-body" style={{ display: "flex", flexDirection: "column", gap: "12px", borderTop: "1px solid rgba(255,255,255,0.05)", paddingTop: "12px" }}>
+                            <div className={`alert-info-box ${voice.transcribed ? "info" : "warning"}`}>
+                              {voice.transcribed ? <CheckCircle2 size={14} /> : <CircleAlert size={14} />}
+                              <span>
+                                {voice.transcribed
+                                  ? `Transcript sẵn sàng (${(voice.transcript ?? "").length} ký tự) cho ultimate clone.`
+                                  : "Chưa có transcript .txt; ultimate clone sẽ cần transcript chính xác."}
+                              </span>
+                            </div>
+
                             {/* Play reference audio */}
                             <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
                               <span style={{ fontSize: "12px", color: "#8b949e" }}>Âm thanh mẫu:</span>
@@ -1396,6 +1435,29 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                       </select>
                     </label>
                     <label className="settings-label">
+                      <span>Chế độ clone</span>
+                      <select
+                        className="settings-input"
+                        value={settings.voxcpm_clone_mode ?? "reference"}
+                        onChange={(e) => setSettings({ ...settings, voxcpm_clone_mode: e.target.value })}
+                      >
+                        <option value="reference">Reference clone (ổn định)</option>
+                        <option value="ultimate">Ultimate clone (dùng transcript anchor)</option>
+                      </select>
+                    </label>
+                    {settings.voxcpm_clone_mode === "ultimate" && !settings.voxcpm_ref_audio && (
+                      <div className="alert-info-box warning">
+                        <CircleAlert size={14} />
+                        <span>Ultimate clone cần chọn audio tham chiếu đã upload.</span>
+                      </div>
+                    )}
+                    {settings.voxcpm_clone_mode === "ultimate" && selectedClonedVoice && !selectedClonedVoice.transcribed && (
+                      <div className="alert-info-box warning">
+                        <CircleAlert size={14} />
+                        <span>Giọng đã chọn chưa có transcript .txt; hãy upload lại file rõ tiếng hơn.</span>
+                      </div>
+                    )}
+                    <label className="settings-label">
                       <span>Voice design (tùy chọn)</span>
                       <input
                         className="settings-input"
@@ -1412,34 +1474,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                       />
                       <span>Auto voice khi không có audio tham chiếu</span>
                     </label>
-                  </div>
-                </section>
-
-                <section className="settings-card">
-                  <div className="card-header-accent">
-                    <span className="accent-bar"></span>
-                    <h3>Trộn âm thanh</h3>
-                  </div>
-                  <p className="card-description">
-                    Chọn cách ghép giọng lồng tiếng Việt với âm thanh gốc của video.
-                  </p>
-                  <label className="settings-label">
-                    <span>Chế độ trộn</span>
-                    <select
-                      className="settings-input"
-                      value={settings.mix_mode ?? "duck"}
-                      onChange={(e) => setSettings({ ...settings, mix_mode: e.target.value })}
-                    >
-                      <option value="duck">Giảm âm gốc (ducking) — mặc định</option>
-                      <option value="separate">Tách giọng nói, giữ nhạc nền (Demucs)</option>
-                    </select>
-                  </label>
-                  <div className="alert-info-box info">
-                    <CircleAlert size={14} style={{ flexShrink: 0, marginTop: "2px" }} />
-                    <span>
-                      Chế độ <strong>Tách giọng nói</strong> dùng Demucs trên GPU để loại giọng Trung gốc và giữ nhạc nền.
-                      Xử lý lâu hơn nhưng phù hợp video có nhạc nền mạnh.
-                    </span>
                   </div>
                 </section>
 
@@ -1571,6 +1605,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
           </>
         )}
       </main>
+      </div>
 
       {/* Selected Job Drawer Panel */}
       {selectedJob && (
@@ -1851,11 +1886,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                        <span style={{ fontSize: "12px", color: "#8170ff", fontWeight: 600 }}>
                          Phân đoạn #{seg.index + 1}
-                         {seg.speaker_id != null && (
-                           <span style={{ marginLeft: "8px", color: "#00d1b2" }}>
-                             · Speaker {seg.speaker_id}
-                           </span>
-                         )}
                        </span>
                        <small style={{ color: "#747d90" }}>Bắt đầu: {seg.start.toFixed(2)}s | Thời lượng: {seg.repaired_duration ? seg.repaired_duration.toFixed(2) : (seg.duration_budget ? seg.duration_budget.toFixed(2) : "--")}s</small>
                      </div>
@@ -1867,6 +1897,11 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                      <div style={{ fontSize: "13.5px", color: "#fff", fontWeight: 500, lineHeight: 1.4 }}>
                        Dịch (Việt): {seg.translation}
                      </div>
+                     {seg.speaker_id != null && (
+                       <span style={{ fontSize: "11px", color: "#00d1b2" }}>
+                         · Speaker {seg.speaker_id}
+                       </span>
+                     )}
                      <div style={{ display: "flex", alignItems: "center", gap: "10px", marginTop: "4px" }}>
                        <audio
                          controls
@@ -1976,6 +2011,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
           </section>
         </div>
       )}
-    </div>
+    </>
   );
 }

@@ -27,7 +27,8 @@
   },
   "bundle": {
     "active": true,
-    "targets": "msi",
+    "targets": "nsis",
+    "resources": ["../vendor/portable-runtime"],
     "icon": [
       "icons/icon.png",
       "icons/icon.ico"

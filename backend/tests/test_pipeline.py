@@ -451,6 +451,58 @@ def test_tts_step_uses_configured_adapter(
 @patch("dv_backend.pipeline.resolve_tool_path")
 @patch("dv_backend.pipeline.run_subprocess_with_cancel")
 @patch("dv_backend.pipeline.get_wav_duration")
+@patch("dv_backend.pipeline.create_tts_adapter")
+def test_tts_step_passes_clone_mode_and_anchor_transcript(
+    tts_factory, mock_duration, mock_run, mock_resolve, test_env
+):
+    config, database, _job_service, runner = test_env
+    mock_resolve.return_value = Path("ffmpeg")
+    mock_duration.return_value = 1.0
+    tts = tts_factory.return_value
+
+    def synthesize(_text, output_path, **_kwargs):
+        write_dummy_wav(output_path, duration=1.0, sample_rate=24000, channels=1)
+
+    def convert(cmd, *_args, **_kwargs):
+        write_dummy_wav(Path(cmd[-1]), duration=1.0, sample_rate=48000, channels=2)
+        return MagicMock(stdout="", stderr="", returncode=0)
+
+    tts.synthesize.side_effect = synthesize
+    mock_run.side_effect = convert
+
+    cloned_dir = config.data_dir / "cloned_voices"
+    cloned_dir.mkdir(parents=True, exist_ok=True)
+    voice_path = cloned_dir / "voice-abc.wav"
+    write_dummy_wav(voice_path, duration=1.0, sample_rate=16000, channels=1)
+    voice_path.with_suffix(".txt").write_text("xin chào", encoding="utf-8")
+
+    save_checkpoint(config.data_dir, "job123", "translate", {
+        "segments": [
+            {"index": 0, "start": 0.0, "end": 1.0, "translation": "Xin chao", "duration_budget": 1.0}
+        ]
+    })
+    with database.connection:
+        database.connection.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("voxcpm_ref_audio", json.dumps(str(voice_path)), "now"),
+        )
+        database.connection.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("voxcpm_clone_mode", json.dumps("ultimate"), "now"),
+        )
+
+    pipeline.tts_step("job123", config, database, runner)
+
+    kwargs = tts.synthesize.call_args.kwargs
+    assert kwargs["clone"] is True
+    assert kwargs["clone_mode"] == "ultimate"
+    assert kwargs["anchor_text"] == "xin chào"
+    assert kwargs["voice"] == str(voice_path)
+
+
+@patch("dv_backend.pipeline.resolve_tool_path")
+@patch("dv_backend.pipeline.run_subprocess_with_cancel")
+@patch("dv_backend.pipeline.get_wav_duration")
 @patch("dv_backend.pipeline.call_openai_chat")
 def test_duration_repair_time_stretches_fallback(mock_chat, mock_dur, mock_run, mock_resolve, test_env):
     config, database, job_service, runner = test_env
@@ -577,13 +629,11 @@ def test_mix_ducks_original_and_includes_vietnamese_narration(
     assert "[ducked][fg2]amix=inputs=2" in filter_graph
 
 
-@patch("dv_backend.pipeline.separate_vocals")
 @patch("dv_backend.pipeline.resolve_tool_path")
 @patch("dv_backend.pipeline.run_subprocess_with_cancel")
-def test_mix_separate_mode_uses_bgm_without_ducking(
+def test_mix_legacy_separate_setting_falls_back_to_ducking(
     mock_run,
     mock_resolve,
-    mock_separate,
     test_env,
 ):
     config, database, _job_service, runner = test_env
@@ -591,12 +641,8 @@ def test_mix_separate_mode_uses_bgm_without_ducking(
     job_id = "job123"
     artifacts_dir = config.data_dir / "jobs" / job_id / "artifacts"
     original = artifacts_dir / "original_48k.wav"
-    bgm = artifacts_dir / "bgm.wav"
-    vocals = artifacts_dir / "vocals.wav"
     narration_segment = artifacts_dir / "tts" / "tts_repaired_0.wav"
     write_dummy_wav(original)
-    write_dummy_wav(bgm)
-    write_dummy_wav(vocals)
     write_dummy_wav(narration_segment, duration=1.0)
     with database.connection:
         database.connection.execute(
@@ -623,67 +669,14 @@ def test_mix_separate_mode_uses_bgm_without_ducking(
 
     mock_run.side_effect = write_mix
 
-    pipeline.mix_step(job_id, config, database, runner)
+    result = pipeline.mix_step(job_id, config, database, runner)
 
-    mock_separate.assert_not_called()
     filter_graph = mock_run.call_args.args[0][
         mock_run.call_args.args[0].index("-filter_complex") + 1
     ]
-    assert "sidechaincompress" not in filter_graph
-    assert str(bgm) in mock_run.call_args.args[0]
-
-
-@patch("dv_backend.pipeline.separate_vocals")
-@patch("dv_backend.pipeline.resolve_tool_path")
-@patch("dv_backend.pipeline.run_subprocess_with_cancel")
-def test_mix_separate_mode_runs_demucs_when_bgm_missing(
-    mock_run,
-    mock_resolve,
-    mock_separate,
-    test_env,
-):
-    config, database, _job_service, runner = test_env
-    mock_resolve.return_value = Path("ffmpeg")
-    job_id = "job456"
-    artifacts_dir = config.data_dir / "jobs" / job_id / "artifacts"
-    original = artifacts_dir / "original_48k.wav"
-    narration_segment = artifacts_dir / "tts" / "tts_repaired_0.wav"
-    write_dummy_wav(original)
-    write_dummy_wav(narration_segment, duration=1.0)
-    with database.connection:
-        database.connection.execute(
-            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
-            ("mix_mode", json.dumps("separate"), "now"),
-        )
-
-    save_checkpoint(
-        config.data_dir,
-        job_id,
-        "extract_audio",
-        {"original_48k_path": str(original)},
-    )
-    save_checkpoint(
-        config.data_dir,
-        job_id,
-        "duration_repair",
-        {"segments": [{"index": 0, "start": 0.0}]},
-    )
-
-    def fake_separate(input_wav, **kwargs):
-        write_dummy_wav(kwargs["bgm_out"])
-        write_dummy_wav(kwargs["vocals_out"])
-
-    mock_separate.side_effect = fake_separate
-
-    def write_mix(cmd, *_args, **_kwargs):
-        write_dummy_wav(Path(cmd[-1]))
-        return MagicMock(stdout="", stderr="", returncode=0)
-
-    mock_run.side_effect = write_mix
-
-    pipeline.mix_step(job_id, config, database, runner)
-
-    mock_separate.assert_called_once()
+    assert result["mix_mode"] == "duck"
+    assert "sidechaincompress" in filter_graph
+    assert str(original) in mock_run.call_args.args[0]
 
 
 @patch("dv_backend.pipeline.resolve_tool_path")

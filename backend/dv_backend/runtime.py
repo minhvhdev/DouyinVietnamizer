@@ -8,7 +8,6 @@ from pydantic import BaseModel
 
 from .config import AppConfig
 from .database import Database
-from .pyannote_vendor import huggingface_token, pyannote_bootstrap_action, pyannote_model_dir, validate_pyannote_model_dir
 from .settings import SettingsService
 from .tool_probe import probe_executable
 from .vendor import VendorManifest, VendorResolver

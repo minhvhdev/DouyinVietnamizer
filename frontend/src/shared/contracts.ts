@@ -19,6 +19,8 @@ export type ClonedVoice = {
   name: string;
   wav_filename: string;
   wav_path: string;
+  transcript: string | null;
+  transcribed: boolean;
   created_at: string;
 };
 
@@ -49,8 +51,7 @@ export type JobsApi = {
   listClonedVoices(): Promise<ClonedVoice[]>;
   createClonedVoice(name: string, file: File): Promise<ClonedVoice>;
   deleteClonedVoice(voiceId: string): Promise<{ status: string }>;
-  testClonedVoice(voiceId: string, text: string): Promise<Blob>;
-  listPresetVoices(): Promise<{ id: string; name: string; kind: string }[]>;
+  testClonedVoice(voiceId: string, text: string, mode?: "reference" | "ultimate"): Promise<Blob>;
   previewPresetVoice(voice: string, text: string): Promise<Blob>;
   rerunJob(jobId: string, keepSteps: string[]): Promise<{ status: string; job: Job }>;
   redubJob(jobId: string): Promise<{ status: string; job: Job }>;

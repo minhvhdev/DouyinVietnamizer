@@ -9,11 +9,29 @@ Request (backend -> worker)::
 
     {"id": "req-1", "op": "synthesize",
      "text": "(female, low pitch)Xin chào",
-     "prompt_wav_path": "/abs/ref.wav", "prompt_text": "hello",
+     "mode": "design" | "reference" | "ultimate",
+     "reference_wav_path": "/abs/anchor.wav",
+     "prompt_wav_path": "/abs/anchor.wav",
+     "prompt_text": "transcript of anchor.wav",
+     "anchor_text": "transcript of anchor.wav",
      "voice_design": "female, low pitch",
      "cfg_value": 2.0, "inference_timesteps": 10,
      "model": "openbmb/VoxCPM2", "device": "cuda:0",
      "output_path": "/abs/out.wav"}
+
+Mode semantics:
+
+* ``design`` (default) — pure voice-design / zero-shot; no anchor audio
+  parameters are forwarded to ``model.generate``.
+* ``reference`` — voice cloning via VoxCPM2 reference mode. The anchor WAV
+  is passed as ``reference_wav_path`` only. ``prompt_wav_path`` and
+  ``prompt_text`` must NOT be sent (would invoke continuation-style speech
+  context conditioning).
+* ``ultimate`` — anchor is used as BOTH a reference identity signal AND a
+  continuation-style speech prompt. ``reference_wav_path`` and
+  ``prompt_wav_path`` are both set to the anchor; ``prompt_text`` is the
+  exact transcript of the anchor audio. The worker rejects ultimate
+  requests whose ``anchor_text`` is missing or blank.
 
 Response (worker -> backend)::
 
@@ -45,6 +63,7 @@ DEFAULT_CFG_VALUE = 2.0
 DEFAULT_FLUSH_MS = 150
 DEFAULT_MAX_BATCH = 4
 DEFAULT_SAMPLE_RATE = 24000
+SUPPORTED_MODES = ("design", "reference", "ultimate")
 
 
 def _log(message: str) -> None:
@@ -53,7 +72,7 @@ def _log(message: str) -> None:
 
 
 def _emit(message: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(message, ensure_ascii=False) + "\n")
+    sys.stdout.write(json.dumps(message, ensure_ascii=True) + "\n")
     sys.stdout.flush()
 
 
@@ -79,10 +98,7 @@ class VoxCPMEngine:
 
         _log(f"Loading VoxCPM model={model} device={device}")
         with contextlib.redirect_stdout(sys.stderr):
-            engine = VoxCPM.from_pretrained(model)
-            if device:
-                engine = engine.to(device)
-            engine.eval()
+            engine = VoxCPM.from_pretrained(model, device=device or None)
         _log("VoxCPM model ready")
         self._engine = engine
         return self._engine
@@ -139,6 +155,9 @@ def _generate(
     voice_design: str | None,
     inference_timesteps: int,
     cfg_value: float,
+    reference_wav_path: str | None = None,
+    anchor_text: str | None = None,
+    mode: str = "design",
 ) -> Any:
     from voxcpm import VoxCPM  # type: ignore  # noqa: F401  (ensures package is importable)
 
@@ -147,21 +166,53 @@ def _generate(
         for character in str(text or "")
         if not (0xD800 <= ord(character) <= 0xDFFF)
     )
+    resolved_mode = (mode or "design").strip().lower() or "design"
+    if resolved_mode not in SUPPORTED_MODES:
+        raise ValueError(
+            f"Unsupported VoxCPM clone mode: {mode!r}. Expected one of {SUPPORTED_MODES}."
+        )
+    if resolved_mode == "ultimate":
+        anchor_clean = (anchor_text or "").strip()
+        if not anchor_clean:
+            raise ValueError(
+                "Ultimate clone mode requires a non-empty anchor_text "
+                "matching the reference_wav_path transcript."
+            )
     kwargs: dict[str, Any] = {
         "cfg_value": float(cfg_value),
         "inference_timesteps": int(inference_timesteps),
+        "normalize": False,
+        "denoise": False,
     }
-    if prompt_wav_path:
+    if resolved_mode == "reference":
+        # VoxCPM2 reference mode: anchor WAV carries speaker identity via
+        # isolated ref tokens. No prompt text, no prompt audio: those would
+        # trigger continuation-style speech-context conditioning and the
+        # output would sound like it continues from the anchor.
+        if reference_wav_path:
+            kwargs["reference_wav_path"] = reference_wav_path
+    elif resolved_mode == "ultimate":
+        # Ultimate mode: anchor is used both as reference identity signal
+        # AND as a continuation-style speech prompt. prompt_text must equal
+        # the transcript of prompt_wav_path so the model conditions on the
+        # right speech context.
+        if reference_wav_path:
+            kwargs["reference_wav_path"] = reference_wav_path
+        kwargs["prompt_wav_path"] = reference_wav_path
+        kwargs["prompt_text"] = (anchor_text or "").strip()
+    elif prompt_wav_path:
+        # Legacy preview/job settings use prompt audio directly.
         kwargs["prompt_wav_path"] = prompt_wav_path
         if prompt_text:
             kwargs["prompt_text"] = prompt_text
     elif voice_design:
-        # Voice design is carried in the text prefix; nothing else needed.
+        # Voice design is carried in the text prefix; no audio parameters.
         pass
     _log(
-        f"Generating 1 segment, inference_timesteps={inference_timesteps} "
+        f"Generating 1 segment mode={resolved_mode} "
+        f"inference_timesteps={inference_timesteps} "
         f"cfg_value={cfg_value} voice_design={bool(voice_design)} "
-        f"prompt_wav={bool(prompt_wav_path)}"
+        f"reference_wav={bool(reference_wav_path)}"
     )
     with contextlib.redirect_stdout(sys.stderr):
         return engine_obj.generate(text=text, **kwargs)
@@ -174,6 +225,8 @@ def _coalesce(requests: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
         key = (
             req.get("model") or DEFAULT_MODEL,
             req.get("device") or DEFAULT_DEVICE,
+            req.get("mode") or "design",
+            req.get("reference_wav_path") or "",
             req.get("prompt_wav_path") or "",
             req.get("prompt_text") or "",
             req.get("voice_design") or "",
@@ -199,8 +252,23 @@ def _run_batch(engine_obj: Any, batch: list[dict[str, Any]], sample_rate: int) -
                 voice_design=req.get("voice_design"),
                 inference_timesteps=int(req.get("inference_timesteps") or DEFAULT_INFERENCE_TIMESTEPS),
                 cfg_value=float(req.get("cfg_value") or DEFAULT_CFG_VALUE),
+                reference_wav_path=req.get("reference_wav_path"),
+                anchor_text=req.get("anchor_text"),
+                mode=req.get("mode") or "design",
             )
             duration = _write_wav(req["output_path"], audio, sample_rate)
+        except ValueError as exc:
+            _log(f"Synthesize rejected: {exc!r}")
+            responses.append(
+                {
+                    "id": req.get("id"),
+                    "ok": False,
+                    "code": "VOXCPM_BAD_REQUEST",
+                    "message": str(exc),
+                    "retryable": False,
+                }
+            )
+            continue
         except Exception as exc:  # noqa: BLE001
             _log(f"Synthesize failed: {exc!r}")
             traceback.print_exc(file=sys.stderr)
@@ -249,7 +317,9 @@ def serve(*, max_batch: int = DEFAULT_MAX_BATCH, flush_ms: int = DEFAULT_FLUSH_M
         request["text"] = request_text
         _log(
             f"Handling synthesize id={request.get('id')} model={model} device={device} "
+            f"mode={request.get('mode') or 'design'} "
             f"text_len={len(request_text)} "
+            f"reference_wav={bool(request.get('reference_wav_path'))} "
             f"prompt_wav={bool(request.get('prompt_wav_path'))} "
             f"prompt_text_len={len(str(request.get('prompt_text') or ''))} "
             f"voice_design={bool(request.get('voice_design'))}"

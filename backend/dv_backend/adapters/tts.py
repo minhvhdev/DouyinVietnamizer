@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 import re
 import shutil
@@ -9,9 +10,29 @@ from ..models import ErrorInfo
 SUPPORTED_TTS_BACKENDS = ("voxcpm",)
 VOXCPM_DEFAULT_MODEL = "openbmb/VoxCPM2"
 VOXCPM_INSTRUCT_PREFIX = "instruct:"
+VOXCPM_MODE_DESIGN = "design"
+VOXCPM_MODE_REFERENCE = "reference"
+VOXCPM_MODE_ULTIMATE = "ultimate"
+VOXCPM_CLONE_MODES = frozenset(
+    {VOXCPM_MODE_REFERENCE, VOXCPM_MODE_ULTIMATE}
+)
 
 MAX_TTS_CHARS = 450
 _TTS_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…。，！？；;])\s+")
+
+
+def _normalize_clone_mode(value: object) -> str:
+    """Coerce caller-supplied clone mode into a known enum value.
+
+    Unknown / missing values fall back to ``"reference"`` so existing callers
+    that only know about the legacy boolean clone flag keep working.
+    """
+    if not value:
+        return VOXCPM_MODE_REFERENCE
+    candidate = str(value).strip().lower()
+    if candidate in VOXCPM_CLONE_MODES:
+        return candidate
+    return VOXCPM_MODE_REFERENCE
 
 
 def sanitize_tts_text(text: str) -> str:
@@ -80,6 +101,19 @@ def _is_voxcpm_voice_clone(voice: str | None) -> bool:
     return prompt_wav_path is not None
 
 
+def resolve_voxcpm_model(model: str) -> str:
+    configured = (model or VOXCPM_DEFAULT_MODEL).strip() or VOXCPM_DEFAULT_MODEL
+    path = Path(configured)
+    if path.exists():
+        return str(path)
+    models_dir = os.environ.get("DV_MODELS_DIR", "").strip()
+    if configured == VOXCPM_DEFAULT_MODEL and models_dir:
+        bundled = Path(models_dir) / "voxcpm2" / "VoxCPM2"
+        if bundled.is_dir() and any(bundled.iterdir()):
+            return str(bundled)
+    return configured
+
+
 def _wav_format_key(params: wave._wave_params) -> tuple:
     return (
         params.nchannels,
@@ -139,7 +173,7 @@ class VoxCPMTtsAdapter:
         _client: object | None = None,
         _cache: object | None = None,
     ) -> None:
-        self.model = (model or VOXCPM_DEFAULT_MODEL).strip() or VOXCPM_DEFAULT_MODEL
+        self.model = resolve_voxcpm_model(model)
         self.device = (device or "cuda:0").strip() or "cuda:0"
         self.num_steps = max(4, min(64, int(num_steps)))
         self._data_dir = Path(data_dir) if data_dir is not None else None
@@ -197,10 +231,13 @@ class VoxCPMTtsAdapter:
         prompt_text: str | None,
         voice_design: str | None,
         voice_id: str,
+        reference_wav_path: str | None = None,
+        anchor_text: str | None = None,
+        mode: str = VOXCPM_MODE_DESIGN,
     ) -> None:
         self._ensure_runtime()
         cache_key = None
-        if self._cache is not None and not _is_voxcpm_voice_clone(voice_id):
+        if self._cache is not None and mode == VOXCPM_MODE_DESIGN:
             from .voxcpm_cache import cache_key as make_cache_key
 
             cache_key = make_cache_key(
@@ -210,6 +247,9 @@ class VoxCPMTtsAdapter:
                 num_step=self.num_steps,
                 voice_design=voice_design,
                 cfg_value=2.0,
+                mode=mode,
+                reference_wav_path=reference_wav_path,
+                anchor_text=anchor_text,
             )
             if self._cache.materialize(cache_key, output_path):
                 return
@@ -220,6 +260,9 @@ class VoxCPMTtsAdapter:
             prompt_wav_path=prompt_wav_path,
             prompt_text=prompt_text,
             voice_design=voice_design,
+            reference_wav_path=reference_wav_path,
+            anchor_text=anchor_text,
+            mode=mode,
             cfg_value=2.0,
             inference_timesteps=self.num_steps,
             cache_key=cache_key,
@@ -258,17 +301,87 @@ class VoxCPMTtsAdapter:
         *,
         voice: str,
         ref_text: str | None,
+        anchor_text: str | None = None,
+        mode: str = VOXCPM_MODE_DESIGN,
     ) -> None:
         prompt_wav_path, _, voice_design = parse_voxcpm_voice(voice)
         if voice_design:
             text = f"({voice_design}){text}"
+        if mode == VOXCPM_MODE_ULTIMATE:
+            # Ultimate mode uses the anchor as both a reference identity
+            # signal and a continuation-style speech prompt. The anchor
+            # transcript is mandatory and is forwarded only to the model,
+            # never to the cache for the design-mode key path.
+            if not prompt_wav_path:
+                raise AppError(
+                    422,
+                    ErrorInfo(
+                        code="VOXCPM_ULTIMATE_REQUIRES_REFERENCE_AUDIO",
+                        message=(
+                            "Ultimate clone mode requires a reference audio path "
+                            "(the voice argument must point to a WAV file)."
+                        ),
+                        action="Provide a reference audio file in the voice argument.",
+                    ),
+                )
+            anchor_clean = (anchor_text or "").strip()
+            if not anchor_clean:
+                raise AppError(
+                    422,
+                    ErrorInfo(
+                        code="VOXCPM_ULTIMATE_REQUIRES_ANCHOR_TRANSCRIPT",
+                        message=(
+                            "Ultimate clone mode requires the exact transcript of "
+                            "the reference audio (anchor_text), not source or "
+                            "target text."
+                        ),
+                        action=(
+                            "Provide the verbatim transcript of the reference audio "
+                            "file, or switch to reference mode for the ordinary "
+                            "clone path that does not require a transcript."
+                        ),
+                    ),
+                )
+            self._run_infer(
+                text=text,
+                output_path=output_path,
+                prompt_wav_path=prompt_wav_path,
+                prompt_text=anchor_clean,
+                reference_wav_path=prompt_wav_path,
+                anchor_text=anchor_clean,
+                voice_design=voice_design,
+                voice_id=voice or "",
+                mode=VOXCPM_MODE_ULTIMATE,
+            )
+            return
+        if mode == VOXCPM_MODE_REFERENCE and prompt_wav_path is not None:
+            # Reference mode: anchor audio is isolated via VoxCPM2 ref
+            # tokens. No prompt text or prompt audio is forwarded, so the
+            # target text is generated independently of any speech-context
+            # conditioning from the anchor. Any upstream anchor transcript
+            # is ignored here on purpose.
+            self._run_infer(
+                text=text,
+                output_path=output_path,
+                prompt_wav_path=None,
+                prompt_text=None,
+                reference_wav_path=prompt_wav_path,
+                anchor_text=None,
+                voice_design=voice_design,
+                voice_id=voice or "",
+                mode=VOXCPM_MODE_REFERENCE,
+            )
+            return
         self._run_infer(
             text=text,
             output_path=output_path,
             prompt_wav_path=prompt_wav_path,
             prompt_text=ref_text,
+            reference_wav_path=prompt_wav_path,
+            anchor_text=None,
             voice_design=voice_design,
             voice_id=voice or "",
+            mode=VOXCPM_MODE_DESIGN,
         )
 
     def synthesize(
@@ -278,6 +391,9 @@ class VoxCPMTtsAdapter:
         *,
         voice: str,
         ref_text: str | None = None,
+        anchor_text: str | None = None,
+        clone: bool = False,
+        clone_mode: str | None = None,
     ) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         chunks = split_tts_text(text)
@@ -290,6 +406,13 @@ class VoxCPMTtsAdapter:
                     action="Verify translation output for this segment.",
                 ),
             )
+        # Resolve explicit mode only when the caller signals cloning. Legacy
+        # callers that pass clone=True without a mode get the default
+        # reference (ordinary clone) path. clone=False always means design.
+        if clone:
+            mode = _normalize_clone_mode(clone_mode) if clone_mode else VOXCPM_MODE_REFERENCE
+        else:
+            mode = VOXCPM_MODE_DESIGN
         try:
             if len(chunks) == 1:
                 self._synthesize_single(
@@ -297,6 +420,8 @@ class VoxCPMTtsAdapter:
                     output_path,
                     voice=voice,
                     ref_text=ref_text,
+                    anchor_text=anchor_text,
+                    mode=mode,
                 )
                 return
 
@@ -308,6 +433,8 @@ class VoxCPMTtsAdapter:
                     part_path,
                     voice=voice,
                     ref_text=ref_text,
+                    anchor_text=anchor_text,
+                    mode=mode,
                 )
                 parts.append(part_path)
             _concat_wav_files(parts, output_path)

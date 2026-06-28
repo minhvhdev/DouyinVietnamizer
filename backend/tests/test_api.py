@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from dv_backend.api import create_app
-from dv_backend.checkpoints import save_checkpoint
+from dv_backend.checkpoints import PIPELINE_STEPS, save_checkpoint
 from dv_backend.config import AppConfig
 
 
@@ -21,7 +21,7 @@ def test_health_and_capabilities(tmp_path: Path) -> None:
     assert health.json()["status"] == "ok"
     assert capabilities.json()["cpu_mode"] is False
     assert capabilities.json()["asr_backend"] == "qwen3_asr"
-    assert len(capabilities.json()["implemented_steps"]) == 13
+    assert capabilities.json()["implemented_steps"] == list(PIPELINE_STEPS)
 
 
 def test_create_and_list_job(tmp_path: Path) -> None:
@@ -32,7 +32,7 @@ def test_create_and_list_job(tmp_path: Path) -> None:
 
     assert created.status_code == 201
     assert listed.json()[0]["id"] == created.json()["id"]
-    assert len(created.json()["steps"]) == 13
+    assert [step["name"] for step in created.json()["steps"]] == list(PIPELINE_STEPS)
 
 
 def test_create_bilibili_job(tmp_path: Path) -> None:
@@ -218,23 +218,22 @@ def test_list_preset_voices(tmp_path: Path) -> None:
     assert presets[0] == {"id": "Ngọc Lan", "name": "Ngọc Lan", "kind": "preset"}
 
 
-@patch("dv_backend.adapters.tts.VieNeuTtsAdapter")
-def test_preview_preset_voice(mock_adapter_cls: MagicMock, tmp_path: Path) -> None:
+@patch("dv_backend.api._synthesize_voice_preview")
+def test_preview_preset_voice(mock_preview: MagicMock, tmp_path: Path) -> None:
+    output_wav = tmp_path / "preview.wav"
+    output_wav.write_bytes(b"RIFFfake")
+    mock_preview.return_value = output_wav
     client = make_client(tmp_path)
-
-    def fake_synthesize(*, text: str, output_path: Path, voice: str) -> None:
-        output_path.write_bytes(b"RIFFfake")
-
-    mock_adapter_cls.return_value.synthesize.side_effect = fake_synthesize
 
     resp = client.post(
         "/api/voices/preview",
         json={"voice": "Ngọc Lan", "text": "Xin chào"},
     )
+
     assert resp.status_code == 200
     assert resp.content == b"RIFFfake"
-    mock_adapter_cls.return_value.synthesize.assert_called_once()
-    assert mock_adapter_cls.return_value.synthesize.call_args.kwargs["voice"] == "Ngọc Lan"
+    mock_preview.assert_called_once()
+    assert mock_preview.call_args.kwargs["voice"] == "Ngọc Lan"
 
 
 def test_preview_preset_voice_rejects_unknown(tmp_path: Path) -> None:

@@ -34,6 +34,10 @@ IDLE_SHUTDOWN_SEC = 300.0
 PING_INTERVAL_SEC = 60.0
 
 
+def _json_line(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=True) + "\n"
+
+
 class VoxCPMWorkerClient:
     """Manages a single worker subprocess and a request/response correlation queue.
 
@@ -92,6 +96,18 @@ class VoxCPMWorkerClient:
         ]
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
+        # The worker runs in an isolated venv that does not have dv_backend
+        # installed. Inject the *parent* of the dv_backend package directory
+        # into PYTHONPATH so the worker can import dv_backend.adapters.voxcpm_worker
+        # regardless of the parent cwd (e.g. portable runtime with nested
+        # dv_backend layout where cwd=backend/dv_backend/ has no __init__.py).
+        import dv_backend as _dv_backend_pkg
+        worker_pythonpath = str(Path(_dv_backend_pkg.__file__).resolve().parent.parent)
+        env["PYTHONPATH"] = (
+            worker_pythonpath
+            if not env.get("PYTHONPATH")
+            else worker_pythonpath + os.pathsep + env["PYTHONPATH"]
+        )
         try:
             self._proc = subprocess.Popen(
                 cmd,
@@ -146,7 +162,7 @@ class VoxCPMWorkerClient:
         q: queue.Queue = queue.Queue(maxsize=1)
         with self._pending_lock:
             self._pending[request_id] = q
-        message = json.dumps({"id": request_id, "op": "ping"}, ensure_ascii=False) + "\n"
+        message = _json_line({"id": request_id, "op": "ping"})
         try:
             assert self._proc.stdin is not None
             with self._write_lock:
@@ -268,7 +284,7 @@ class VoxCPMWorkerClient:
         try:
             assert self._proc.stdin is not None
             with self._write_lock:
-                self._proc.stdin.write(json.dumps({"id": f"ping-{uuid.uuid4().hex}", "op": "ping"}) + "\n")
+                self._proc.stdin.write(_json_line({"id": f"ping-{uuid.uuid4().hex}", "op": "ping"}))
                 self._proc.stdin.flush()
         except Exception:
             pass
@@ -295,6 +311,9 @@ class VoxCPMWorkerClient:
         cfg_value: float,
         inference_timesteps: int,
         cache_key: str | None = None,
+        reference_wav_path: str | None = None,
+        anchor_text: str | None = None,
+        mode: str = "design",
     ) -> dict[str, Any]:
         output_path = Path(output_path)
         if not text or not text.strip():
@@ -323,8 +342,11 @@ class VoxCPMWorkerClient:
             "device": self.device,
             "inference_timesteps": int(inference_timesteps),
             "cfg_value": float(cfg_value),
+            "mode": mode,
+            "reference_wav_path": reference_wav_path,
             "prompt_wav_path": prompt_wav_path,
             "prompt_text": prompt_text,
+            "anchor_text": anchor_text,
             "voice_design": voice_design,
         }
         if cache_key:
@@ -332,7 +354,7 @@ class VoxCPMWorkerClient:
         try:
             assert self._proc is not None and self._proc.stdin is not None
             with self._write_lock:
-                self._proc.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
+                self._proc.stdin.write(_json_line(request))
                 self._proc.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
             with self._pending_lock:
@@ -366,10 +388,22 @@ class VoxCPMWorkerClient:
         self._last_used = time.perf_counter()
         if response.get("ok"):
             return response
+        code = response.get("code") or "VOXCPM_TTS_FAILED"
+        if code == "VOXCPM_BAD_REQUEST":
+            raise AppError(
+                422,
+                ErrorInfo(
+                    code=code,
+                    message=response.get("message") or "VoxCPM worker rejected the request.",
+                    action="Verify the request parameters and the cloning mode configuration.",
+                    detail=response.get("detail"),
+                    retryable=False,
+                ),
+            )
         raise AppError(
             502,
             ErrorInfo(
-                code=response.get("code") or "VOXCPM_TTS_FAILED",
+                code=code,
                 message=response.get("message") or "VoxCPM2 could not generate narration.",
                 action=(
                     "Check VoxCPM2 model, GPU availability, and reference audio settings. "
@@ -391,7 +425,7 @@ class VoxCPMWorkerClient:
         try:
             if proc.stdin is not None and proc.poll() is None:
                 with self._write_lock:
-                    proc.stdin.write(json.dumps({"op": "shutdown"}) + "\n")
+                    proc.stdin.write(_json_line({"op": "shutdown"}))
                     proc.stdin.flush()
         except Exception:
             pass

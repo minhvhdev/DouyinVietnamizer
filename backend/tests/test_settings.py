@@ -20,6 +20,7 @@ def test_defaults_use_free_portable_pipeline(tmp_path: Path) -> None:
     assert settings.get_all()["translation_backend"] == "google_free"
     assert settings.get_all()["voxcpm_model"] == "openbmb/VoxCPM2"
     assert settings.get_all()["voxcpm_device"] == "cuda:0"
+    assert settings.get_all()["voxcpm_clone_mode"] == "reference"
     assert settings.get_all()["mix_mode"] == "duck"
     assert settings.get_all()["exact_timing_enabled"] is True
     assert settings.get_all()["exact_timing_tolerance_ms"] == 40
@@ -41,14 +42,24 @@ def test_cookie_browser_accepts_only_supported_values(tmp_path: Path) -> None:
         settings.update({"cookies_browser": "opera"})
 
 
-def test_mix_mode_accepts_supported_values(tmp_path: Path) -> None:
+def test_mix_mode_accepts_only_duck(tmp_path: Path) -> None:
     settings = service(tmp_path)
 
-    settings.update({"mix_mode": "separate"})
-    assert settings.get_all()["mix_mode"] == "separate"
+    settings.update({"mix_mode": "duck"})
+    assert settings.get_all()["mix_mode"] == "duck"
 
     with pytest.raises(ValueError, match="mix_mode"):
-        settings.update({"mix_mode": "invalid"})
+        settings.update({"mix_mode": "separate"})
+
+
+def test_voxcpm_clone_mode_accepts_supported_values(tmp_path: Path) -> None:
+    settings = service(tmp_path)
+
+    settings.update({"voxcpm_clone_mode": "ultimate"})
+    assert settings.get_all()["voxcpm_clone_mode"] == "ultimate"
+
+    with pytest.raises(ValueError, match="voxcpm_clone_mode"):
+        settings.update({"voxcpm_clone_mode": "design"})
 
 
 def test_exact_timing_settings_are_normalized(tmp_path: Path) -> None:

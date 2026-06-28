@@ -17,12 +17,10 @@ from .database import Database
 from .errors import AppError
 from .models import ErrorInfo
 from .checkpoints import load_checkpoint, save_checkpoint
-from .checkpoint_compat import ASR_ALIGNMENT_SCHEMA_VERSION
 from .vendor import VendorManifest, VendorResolver
 from .adapters.translation import GoogleFreeTranslator
 from .adapters.tts import VOXCPM_INSTRUCT_PREFIX, create_tts_adapter
 from .adapters.asr import reset_model_cache, transcribe_audio
-from .adapters.separation import MIX_MODE_SEPARATE, separate_vocals
 from .adapters.subtitles import ffmpeg_subtitles_filter, probe_video_dimensions, write_ass_file
 from .adapters.gemini import GeminiKeyPool, GeminiTranslator
 from .source_urls import (
@@ -33,6 +31,7 @@ from .source_urls import (
 
 logger = logging.getLogger(__name__)
 
+ASR_ALIGNMENT_SCHEMA_VERSION = 2
 DEFAULT_EXACT_TIMING_TOLERANCE_MS = 40
 DEFAULT_EXACT_TIMING_ENABLED = True
 DEFAULT_EXACT_TIMING_MAX_STRETCH = 1.8
@@ -918,6 +917,28 @@ def _default_tts_voice(settings: dict) -> str:
     return "auto"
 
 
+def _anchor_transcript_for(settings: dict) -> str | None:
+    ref_audio = str(settings.get("voxcpm_ref_audio") or "").strip()
+    if not ref_audio:
+        return None
+    sidecar = Path(ref_audio).with_suffix(".txt")
+    if not sidecar.is_file():
+        return None
+    try:
+        transcript = sidecar.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return transcript or None
+
+
+def _resolve_clone_mode(settings: dict) -> str:
+    raw = settings.get("voxcpm_clone_mode")
+    candidate = str(raw).strip().lower() if raw else "reference"
+    if candidate in ("reference", "ultimate"):
+        return candidate
+    return "reference"
+
+
 def _synthesize_segment_tts(
     settings: dict,
     *,
@@ -929,6 +950,10 @@ def _synthesize_segment_tts(
 ) -> None:
     voice = _default_tts_voice(settings)
     ref_text = str(segment.get("text") or "").strip() or None
+    ref_audio = str(settings.get("voxcpm_ref_audio") or "").strip()
+    clone = bool(ref_audio)
+    clone_mode = _resolve_clone_mode(settings) if clone else "reference"
+    anchor_text = _anchor_transcript_for(settings) if clone else None
     last_error: AppError | None = None
     for attempt in range(2):
         if attempt:
@@ -948,6 +973,9 @@ def _synthesize_segment_tts(
                 output_path,
                 voice=voice,
                 ref_text=ref_text,
+                clone=clone,
+                clone_mode=clone_mode,
+                anchor_text=anchor_text,
             )
             return
         except AppError as error:
@@ -1151,11 +1179,18 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                 raw_temp = tts_dir / f"tts_temp_raw_{idx}.wav"
                 tts_adapter = create_tts_adapter(settings, data_dir=config.data_dir, runner=runner)
                 ref_text = str(s.get("text") or "").strip() or None
+                ref_audio = str(settings.get("voxcpm_ref_audio") or "").strip()
+                clone = bool(ref_audio)
+                clone_mode = _resolve_clone_mode(settings) if clone else "reference"
+                anchor_text = _anchor_transcript_for(settings) if clone else None
                 tts_adapter.synthesize(
                     new_translation,
                     raw_temp,
                     voice=_default_tts_voice(settings),
                     ref_text=ref_text,
+                    clone=clone,
+                    clone_mode=clone_mode,
+                    anchor_text=anchor_text,
                 )
                 _convert_tts_to_final_wav(ffmpeg_path, raw_temp, temp_wav, job_id, runner)
                 if raw_temp.is_file():
@@ -1296,39 +1331,15 @@ def mix_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
     shutil.copyfile(narration_wav, vietnamese_narration)
         
     ffmpeg_path = resolve_tool_path(config, "ffmpeg")
-    rows = database.connection.execute("SELECT key, value FROM settings").fetchall()
-    settings = {r["key"]: json.loads(r["value"]) for r in rows}
-    mix_mode = str(settings.get("mix_mode", "duck") or "duck")
-
-    vocals_wav = artifacts_dir / "vocals.wav"
-    bgm_wav = artifacts_dir / "bgm.wav"
     background_wav = original_48k
-
-    if mix_mode == MIX_MODE_SEPARATE:
-        reset_model_cache()
-        if not bgm_wav.is_file() or not vocals_wav.is_file():
-            separate_vocals(
-            original_48k,
-            vocals_out=vocals_wav,
-            bgm_out=bgm_wav,
-            ffmpeg_path=ffmpeg_path,
-            device=str(settings.get("voxcpm_device", "cuda:0") or "cuda:0"),
-            job_id=job_id,
-            runner=runner,
-        )
-        background_wav = bgm_wav
-        filter_graph = (
-            "[0:a]volume=1.0[bg];[1:a]volume=1.3[fg];"
-            "[bg][fg]amix=inputs=2:duration=first:dropout_transition=0[mixed]"
-        )
-    else:
-        filter_graph = (
-            "[0:a]volume=0.35[bg];[1:a]volume=1.5[fg];"
-            "[fg]asplit=2[fg1][fg2];"
-            "[bg][fg1]sidechaincompress=threshold=0.02:ratio=8:"
-            "attack=20:release=400[ducked];"
-            "[ducked][fg2]amix=inputs=2:duration=first:dropout_transition=0[mixed]"
-        )
+    mix_mode = "duck"
+    filter_graph = (
+        "[0:a]volume=0.35[bg];[1:a]volume=1.5[fg];"
+        "[fg]asplit=2[fg1][fg2];"
+        "[bg][fg1]sidechaincompress=threshold=0.02:ratio=8:"
+        "attack=20:release=400[ducked];"
+        "[ducked][fg2]amix=inputs=2:duration=first:dropout_transition=0[mixed]"
+    )
 
     cmd_mix = [
         str(ffmpeg_path), "-y",
@@ -1523,7 +1534,6 @@ def qc_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
         "stretched_count": stretched_segments,
         "warnings": warnings,
         "output_video_path": output_path,
-        "diarization": diarization_qc,
     }
     
     save_checkpoint(config.data_dir, job_id, "qc", checkpoint_data)
@@ -1542,17 +1552,6 @@ def qc_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
         "</tr>"
         for warning in warnings
     ) or "<tr><td colspan='4'>No timing warnings</td></tr>"
-    diar = checkpoint_data.get("diarization") or {}
-    diar_rows = ""
-    if diar:
-        diar_rows = (
-            "<h2>Diarization</h2>"
-            f"<p>Backend: {html.escape(str(diar.get('backend')))} | "
-            f"Speakers: {diar.get('speaker_count')} | "
-            f"Low confidence ratio: {diar.get('low_confidence_ratio')} | "
-            f"Overlap ratio: {diar.get('overlap_ratio')} | "
-            f"Demucs fallback: {diar.get('demucs_used')}</p>"
-        )
     artifacts_html = artifacts_qc.with_suffix(".html")
     artifacts_html.write_text(
         "<!doctype html><html><head><meta charset='utf-8'>"
@@ -1560,7 +1559,6 @@ def qc_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
         "<h1>Douyin Vietnamizer QC Report</h1>"
         f"<p>Total segments: {total_segments}</p>"
         f"<p>Output: {html.escape(str(output_path))}</p>"
-        f"{diar_rows}"
         "<table><thead><tr><th>Segment</th><th>Repair</th><th>Budget</th>"
         f"<th>Result</th></tr></thead><tbody>{warning_rows}</tbody></table>"
         "</body></html>",

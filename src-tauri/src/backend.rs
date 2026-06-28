@@ -1,43 +1,11 @@
+use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VenvStatus {
-    Ready(PathBuf),
-    MissingUv,
-    MissingPython,
-    MissingVenv,
-}
+use thiserror::Error;
 
-impl VenvStatus {
-    pub fn is_ready(&self) -> bool {
-        matches!(self, VenvStatus::Ready(_))
-    }
-}
-
-/// Detect whether the `uv`-managed Python venv at `backend_dir/.venv` is ready.
-/// Order: check `uv` on PATH, then Python 3.12, then venv directory.
-pub fn detect_venv(backend_dir: &Path) -> VenvStatus {
-    if Command::new("uv").arg("--version").output().is_err() {
-        return VenvStatus::MissingUv;
-    }
-    let py_out = Command::new("python").arg("--version").output();
-    match py_out {
-        Ok(o) if o.status.success() => {
-            let v = String::from_utf8_lossy(&o.stdout);
-            if !v.contains("3.12") {
-                return VenvStatus::MissingPython;
-            }
-        }
-        _ => return VenvStatus::MissingPython,
-    }
-    let cfg = backend_dir.join(".venv").join("pyvenv.cfg");
-    if cfg.exists() {
-        VenvStatus::Ready(backend_dir.join(".venv"))
-    } else {
-        VenvStatus::MissingVenv
-    }
-}
+use crate::portable::{prepend_path, PortableRuntime};
 
 /// Extracts the last 4KB of stderr for surfacing in error UI. Trims trailing whitespace.
 pub fn parse_uvicorn_stderr(s: &str) -> String {
@@ -56,9 +24,6 @@ pub fn parse_uvicorn_stderr(s: &str) -> String {
     }
 }
 
-use std::time::Duration;
-use thiserror::Error;
-
 #[derive(Debug, Error, serde::Serialize)]
 pub enum BackendStartError {
     #[error("failed to spawn uvicorn: {0}")]
@@ -76,7 +41,6 @@ pub struct BackendStatus {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
 pub enum BackendStatusKind {
     Starting,
     Ready,
@@ -87,22 +51,45 @@ pub enum BackendStatusKind {
 // Backward-compatible alias used by callers that expected the prior internal name.
 pub type _BackendStatus = BackendStatus;
 
-/// Spawn `uv run python -m dv_backend.main` with `current_dir = backend_dir`.
+pub fn backend_working_dir(runtime: &PortableRuntime, source_backend_dir: &Path, dev_profile: bool) -> PathBuf {
+    if dev_profile {
+        source_backend_dir.to_path_buf()
+    } else {
+        runtime.backend_dir.clone()
+    }
+}
+
+pub fn build_backend_env(runtime: &PortableRuntime, dev_profile: bool) -> HashMap<&'static str, OsString> {
+    let mut envs = HashMap::new();
+    envs.insert("DV_RELOAD", OsString::from(if dev_profile { "1" } else { "0" }));
+    envs.insert("DV_PORTABLE_RUNTIME_DIR", runtime.root.as_os_str().to_os_string());
+    envs.insert("DV_VENDOR_DIR", runtime.root.as_os_str().to_os_string());
+    envs.insert("DV_VENDOR_MANIFEST", runtime.root.join("manifest.json").as_os_str().to_os_string());
+    envs.insert("DV_MODELS_DIR", runtime.models_dir.as_os_str().to_os_string());
+    envs.insert("DV_VOXCPM_VENV", runtime.backend_dir.join("dv_backend").join(".venv-voxcpm").as_os_str().to_os_string());
+    envs.insert("DV_ALLOW_PATH_TOOLS", OsString::from("0"));
+    envs.insert("PATH", prepend_path(&runtime.tools_dir, std::env::var_os("PATH")));
+    envs
+}
+
+/// Spawn `python -m dv_backend.main` using the bundled portable Python runtime.
 /// When `dev_profile` is true, sets `DV_RELOAD=1` so uvicorn watches source files.
-pub fn spawn_uvicorn(backend_dir: &Path, dev_profile: bool) -> Result<tokio::process::Child, BackendStartError> {
+pub fn spawn_uvicorn(
+    runtime: &PortableRuntime,
+    source_backend_dir: &Path,
+    dev_profile: bool,
+) -> Result<tokio::process::Child, BackendStartError> {
     use std::process::Stdio;
-    let mut cmd = tokio::process::Command::new("uv");
-    cmd.args(["run", "python", "-m", "dv_backend.main"])
-        .current_dir(backend_dir)
+    let mut cmd = tokio::process::Command::new(&runtime.python);
+    cmd.args(["-m", "dv_backend.main"])
+        .current_dir(backend_working_dir(runtime, source_backend_dir, dev_profile))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if dev_profile {
-        cmd.env("DV_RELOAD", "1");
-    } else {
-        cmd.env("DV_RELOAD", "0");
+    for (key, value) in build_backend_env(runtime, dev_profile) {
+        cmd.env(key, value);
     }
-    cmd.spawn().map_err(|e| BackendStartError::Spawn(e.to_string()))
+    cmd.spawn().map_err(|e| BackendStartError::Spawn(format!("{} using runtime {}", e, runtime.root.display())))
 }
 
 /// Poll `GET {base_url}/health` every 100ms up to `timeout`. On timeout, kill child.
@@ -138,7 +125,7 @@ pub async fn wait_for_ready(
 }
 
 pub async fn is_health_ok(base_url: &str) -> bool {
-    let url = format!("{}/health", base_url.trim_end_matches('/'));
+    let url = format!("{}/api/health", base_url.trim_end_matches('/'));
     match reqwest::Client::builder()
         .timeout(Duration::from_millis(200))
         .build()
@@ -163,33 +150,44 @@ async fn drain_stderr(child: &mut tokio::process::Child) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempfile::tempdir;
 
-    #[test]
-    fn detect_venv_returns_ready_when_pyvenv_cfg_exists() {
-        let dir = tempdir().unwrap();
-        let venv = dir.path().join(".venv");
-        fs::create_dir(&venv).unwrap();
-        fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
-        // Skip uv/python checks by making `uv` and `python` succeed (they exist on dev box).
-        // This test relies on dev box having uv and python 3.12; in CI we'd mock Command.
-        let status = detect_venv(dir.path());
-        // If dev box has uv+3.12, we get Ready; otherwise MissingUv/MissingPython is acceptable
-        // (the test still verifies the .venv branch when Ready is returned).
-        if status.is_ready() {
-            assert_eq!(status, VenvStatus::Ready(venv));
+    fn runtime(root: PathBuf) -> PortableRuntime {
+        PortableRuntime {
+            python: root.join(".venv/Scripts/python.exe"),
+            backend_dir: root.join("backend"),
+            tools_dir: root.join("tools"),
+            models_dir: root.join("models"),
+            root,
         }
     }
 
     #[test]
-    fn detect_venv_returns_missing_venv_when_no_pyvenv_cfg() {
-        let dir = tempdir().unwrap();
-        // No .venv created
-        let status = detect_venv(dir.path());
-        // Either MissingVenv (uv+py present) or MissingUv/MissingPython (not present)
-        // is acceptable. We just check it isn't Ready.
-        assert!(!status.is_ready());
+    fn build_backend_command_env_uses_portable_runtime() {
+        let root = PathBuf::from("C:/rt");
+        let runtime = runtime(root.clone());
+        let envs = build_backend_env(&runtime, true);
+        assert_eq!(envs.get("DV_PORTABLE_RUNTIME_DIR").unwrap(), &root.as_os_str().to_os_string());
+        assert_eq!(envs.get("DV_RELOAD").unwrap(), "1");
+        assert!(envs.get("PATH").unwrap().to_string_lossy().contains("tools"));
+    }
+
+    #[test]
+    fn build_backend_command_env_uses_portable_voxcpm_venv() {
+        let root = PathBuf::from("C:/rt");
+        let runtime = runtime(root);
+        let envs = build_backend_env(&runtime, true);
+        assert_eq!(
+            envs.get("DV_VOXCPM_VENV").unwrap(),
+            &PathBuf::from("C:/rt").join("backend").join("dv_backend").join(".venv-voxcpm").as_os_str().to_os_string(),
+        );
+    }
+
+    #[test]
+    fn backend_working_dir_uses_source_in_dev_and_packaged_in_release() {
+        let root = PathBuf::from("C:/rt");
+        let runtime = runtime(root.clone());
+        assert_eq!(backend_working_dir(&runtime, Path::new("C:/repo/backend"), true), PathBuf::from("C:/repo/backend"));
+        assert_eq!(backend_working_dir(&runtime, Path::new("C:/repo/backend"), false), root.join("backend"));
     }
 
     #[test]
@@ -214,17 +212,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn is_health_ok_returns_true_for_listening_server() {
-        use tokio::io::{AsyncWriteExt, AsyncReadExt};
+    async fn is_health_ok_checks_api_health_route() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
-            // Accept one connection, respond with HTTP/1.1 200, then close.
             if let Ok((mut s, _)) = listener.accept().await {
                 let mut req = [0u8; 1024];
-                let _ = s.read(&mut req).await;
-                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+                let n = s.read(&mut req).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&req[..n]);
+                let status = if req.starts_with("GET /api/health ") { "200 OK" } else { "404 Not Found" };
+                let _ = s.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n").as_bytes()).await;
                 let _ = s.shutdown().await;
             }
         });

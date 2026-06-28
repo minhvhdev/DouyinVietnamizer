@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod commands;
+pub mod portable;
 pub mod setup;
 pub mod state;
 
@@ -8,8 +9,15 @@ use state::BackendState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let backend_dir = PathBuf::from("backend");
     let dev_profile = cfg!(debug_assertions);
+    let backend_dir = if dev_profile {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("backend")
+    } else {
+        PathBuf::from("backend")
+    };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())

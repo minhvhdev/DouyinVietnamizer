@@ -18,10 +18,6 @@ QWEN3_MODELS = [
     ("Qwen/Qwen3-ForcedAligner-0.6B", "Qwen3-ForcedAligner-0.6B"),
 ]
 
-PYANNOTE_MODELS = [
-    ("pyannote/speaker-diarization-community-1", "speaker-diarization-community-1"),
-]
-
 # Thread-safe global status manager
 class BootstrapManager:
     _lock = threading.Lock()
@@ -64,40 +60,17 @@ class BootstrapManager:
                 cls.add_log("Bootstrap is already running.")
                 return False
             cls._status = {
-                "status": "downloading",
-                "current_task": "Tải mô hình Pyannote Community-1...",
-                "download_percent": 0.0,
+                "status": "completed",
+                "current_task": "Pyannote bootstrap was removed; single-voice VoxCPM2 does not need it.",
+                "download_percent": 100.0,
                 "download_speed_kb": 0.0,
                 "downloaded_bytes": 0,
                 "total_bytes": 0,
                 "error_message": "",
                 "logs": [],
             }
-            cls._thread = threading.Thread(
-                target=cls._run_pyannote_bootstrap,
-                args=(vendor_dir,),
-                daemon=True,
-            )
-            cls._thread.start()
+            cls.add_log("Pyannote bootstrap skipped; speaker diarization was removed.")
             return True
-
-    @classmethod
-    def _run_pyannote_bootstrap(cls, vendor_dir: Path) -> None:
-        cls.add_log("Starting Pyannote Community-1 download...")
-        try:
-            vendor_dir.mkdir(parents=True, exist_ok=True)
-            cls._download_pyannote_models(vendor_dir)
-            cls.update(status="completed", current_task="Tải Pyannote hoàn tất!", download_percent=100.0)
-            cls.add_log("Pyannote bootstrap completed successfully.")
-        except Exception as error:
-            message = str(error)
-            if "GatedRepoError" in type(error).__name__ or "gated" in message.lower() or "403" in message:
-                message = (
-                    "Hugging Face denied access to pyannote/speaker-diarization-community-1. "
-                    "Log into the same HF account as HF_TOKEN and accept the model license, then retry."
-                )
-            cls.update(status="failed", current_task="Lỗi tải Pyannote", error_message=message)
-            cls.add_log(f"FATAL ERROR during Pyannote bootstrap: {message}")
 
     @classmethod
     def start_bootstrap(cls, profile: str, vendor_dir: Path, default_manifest_path: Path | None = None):
@@ -174,8 +147,6 @@ class BootstrapManager:
 
             cls.update(status="extracting", current_task="Tải mô hình Qwen3-ASR 1.7B...")
             cls._download_qwen_models(vendor_dir)
-            cls.update(status="extracting", current_task="Tải mô hình Pyannote Community-1...")
-            cls._download_pyannote_models(vendor_dir)
 
             cls.update(status="completed", current_task="Thiết lập môi trường hoàn tất!", download_percent=100.0)
             cls.add_log("Bootstrap completed successfully. System is ready.")
@@ -256,41 +227,6 @@ class BootstrapManager:
             cls.update(current_task=f"Tải mô hình {folder_name}...")
             snapshot_download(repo_id, local_dir=dest_dir)
             cls.add_log(f"{folder_name} installed under qwen3-asr/.")
-
-    @classmethod
-    def _download_pyannote_models(cls, vendor_dir: Path) -> None:
-        from huggingface_hub import snapshot_download
-
-        from .pyannote_vendor import (
-            huggingface_token,
-            pyannote_cache_dir,
-            validate_pyannote_model_dir,
-        )
-
-        models_root = pyannote_cache_dir(vendor_dir)
-        models_root.mkdir(parents=True, exist_ok=True)
-        token = huggingface_token()
-        if not token:
-            raise RuntimeError(
-                "HF_TOKEN is not set. Accept the Hugging Face license for "
-                "pyannote/speaker-diarization-community-1 and set HF_TOKEN before bootstrap."
-            )
-        for repo_id, folder_name in PYANNOTE_MODELS:
-            dest_dir = models_root / folder_name
-            existing_issue = validate_pyannote_model_dir(dest_dir)
-            if existing_issue is None:
-                cls.add_log(f"{folder_name} already present, skipping download.")
-                continue
-            if dest_dir.is_dir() and any(dest_dir.iterdir()):
-                cls.add_log(f"{folder_name} looks incomplete ({existing_issue}); re-downloading...")
-                shutil.rmtree(dest_dir, ignore_errors=True)
-            cls.add_log(f"Downloading {repo_id} (requires Hugging Face access token)...")
-            cls.update(current_task=f"Tải mô hình {folder_name}...")
-            snapshot_download(repo_id, local_dir=dest_dir, token=token)
-            remaining_issue = validate_pyannote_model_dir(dest_dir)
-            if remaining_issue:
-                raise RuntimeError(f"Pyannote download incomplete: {remaining_issue}")
-            cls.add_log(f"{folder_name} installed under pyannote/.")
 
     @classmethod
     def _write_fallback_manifest(cls, dest_path: Path):
