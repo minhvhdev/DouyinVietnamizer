@@ -30,6 +30,10 @@ deep-translator>=1.11,<2
 fastapi>=0.115,<1
 uvicorn>=0.34,<1
 qwen-asr>=0.0.6
+funasr==1.3.10
+librosa==0.11.0
+numba==0.65.1
+llvmlite==0.47.0
 torch>=2.7
 torchaudio>=2.7
 soundfile>=0.12
@@ -38,7 +42,6 @@ huggingface-hub>=0.26
 transformers>=4.57
 onnxruntime>=1.20
 demucs>=4.0
-funasr>=1.3.3
 pyannote-audio>=4.0,<5
 hf-xet>=1.5
 EOF
