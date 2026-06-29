@@ -58,6 +58,7 @@ echo ">>> Venv ready: $RUNTIME/.venv"
 
 # Sync backend sources.
 echo ">>> Syncing backend sources..."
+mkdir -p "$RUNTIME/backend"
 rsync -a --delete "$REPO_ROOT/backend/dv_backend/" "$RUNTIME/backend/dv_backend/"
 rsync -a "$REPO_ROOT/backend/scripts/" "$RUNTIME/backend/scripts/"
 cp "$REPO_ROOT/backend/pyproject.toml" "$RUNTIME/backend/pyproject.toml"
