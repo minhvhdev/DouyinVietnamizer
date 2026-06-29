@@ -23,37 +23,24 @@ fi
 PY="$RUNTIME/python/bin/python3"
 echo ">>> Python: $($PY --version) at $PY"
 
-# Build a separate macOS pyproject that omits the pytorch-cu128 extra index.
-MAC_PYPROJECT="$STAGING/pyproject.mac.toml"
-cat > "$MAC_PYPROJECT" <<'EOF'
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[project]
-name = "douyin-vietnamizer-backend"
-version = "0.1.0"
-requires-python = ">=3.12,<3.13"
-dependencies = [
-  "deep-translator>=1.11,<2",
-  "fastapi>=0.115,<1",
-  "uvicorn>=0.34,<1",
-  "qwen-asr>=0.0.6",
-  "torch>=2.7",
-  "torchaudio>=2.7",
-  "soundfile>=0.12",
-  "numpy>=2",
-  "huggingface-hub>=0.26",
-  "transformers>=4.57",
-  "onnxruntime>=1.20",
-  "demucs>=4.0",
-  "funasr>=1.3.3",
-  "pyannote-audio>=4.0,<5",
-  "hf-xet>=1.5",
-]
-
-[tool.hatch.build.targets.wheel]
-packages = ["dv_backend"]
+# macOS requirements omit the Windows-only pytorch-cu128 extra index.
+MAC_REQUIREMENTS="$STAGING/requirements-mac.txt"
+cat > "$MAC_REQUIREMENTS" <<'EOF'
+deep-translator>=1.11,<2
+fastapi>=0.115,<1
+uvicorn>=0.34,<1
+qwen-asr>=0.0.6
+torch>=2.7
+torchaudio>=2.7
+soundfile>=0.12
+numpy>=2
+huggingface-hub>=0.26
+transformers>=4.57
+onnxruntime>=1.20
+demucs>=4.0
+funasr>=1.3.3
+pyannote-audio>=4.0,<5
+hf-xet>=1.5
 EOF
 
 if [ ! -x "$RUNTIME/.venv/bin/python" ]; then
@@ -62,8 +49,7 @@ if [ ! -x "$RUNTIME/.venv/bin/python" ]; then
   export VIRTUAL_ENV="$RUNTIME/.venv"
   export UV_DEFAULT_INDEX="https://pypi.org/simple"
   uv pip install --upgrade pip
-  uv pip install -r "$MAC_PYPROJECT"
-  uv pip install huggingface_hub
+  uv pip install -r "$MAC_REQUIREMENTS"
 fi
 echo ">>> Venv ready: $RUNTIME/.venv"
 
