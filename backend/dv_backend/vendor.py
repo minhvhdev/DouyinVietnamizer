@@ -2,7 +2,7 @@ import json
 from pathlib import Path, PurePosixPath
 import shutil
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class VendorTool(BaseModel):
@@ -12,6 +12,7 @@ class VendorTool(BaseModel):
     dev_command: str
     version_args: list[str]
     version_contains: str
+    success_exit_codes: list[int] = Field(default_factory=lambda: [0])
     required: bool
     capability: str
 
@@ -44,9 +45,16 @@ class VendorResolver:
         self.allow_path_tools = allow_path_tools
 
     def resolve(self, tool: VendorTool) -> ResolvedTool:
-        bundled = self.vendor_dir / tool.executable
-        if bundled.is_file():
-            return ResolvedTool(path=bundled, source="bundled")
+        executable = tool.executable.replace("\\", "/")
+        candidates = [executable]
+        if executable.startswith("tools/"):
+            candidates.append(executable.removeprefix("tools/"))
+
+        for relative in candidates:
+            bundled = self.vendor_dir / relative
+            if bundled.is_file():
+                return ResolvedTool(path=bundled, source="bundled")
+
         if self.allow_path_tools:
             found = shutil.which(tool.dev_command)
             if found:

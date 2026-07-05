@@ -10,7 +10,7 @@ from .checkpoints import PIPELINE_STEPS, checkpoint_path
 from .database import Database
 from .errors import AppError
 from .models import ErrorInfo, Job, JobStep
-from .source_urls import is_supported_source_host
+from .source_urls import is_supported_source_host, normalize_source_url
 
 
 def utc_now() -> str:
@@ -70,22 +70,24 @@ class JobService:
                         )
 
     def create(self, source_url: str) -> Job:
-        host = (urlparse(source_url).hostname or "").lower()
+        normalized = normalize_source_url(source_url)
+        host = (urlparse(normalized).hostname or "").lower()
         if not is_supported_source_host(host):
             raise AppError(
                 422,
                 ErrorInfo(
                     code="INVALID_SOURCE_URL",
-                    message="The URL is not a recognized Douyin or Bilibili link.",
-                    action="Paste a video or share URL from douyin.com or bilibili.com.",
+                    message="Liên kết không thuộc Douyin hoặc Bilibili.",
+                    action="Dán URL video hoặc link chia sẻ từ douyin.com hoặc bilibili.com.",
                 ),
             )
         job_id = str(uuid4())
         now = utc_now()
         with self.database.connection:
             self.database.connection.execute(
-                "INSERT INTO jobs (id, source_url, status, created_at, updated_at) VALUES (?, ?, 'queued', ?, ?)",
-                (job_id, source_url, now, now),
+                "INSERT INTO jobs (id, source_url, status, created_at, updated_at, current_step) "
+                "VALUES (?, ?, 'queued', ?, ?, ?)",
+                (job_id, normalized, now, now, PIPELINE_STEPS[0]),
             )
             self.database.connection.executemany(
                 "INSERT INTO job_steps (job_id, name, position, status, checkpoint_path) VALUES (?, ?, ?, 'pending', ?)",
@@ -106,8 +108,7 @@ class JobService:
         """Create a job from a local video file.
 
         The uploaded file is copied into the job artifacts directory
-        as original.mp4 and the resolve + download steps are marked
-        as completed so the pipeline picks up at extract_audio.
+        as original.mp4 and the pipeline starts at extract_audio.
         """
         if not file_path.is_file():
             raise AppError(
@@ -156,16 +157,16 @@ class JobService:
 
         skip_set = set(self.SKIP_STEPS_FOR_IMPORT)
         first_active_idx = 0
-        for i, name in enumerate(PIPELINE_STEPS):
+        for index, name in enumerate(PIPELINE_STEPS):
             if name not in skip_set:
-                first_active_idx = i
+                first_active_idx = index
                 break
 
         with self.database.connection:
             self.database.connection.execute(
-                "INSERT INTO jobs (id, source_url, title, status, created_at, updated_at) "
-                "VALUES (?, ?, ?, 'queued', ?, ?)",
-                (job_id, source_url, resolved_title, now, now),
+                "INSERT INTO jobs (id, source_url, title, status, created_at, updated_at, current_step) "
+                "VALUES (?, ?, ?, 'queued', ?, ?, ?)",
+                (job_id, source_url, resolved_title, now, now, PIPELINE_STEPS[first_active_idx]),
             )
             self.database.connection.executemany(
                 "INSERT INTO job_steps (job_id, name, position, status, checkpoint_path) "
@@ -181,10 +182,6 @@ class JobService:
                     "WHERE job_id = ? AND name = ?",
                     (now, job_id, step_name),
                 )
-            self.database.connection.execute(
-                "UPDATE jobs SET current_step = ?, updated_at = ? WHERE id = ?",
-                (PIPELINE_STEPS[first_active_idx], now, job_id),
-            )
 
         return self.get(job_id)
 
@@ -209,18 +206,80 @@ class JobService:
             )
         return self._hydrate(row)
 
-    def reconcile_interrupted(self) -> None:
+    def reconcile_interrupted(self) -> list[str]:
+        """Mark jobs left in `running` as `interrupted` after a backend restart.
+
+        Returns the affected job ids so callers can surface or inspect them.
+        """
+        now = utc_now()
+        running_rows = self.database.connection.execute(
+            "SELECT id FROM jobs WHERE status = 'running' ORDER BY updated_at DESC"
+        ).fetchall()
+        job_ids = [row["id"] for row in running_rows]
+        if not job_ids:
+            return []
+
+        placeholders = ",".join("?" for _ in job_ids)
+        with self.database.connection:
+            self.database.connection.execute(
+                f"""
+                UPDATE jobs
+                SET status = 'interrupted',
+                    last_error_code = NULL,
+                    last_error_message = NULL,
+                    updated_at = ?
+                WHERE id IN ({placeholders})
+                """,
+                (now, *job_ids),
+            )
+            self.database.connection.execute(
+                f"""
+                UPDATE job_steps
+                SET status = 'pending',
+                    started_at = NULL,
+                    completed_at = NULL,
+                    duration_ms = NULL,
+                    error_code = NULL,
+                    error_message = NULL
+                WHERE status = 'running' AND job_id IN ({placeholders})
+                """,
+                tuple(job_ids),
+            )
+        return job_ids
+
+    def prepare_job_for_resume(self, job_id: str) -> None:
         now = utc_now()
         with self.database.connection:
             self.database.connection.execute(
-                "UPDATE jobs SET status = 'interrupted', updated_at = ? WHERE status = 'running'",
-                (now,),
+                """
+                UPDATE jobs
+                SET status = 'queued',
+                    last_error_code = NULL,
+                    last_error_message = NULL,
+                    updated_at = ?
+                WHERE id = ? AND status IN ('interrupted', 'failed')
+                """,
+                (now, job_id),
             )
             self.database.connection.execute(
-                "UPDATE job_steps SET status = 'failed', error_code = 'APP_INTERRUPTED', "
-                "error_message = 'The application closed while this step was running.' "
-                "WHERE status = 'running'"
+                """
+                UPDATE job_steps
+                SET status = 'pending',
+                    started_at = NULL,
+                    completed_at = NULL,
+                    duration_ms = NULL,
+                    error_code = NULL,
+                    error_message = NULL
+                WHERE job_id = ? AND status = 'failed'
+                """,
+                (job_id,),
             )
+
+    def latest_interrupted_job_id(self) -> str | None:
+        row = self.database.connection.execute(
+            "SELECT id FROM jobs WHERE status = 'interrupted' ORDER BY updated_at DESC LIMIT 1"
+        ).fetchone()
+        return row["id"] if row else None
 
     def rerun(self, job_id: str, keep_steps: list[str]) -> Job:
         job = self.get(job_id)
@@ -294,9 +353,9 @@ class JobService:
                     """
                     UPDATE job_steps
                     SET status = 'pending', started_at = NULL, completed_at = NULL,
-                        error_code = NULL, error_message = NULL
+                        duration_ms = NULL, error_code = NULL, error_message = NULL
                     WHERE job_id = ? AND name = ?
-                    """,
+""",
                     (job_id, step_name),
                 )
 
@@ -308,7 +367,39 @@ class JobService:
                 except OSError:
                     pass
 
+        self._clear_rerun_artifacts(job_id, reset_steps)
+
         return self.get(job_id)
+
+    def _clear_rerun_artifacts(self, job_id: str, reset_steps: list[str]) -> None:
+        """Drop on-disk artifacts for reset steps so reruns do real work."""
+        reset = set(reset_steps)
+        job_dir = self.data_dir / "jobs" / job_id
+        artifacts = job_dir / "artifacts"
+
+        if "tts" in reset:
+            tts_dir = artifacts / "tts"
+            if tts_dir.is_dir():
+                shutil.rmtree(tts_dir, ignore_errors=True)
+
+        if reset.intersection({"mix", "render"}):
+            for name in ("narration.wav", "mixed.wav", "normalized.wav"):
+                path = artifacts / name
+                if path.is_file():
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+
+        if "render" in reset:
+            output_dir = job_dir / "output"
+            for name in ("dubbed.mp4", "vietnamese_narration.wav", "subtitles.ass"):
+                path = output_dir / name
+                if path.is_file():
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
 
     def redub(self, job_id: str) -> Job:
         translate_index = PIPELINE_STEPS.index("translate")
@@ -341,7 +432,12 @@ class JobService:
 
     def _hydrate(self, row) -> Job:
         steps = self.database.connection.execute(
-            "SELECT name, position, status, checkpoint_path FROM job_steps WHERE job_id = ? ORDER BY position",
+            """
+            SELECT name, position, status, checkpoint_path, started_at, completed_at, duration_ms
+            FROM job_steps
+            WHERE job_id = ?
+            ORDER BY position
+            """,
             (row["id"],),
         ).fetchall()
         valid_steps = set(PIPELINE_STEPS)

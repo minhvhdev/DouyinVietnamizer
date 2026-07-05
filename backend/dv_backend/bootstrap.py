@@ -10,7 +10,6 @@ from pathlib import Path
 # Pinned stable URLs for vendor binaries
 DEFAULT_URLS = {
     "ffmpeg": "https://github.com/GyanD/codexffmpeg/releases/download/6.0/ffmpeg-6.0-essentials_build.zip",
-    "yt_dlp": "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe",
 }
 
 QWEN3_MODELS = [
@@ -119,7 +118,7 @@ class BootstrapManager:
 
             # 2. Define download schedule based on profile
             # All profiles require media/download tools and Qwen3-ASR model weights.
-            tasks = ["ffmpeg", "yt_dlp"]
+            tasks = ["ffmpeg"]
 
             # Temporary folder for zip downloads
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -191,13 +190,7 @@ class BootstrapManager:
 
     @classmethod
     def _process_and_extract(cls, item: str, file_path: Path, vendor_dir: Path):
-        if item == "yt_dlp":
-            dest_dir = vendor_dir / "yt-dlp"
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(file_path, dest_dir / "yt-dlp.exe")
-            cls.add_log("yt-dlp.exe installed.")
-
-        elif item == "ffmpeg":
+        if item == "ffmpeg":
             dest_dir = vendor_dir / "ffmpeg"
             dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -242,16 +235,6 @@ class BootstrapManager:
                     "version_contains": "ffmpeg",
                     "required": True,
                     "capability": "media"
-                },
-                {
-                    "id": "yt_dlp",
-                    "display_name": "yt-dlp",
-                    "executable": "yt-dlp/yt-dlp.exe",
-                    "dev_command": "yt-dlp",
-                    "version_args": ["--version"],
-                    "version_contains": "",
-                    "required": True,
-                    "capability": "download"
                 }
             ]
         }

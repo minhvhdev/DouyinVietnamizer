@@ -8,6 +8,8 @@ use crate::portable::{self, PortableRuntime, PortableRuntimeStatus};
 use crate::setup::SetupError;
 use crate::state::BackendState;
 
+const BACKEND_START_TIMEOUT: Duration = Duration::from_secs(20);
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendStatusDto {
@@ -68,29 +70,36 @@ pub async fn get_backend_status(
     };
     let mut guard = state.child.lock().await;
     if let Some(child) = guard.as_mut() {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                let stderr = backend::parse_uvicorn_stderr("");
+        match child.process.try_wait() {
+            Ok(Some(_status)) => {
+                let stderr = backend::parse_uvicorn_stderr(&backend::buffered_stderr(child));
                 *guard = None;
                 return Ok(BackendStatusDto::Crashed { stderr });
             }
-            Ok(None) => return Ok(BackendStatusDto::Starting),
+            Ok(None) => {
+                return Ok(BackendStatusDto::Ready {
+                    base_url: state.base_url.clone(),
+                });
+            }
             Err(e) => return Err(e.to_string()),
         }
     }
     let mut child = backend::spawn_uvicorn(&runtime, &state.backend_dir, state.dev_profile)
         .map_err(|e| e.to_string())?;
     let base_url = state.base_url.clone();
-    match backend::wait_for_ready(&base_url, &mut child, Duration::from_secs(5)).await {
+    match backend::wait_for_ready(&base_url, &mut child, BACKEND_START_TIMEOUT).await {
         Ok(()) => {
             *guard = Some(child);
             Ok(BackendStatusDto::Ready { base_url })
         }
         Err(e) => {
-            let _ = child.kill();
+            let _ = child.process.start_kill();
             let stderr = match &e {
                 BackendStartError::Crashed { stderr, .. } => stderr.clone(),
-                BackendStartError::Timeout(_) => "backend did not respond within 5s".into(),
+                BackendStartError::Timeout(_) => format!(
+                    "backend did not respond within {}s; startup may still be warming up portable runtime",
+                    BACKEND_START_TIMEOUT.as_secs()
+                ),
                 BackendStartError::Spawn(s) => s.clone(),
             };
             Ok(BackendStatusDto::Crashed { stderr })
@@ -111,11 +120,11 @@ pub async fn restart_backend(
     {
         let mut guard = state.child.lock().await;
         if let Some(mut c) = guard.take() {
-            let _ = c.start_kill();
+            let _ = c.process.start_kill();
         }
     }
     let mut child = backend::spawn_uvicorn(&runtime, &state.backend_dir, state.dev_profile)?;
-    backend::wait_for_ready(&state.base_url, &mut child, Duration::from_secs(5)).await?;
+    backend::wait_for_ready(&state.base_url, &mut child, BACKEND_START_TIMEOUT).await?;
     let mut guard = state.child.lock().await;
     *guard = Some(child);
     Ok(())
@@ -126,6 +135,15 @@ pub async fn restart_backend(
 // so the frontend button still resolves.
 #[tauri::command]
 pub fn open_devtools(_window: WebviewWindow) {
+}
+
+#[tauri::command]
+pub fn open_folder(path: String) -> Result<(), String> {
+    let folder = PathBuf::from(&path);
+    if !folder.exists() {
+        return Err(format!("Path does not exist: {path}"));
+    }
+    open::that(&folder).map_err(|e| e.to_string())
 }
 
 // BackendStatus is re-exported for any caller that needs the raw type.

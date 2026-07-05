@@ -1,10 +1,16 @@
+from __future__ import annotations
+
+import gc
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import signal
+import subprocess
+import sys
 from uuid import uuid4
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .config import AppConfig
 from .database import Database
@@ -31,6 +37,253 @@ class RuntimeReport(BaseModel):
     status: str
     checked_at: str
     checks: list[RuntimeCheck]
+    gpu: RuntimeGpuStatus | None = None
+
+
+class RuntimeGpuStatus(BaseModel):
+    cuda_supported: bool
+    device_name: str | None = None
+    total_vram_mb: float | None = None
+    used_vram_mb: float | None = None
+    free_vram_mb: float | None = None
+    torch_allocated_mb: float | None = None
+    torch_reserved_mb: float | None = None
+    torch_peak_mb: float | None = None
+    active_voxcpm_clients: int = 0
+    resident_models: list[str] = Field(default_factory=list)
+    helper_processes: list[str] = Field(default_factory=list)
+
+
+class ReleaseVramResult(BaseModel):
+    status: str
+    released: list[str] = Field(default_factory=list)
+    terminated_processes: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+    gpu: RuntimeGpuStatus
+
+
+def _attach_gpu_status(report: RuntimeReport) -> RuntimeReport:
+    return report.model_copy(update={"gpu": collect_runtime_gpu_status()})
+
+
+def _truncate_process_detail(text: str, *, limit: int = 180) -> str:
+    clean = " ".join((text or "").split())
+    if len(clean) <= limit:
+        return clean
+    return clean[:limit].rstrip() + "..."
+
+
+def _list_gpu_helper_processes() -> list[str]:
+    try:
+        if os.name == "nt":
+            script = (
+                "$targets = Get-CimInstance Win32_Process | Where-Object { "
+                "$_.Name -in @('llama-tts-server.exe','voxcpm2-cli.exe') -or "
+                "((($_.CommandLine -as [string]) -ne '') -and ($_.CommandLine -match 'dv_backend\\.adapters\\.voxcpm_worker')) "
+                "}; "
+                "foreach ($p in $targets) { "
+                "$cmd = ($p.CommandLine -as [string]); "
+                "Write-Output ('{0} ({1}) {2}' -f $p.Name, $p.ProcessId, $cmd) "
+                "}"
+            )
+            completed = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", script],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+            )
+            return [
+                _truncate_process_detail(line)
+                for line in completed.stdout.splitlines()
+                if line.strip()
+            ]
+        completed = subprocess.run(
+            ["ps", "-ax", "-o", "pid=", "-o", "command="],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+        )
+        matches: list[str] = []
+        for line in completed.stdout.splitlines():
+            lowered = line.lower()
+            if (
+                "llama-tts-server" in lowered
+                or "voxcpm2-cli" in lowered
+                or "dv_backend.adapters.voxcpm_worker" in line
+            ):
+                matches.append(_truncate_process_detail(line))
+        return matches
+    except Exception:
+        return []
+
+
+def _terminate_gpu_helper_processes() -> list[str]:
+    processes = _list_gpu_helper_processes()
+    try:
+        if os.name == "nt":
+            script = (
+                "$targets = Get-CimInstance Win32_Process | Where-Object { "
+                "$_.Name -in @('llama-tts-server.exe','voxcpm2-cli.exe') -or "
+                "((($_.CommandLine -as [string]) -ne '') -and ($_.CommandLine -match 'dv_backend\\.adapters\\.voxcpm_worker')) "
+                "}; "
+                "foreach ($p in $targets) { "
+                "Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue "
+                "}"
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", script],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+            )
+        else:
+            completed = subprocess.run(
+                ["ps", "-ax", "-o", "pid=", "-o", "command="],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+            )
+            for line in completed.stdout.splitlines():
+                lowered = line.lower()
+                if (
+                    "llama-tts-server" not in lowered
+                    and "voxcpm2-cli" not in lowered
+                    and "dv_backend.adapters.voxcpm_worker" not in line
+                ):
+                    continue
+                pid_text = line.strip().split(maxsplit=1)[0]
+                try:
+                    os.kill(int(pid_text), signal.SIGKILL)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return processes
+
+
+def _clear_torch_cuda_state() -> None:
+    gc.collect()
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return
+        torch.cuda.empty_cache()
+        if hasattr(torch.cuda, "ipc_collect"):
+            torch.cuda.ipc_collect()
+        if hasattr(torch.cuda, "reset_peak_memory_stats"):
+            torch.cuda.reset_peak_memory_stats()
+    except Exception:
+        pass
+
+
+def collect_runtime_gpu_status() -> RuntimeGpuStatus:
+    from .adapters.voxcpm_client import client_debug_snapshot
+    from .gpu_manager import global_gpu_manager
+
+    client_snapshot = client_debug_snapshot()
+    manager_snapshot = global_gpu_manager().snapshot()
+    helper_processes = _list_gpu_helper_processes()
+
+    status = RuntimeGpuStatus(
+        cuda_supported=False,
+        active_voxcpm_clients=int(client_snapshot.get("count") or 0),
+        resident_models=[
+            f"{item['family']} ({item['device']}): {item['model']}"
+            for item in manager_snapshot.get("resident_models", [])
+        ],
+        helper_processes=helper_processes,
+    )
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return status
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        device_index = torch.cuda.current_device()
+        total_mb = round(float(total_bytes) / (1024 * 1024), 2)
+        free_mb = round(float(free_bytes) / (1024 * 1024), 2)
+        status.cuda_supported = True
+        status.device_name = torch.cuda.get_device_name(device_index)
+        status.total_vram_mb = total_mb
+        status.free_vram_mb = free_mb
+        status.used_vram_mb = round(total_mb - free_mb, 2)
+        status.torch_allocated_mb = round(float(torch.cuda.memory_allocated(device_index)) / (1024 * 1024), 2)
+        status.torch_reserved_mb = round(float(torch.cuda.memory_reserved(device_index)) / (1024 * 1024), 2)
+        status.torch_peak_mb = round(float(torch.cuda.max_memory_allocated(device_index)) / (1024 * 1024), 2)
+    except Exception:
+        pass
+    return status
+
+
+def release_vram_resources(*, runner=None) -> ReleaseVramResult:
+    released: list[str] = []
+    terminated_processes: list[str] = []
+    errors: list[str] = []
+
+    if runner is not None and hasattr(runner, "kill_managed_processes"):
+        try:
+            killed = runner.kill_managed_processes()
+            if killed:
+                released.append("managed_job_processes")
+                terminated_processes.extend(killed)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"managed_job_processes: {exc}")
+
+    try:
+        from .adapters.voxcpm_client import release_all_clients
+
+        release_all_clients()
+        released.append("voxcpm_clients")
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"voxcpm_clients: {exc}")
+
+    try:
+        from .adapters.asr import reset_model_cache
+
+        reset_model_cache()
+        released.append("qwen3_asr_cache")
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"qwen3_asr_cache: {exc}")
+
+    try:
+        from .gpu_manager import global_gpu_manager
+
+        previous = global_gpu_manager().reset()
+        if previous.get("resident_models"):
+            released.append("gpu_manager_state")
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"gpu_manager_state: {exc}")
+
+    try:
+        helpers = _terminate_gpu_helper_processes()
+        if helpers:
+            released.append("gpu_helper_processes")
+            terminated_processes.extend(helpers)
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"gpu_helper_processes: {exc}")
+
+    try:
+        _clear_torch_cuda_state()
+        released.append("torch_cuda_cache")
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"torch_cuda_cache: {exc}")
+
+    return ReleaseVramResult(
+        status="ok" if not errors else ("warning" if released or terminated_processes else "error"),
+        released=released,
+        terminated_processes=terminated_processes,
+        errors=errors,
+        gpu=collect_runtime_gpu_status(),
+    )
 
 
 class RuntimeSmokeTestService:
@@ -52,7 +305,7 @@ class RuntimeSmokeTestService:
         row = self.database.connection.execute(
             "SELECT report_json FROM runtime_reports ORDER BY id DESC LIMIT 1"
         ).fetchone()
-        return RuntimeReport.model_validate_json(row["report_json"]) if row else None
+        return _attach_gpu_status(RuntimeReport.model_validate_json(row["report_json"])) if row else None
 
     def run(self) -> RuntimeReport:
         checks = [
@@ -100,6 +353,7 @@ class RuntimeSmokeTestService:
             checked_at=datetime.now(timezone.utc).isoformat(),
             checks=checks,
         )
+        report = _attach_gpu_status(report)
         with self.database.connection:
             self.database.connection.execute(
                 "INSERT INTO runtime_reports (status, report_json, created_at) VALUES (?, ?, ?)",
@@ -157,7 +411,8 @@ class RuntimeSmokeTestService:
             )
 
     def _check_voxcpm(self) -> RuntimeCheck:
-        from .voxcpm_env import is_voxcpm_available, voxcpm_venv_root
+        from .voxcpm_env import is_voxcpm_available, resolve_voxcpm_cli, voxcpm_venv_root
+        from .voxcpm_gguf import resolve_voxcpm_gguf_paths, VOXCPM_DEFAULT_MODEL
         from .adapters.voxcpm_client import acquire_client, release_all_clients
 
         if not is_voxcpm_available():
@@ -166,18 +421,21 @@ class RuntimeSmokeTestService:
                 display_name="VoxCPM2",
                 status="blocked",
                 required=True,
-                message="VoxCPM2 is not installed in the isolated virtualenv.",
-                action="Run 'python scripts/setup_voxcpm.py' in the backend folder.",
+                message="VoxCPM2 GGUF runtime is not ready (missing voxcpm2-cli or model files).",
+                action="Run 'python scripts/setup_voxcpm.py' and install voxcpm2-cli from llama.cpp-omni.",
                 resolved_path=str(voxcpm_venv_root()),
             )
         try:
             client = acquire_client(
                 data_dir=self.config.data_dir,
-                model="openbmb/VoxCPM2",
+                model=VOXCPM_DEFAULT_MODEL,
                 device="cpu",
                 num_steps=8,
             )
             client._ensure_alive()
+            cli_path = str(resolve_voxcpm_cli())
+            baselm, acoustic = resolve_voxcpm_gguf_paths(VOXCPM_DEFAULT_MODEL)
+            detail = f"cli={cli_path}; baselm={baselm.name}; acoustic={acoustic.name}"
         except Exception as exc:  # noqa: BLE001
             return RuntimeCheck(
                 id="voxcpm",
@@ -185,7 +443,7 @@ class RuntimeSmokeTestService:
                 status="blocked",
                 required=True,
                 message="VoxCPM2 worker could not be started.",
-                action="Re-run 'python scripts/setup_voxcpm.py' and verify the worker script.",
+                action="Re-run 'python scripts/setup_voxcpm.py' and verify voxcpm2-cli.",
                 resolved_path=str(voxcpm_venv_root()),
                 detail=str(exc),
             )
@@ -196,11 +454,11 @@ class RuntimeSmokeTestService:
             display_name="VoxCPM2",
             status="ready",
             required=True,
-            message="VoxCPM2 isolated environment and worker are operational.",
+            message="VoxCPM2 GGUF runtime and worker are operational.",
             action="No action required.",
-            resolved_path=str(voxcpm_venv_root()),
+            resolved_path=cli_path,
+            detail=detail,
         )
-
 
     def _check_espeak(self) -> RuntimeCheck:
         from .hardware import detect_espeak

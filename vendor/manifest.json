@@ -4,7 +4,7 @@
     {
       "id": "ffmpeg",
       "display_name": "FFmpeg",
-      "executable": "tools/ffmpeg/ffmpeg.exe",
+      "executable": "ffmpeg/ffmpeg.exe",
       "dev_command": "ffmpeg",
       "version_args": ["-version"],
       "version_contains": "ffmpeg",
@@ -12,13 +12,24 @@
       "capability": "media"
     },
     {
+      "id": "voxcpm2-cli",
+      "display_name": "VoxCPM2 CLI",
+      "executable": "voxcpm2/voxcpm2-cli.exe",
+      "dev_command": "voxcpm2-cli",
+      "version_args": ["--help"],
+      "version_contains": "",
+      "success_exit_codes": [0, 1],
+      "required": true,
+      "capability": "tts"
+    },
+    {
       "id": "yt_dlp",
       "display_name": "yt-dlp",
-      "executable": "tools/yt-dlp/yt-dlp.exe",
+      "executable": "yt-dlp/yt-dlp.exe",
       "dev_command": "yt-dlp",
       "version_args": ["--version"],
       "version_contains": "",
-      "required": true,
+      "required": false,
       "capability": "download"
     }
   ]

@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS job_steps (
     error_message TEXT,
     started_at TEXT,
     completed_at TEXT,
+    duration_ms INTEGER,
     PRIMARY KEY (job_id, name)
 );
 CREATE TABLE IF NOT EXISTS settings (
@@ -72,6 +73,12 @@ class Database:
         }
         if "title_vi" not in job_columns:
             self.connection.execute("ALTER TABLE jobs ADD COLUMN title_vi TEXT")
+        step_columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(job_steps)").fetchall()
+        }
+        if "duration_ms" not in step_columns:
+            self.connection.execute("ALTER TABLE job_steps ADD COLUMN duration_ms INTEGER")
         voice_columns = {
             row["name"]
             for row in self.connection.execute("PRAGMA table_info(cloned_voices)").fetchall()

@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import json
 import os
@@ -21,7 +22,7 @@ from .errors import AppError, app_error_handler
 from .jobs import JobService
 from .local_env import load_repo_dotenv
 from .models import ErrorInfo, Job, JobCreate, JobRerun
-from .runtime import RuntimeReport, default_runtime_service
+from .runtime import ReleaseVramResult, RuntimeReport, default_runtime_service, release_vram_resources
 from .runner import JobRunner
 from .checkpoints import PIPELINE_STEPS, load_checkpoint, save_checkpoint
 from .settings import SettingsService
@@ -245,7 +246,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     runner = JobRunner(config, database)
 
-    app = FastAPI(title="Douyin Vietnamizer Backend")
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        try:
+            yield
+        finally:
+            release_vram_resources(runner=runner)
+
+    app = FastAPI(title="Douyin Vietnamizer Backend", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origin_regex=r"^(file://|tauri://localhost|http://(localhost|127\.0\.0\.1|tauri\.localhost)(:\d+)?)$",
@@ -286,6 +294,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         from .hardware import get_hardware_report
         return get_hardware_report()
 
+    @app.post("/api/runtime/release-vram", response_model=ReleaseVramResult)
+    def release_vram() -> ReleaseVramResult:
+        return release_vram_resources(runner=runner)
+
     @app.post("/api/runtime/bootstrap-vendor")
     def bootstrap_vendor(payload: BootstrapPayload) -> dict:
         from .bootstrap import BootstrapManager
@@ -324,7 +336,6 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.post("/api/jobs", status_code=201, response_model=Job)
     def create_job(payload: JobCreate) -> Job:
         job = jobs.create(payload.source_url)
-        # Automatically trigger job run
         runner.start_job(job.id)
         return jobs.get(job.id)
 
@@ -389,6 +400,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.post("/api/jobs/{job_id}/start")
     def start_job(job_id: str) -> dict:
+        jobs.prepare_job_for_resume(job_id)
         runner.start_job(job_id)
         return {"status": "started"}
 
@@ -422,9 +434,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 400,
                 ErrorInfo(
                     code="RESOLVE_NOT_COMPLETED",
-                    message="Resolution is not completed yet or returned no videos.",
-                    action="Wait for the resolve step to complete."
-                )
+                    message="Bước phân tích liên kết chưa hoàn thành hoặc không có video.",
+                    action="Đợi bước «Phân tích liên kết» xong rồi thử lại.",
+                ),
             )
 
         videos = resolve_cp["videos"]
@@ -433,29 +445,44 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 400,
                 ErrorInfo(
                     code="INVALID_VIDEO_INDEX",
-                    message="The selected video index is out of bounds.",
-                    action="Select a valid index from the resolved video list."
-                )
+                    message="Chỉ số video không hợp lệ.",
+                    action="Chọn một video trong danh sách hiển thị.",
+                ),
             )
 
         selected = videos[payload.index]
         resolve_cp["selected_video"] = selected
         save_checkpoint(config.data_dir, job_id, "resolve", resolve_cp)
 
-        # Reset jobs and step status in database so download can run
         now = datetime.now(timezone.utc).isoformat()
         with database.connection:
             database.connection.execute(
                 "UPDATE jobs SET title = ?, status = 'queued', updated_at = ? WHERE id = ?",
-                (selected["title"], now, job_id)
+                (selected["title"], now, job_id),
             )
             database.connection.execute(
-                "UPDATE job_steps SET status = 'pending', started_at = NULL, completed_at = NULL, error_code = NULL, error_message = NULL WHERE job_id = ? AND name = 'download'",
-                (job_id,)
+                """
+                UPDATE job_steps
+                SET status = 'pending', started_at = NULL, completed_at = NULL,
+                    duration_ms = NULL, error_code = NULL, error_message = NULL
+                WHERE job_id = ? AND name = 'download'
+                """,
+                (job_id,),
             )
 
         runner.start_job(job_id)
         return {"status": "selected", "video": selected}
+
+    @app.post("/api/runtime/update-yt-dlp")
+    def update_yt_dlp_runtime() -> dict:
+        from .pipeline import resolve_tool_path
+        from .ytdlp_tools import update_yt_dlp_binary, yt_dlp_version
+
+        yt_dlp_path = resolve_tool_path(config, "yt_dlp")
+        result = update_yt_dlp_binary(yt_dlp_path)
+        result["path"] = str(yt_dlp_path)
+        result["version"] = yt_dlp_version(yt_dlp_path)
+        return result
 
     @app.get("/api/jobs/{job_id}/checkpoint/{step_name}")
     def get_checkpoint(job_id: str, step_name: str) -> Any:
@@ -519,11 +546,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         job_dir = config.data_dir / "jobs" / job_id
         tts_dir = job_dir / "artifacts" / "tts"
         
-        # Try repaired wav first, then fallback to raw wav
         wav_path = tts_dir / f"tts_repaired_{index}.wav"
         if not wav_path.is_file():
             wav_path = tts_dir / f"tts_{index}.wav"
-            
+        if not wav_path.is_file():
+            wav_path = tts_dir / f"tts_raw_{index}.wav"
+
         if not wav_path.is_file():
             raise AppError(
                 404,
@@ -534,6 +562,16 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 )
             )
         return FileResponse(str(wav_path), media_type="audio/wav", filename=f"seg_{index}.wav")
+
+    @app.get("/api/jobs/{job_id}/folder")
+    def get_job_folder(job_id: str) -> dict:
+        jobs.get(job_id)
+        job_dir = config.data_dir / "jobs" / job_id
+        resolved = job_dir.resolve()
+        return {
+            "path": str(resolved),
+            "exists": job_dir.exists(),
+        }
 
     @app.get("/api/jobs/{job_id}/files")
     def get_job_files(job_id: str) -> list[dict]:

@@ -49,6 +49,27 @@ def cuda_available() -> bool:
         return False
 
 
+def configure_gpu_manager(settings: dict | None) -> None:
+    """Apply pipeline settings to the global GpuModelManager."""
+    from ..gpu_manager import global_gpu_manager
+
+    settings = settings or {}
+    manager = global_gpu_manager()
+    try:
+        idle_sec = float(settings.get("gpu_model_idle_timeout_sec", 60.0) or 60.0)
+    except (TypeError, ValueError):
+        idle_sec = 60.0
+    try:
+        max_models = int(settings.get("gpu_max_resident_models", 1) or 1)
+    except (TypeError, ValueError):
+        max_models = 1
+    manager.configure(
+        idle_timeout_sec=idle_sec,
+        keep_warm=bool(settings.get("gpu_keep_warm_enabled", True)),
+        max_resident_families=max(1, max_models),
+    )
+
+
 def resolve_model_reference(vendor_dir: Path, configured_path: str, default_hf_id: str) -> str:
     if configured_path:
         path = Path(configured_path)
@@ -918,9 +939,15 @@ def transcribe_audio(
         DEFAULT_ALIGNER_MODEL,
     )
 
-    from ..gpu_lease import gpu_lease
+    from ..gpu_manager import global_gpu_manager
 
-    with gpu_lease(f"asr:{audio_path.name}"):
+    model_key = f"{resolved_asr}|{resolved_aligner}|{device}"
+    manager = global_gpu_manager()
+
+    def loader() -> None:
+        _load_model(resolved_asr, resolved_aligner, device)
+
+    with manager.acquire("asr", device, model_key, loader=loader):
         model = _load_model(resolved_asr, resolved_aligner, device)
         if include_alignment or speaker_diarization:
             return _transcribe_details_with_qwen(model, audio_path, language=language)

@@ -1,9 +1,8 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import {
   Activity,
   CircleAlert,
   Clock3,
-  Link2,
   Plus,
   Radio,
   RefreshCw,
@@ -19,12 +18,15 @@ import {
   Trash2,
   Mic,
   Volume2,
-  Upload
+  Upload,
+  Link2,
+  FolderOpen,
+  Server,
 } from "lucide-react";
 
-import type { Job, JobsApi, OutputItem, RuntimeCheck, RuntimeReport, ClonedVoice } from "../shared/contracts";
+import type { ClonedVoice, Job, JobsApi, OutputItem, ReleaseVramResult, RuntimeCheck, RuntimeReport } from "../shared/contracts";
 import { api as defaultApi } from "../shared/api";
-import { invokeOpenDevtools, subscribeBackendEvents, waitForBackend, type BackendStatus } from "../lib/tauri-bridge";
+import { invokeOpenFolder, invokeRestart, probeBackendHealth, subscribeBackendEvents, waitForBackend, type BackendConnectionState, type BackendStatus, BACKEND_BASE } from "../lib/tauri-bridge";
 import "./styles.css";
 import "./runtime.css";
 
@@ -62,10 +64,10 @@ const translateJobStatus = (status: string) => {
     case "queued": return "đang chờ";
     case "idle": return "chờ chạy";
     case "running": return "đang chạy";
+    case "waiting_for_selection": return "chờ chọn video";
     case "completed": return "đã hoàn thành";
     case "failed": return "thất bại";
     case "interrupted": return "bị gián đoạn";
-    case "waiting_for_selection": return "chờ chọn video";
     default: return status.replaceAll("_", " ");
   }
 };
@@ -138,36 +140,73 @@ function RuntimeCheckIcon({ check }: { check: RuntimeCheck }) {
 
 const isDeletableJob = (job: Job) => ["completed", "failed", "interrupted"].includes(job.status);
 
+function formatJobLabel(job: Job): string {
+  if (job.title_vi || job.title) {
+    return job.title_vi || job.title || "";
+  }
+  if (job.source_url.startsWith("import://")) {
+    return job.source_url.slice("import://".length);
+  }
+  return job.source_url;
+}
+
+function formatVram(value?: number | null): string {
+  if (value == null || Number.isNaN(value)) return "N/A";
+  if (value >= 1024) return `${(value / 1024).toFixed(2)} GB`;
+  return `${value.toFixed(0)} MB`;
+}
+
+function formatSidebarVram(runtime: RuntimeReport | null): string {
+  if (!runtime?.gpu?.cuda_supported) return "N/A";
+  return `${formatVram(runtime.gpu.used_vram_mb)} / ${formatVram(runtime.gpu.total_vram_mb)}`;
+}
+
+function formatSidebarEnvironment(runtime: RuntimeReport | null): "Đủ" | "Thiếu" {
+  return runtime?.status?.toLowerCase() === "ready" ? "Đủ" : "Thiếu";
+}
+
+function summarizeVramRelease(result: ReleaseVramResult): string {
+  const released = result.released.length ? `Đã dọn: ${result.released.join(", ")}.` : "Không có cache nội bộ nào cần dọn.";
+  const terminated = result.terminated_processes.length
+    ? `Đã dừng ${result.terminated_processes.length} tiến trình helper GPU.`
+    : "Không phát hiện tiến trình helper GPU tồn đọng.";
+  const suffix = result.errors.length ? ` Có ${result.errors.length} cảnh báo.` : "";
+  return `${released} ${terminated}${suffix}`;
+}
+
 export function App({ api = defaultApi }: { api?: JobsApi }) {
   const [activeTab, setActiveTab] = useState<"jobs" | "outputs" | "settings" | "cloning">("jobs");
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [videoFiles, setVideoFiles] = useState<File[]>([]);
   const [sourceUrl, setSourceUrl] = useState("");
+  const [creatingLinkJob, setCreatingLinkJob] = useState(false);
+  const [importingVideo, setImportingVideo] = useState(false);
+  const [importProgress, setImportProgress] = useState<string | null>(null);
+  const [resolveCp, setResolveCp] = useState<any | null>(null);
+  const [ytDlpUpdating, setYtDlpUpdating] = useState(false);
+  const [ytDlpNotice, setYtDlpNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [runtime, setRuntime] = useState<RuntimeReport | null>(null);
   const [runtimeOpen, setRuntimeOpen] = useState(false);
+  const [runtimeLoading, setRuntimeLoading] = useState(false);
+  const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [testingRuntime, setTestingRuntime] = useState(false);
-
-  // Setup Wizard States
-  const [hardware, setHardware] = useState<{
-    cuda_supported: boolean;
-    vulkan_supported: boolean;
-    avx2_supported: boolean;
-    espeak_installed: boolean;
-    recommendation: string;
-  } | null>(null);
-  const [wizardStep, setWizardStep] = useState<1 | 2 | 3>(1);
-  const [wizardProfile, setWizardProfile] = useState<string>("gpu_cuda");
-  const [bootstrapProgress, setBootstrapProgress] = useState<any>(null);
-  const [bootstrapRunning, setBootstrapRunning] = useState<boolean>(false);
+  const [releasingVram, setReleasingVram] = useState(false);
+  const [vramNotice, setVramNotice] = useState<string | null>(null);
 
   // Tauri-side backend status (Python server managed by the Rust shell)
   const [backend, setBackend] = useState<BackendStatus | null>(null);
   const [backendError, setBackendError] = useState<string | null>(null);
+  const [backendNotice, setBackendNotice] = useState<string | null>(null);
+  const [backendConnection, setBackendConnection] = useState<BackendConnectionState>("checking");
+  const [backendLastOkAt, setBackendLastOkAt] = useState<number | null>(null);
+  const [backendCheckedAt, setBackendCheckedAt] = useState<number | null>(null);
+  const recoveringBackendRef = useRef(false);
+  const backendPollFailuresRef = useRef(0);
 
   // Selected job details modal state
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
-  const [resolveCp, setResolveCp] = useState<any | null>(null);
   const [drawerTab, setDrawerTab] = useState<"steps" | "segments" | "files">("steps");
   const [durationRepairCp, setDurationRepairCp] = useState<any | null>(null);
   const [jobFiles, setJobFiles] = useState<any[]>([]);
@@ -181,7 +220,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
 
   // Settings form state
   const [settings, setSettings] = useState<Record<string, any>>({
-    cookies_browser: "none",
     translation_backend: "google_free",
     translation_source_language: "zh-CN",
     translation_target_language: "vi",
@@ -212,57 +250,52 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   const [testAudioUrls, setTestAudioUrls] = useState<Record<string, string>>({});
   const selectedClonedVoice = clonedVoices.find((voice) => voice.wav_path === settings.voxcpm_ref_audio);
 
-  // Detect hardware when runtime is blocked
-  useEffect(() => {
-    if (runtime?.status === "blocked" && !hardware) {
-      api.detectHardware().then((rep) => {
-        setHardware(rep);
-        setWizardProfile(rep.recommendation === "gpu_cuda" ? "gpu_cuda" : "cpu_avx2");
-      }).catch(console.error);
-    }
-  }, [runtime, hardware, api]);
-
-  // Poll bootstrap progress
-  useEffect(() => {
-    let interval: any;
-    if (bootstrapRunning) {
-      interval = setInterval(async () => {
-        try {
-          const progress = await api.bootstrapProgress();
-          setBootstrapProgress(progress);
-          
-          if (progress.status === "completed") {
-            setBootstrapRunning(false);
-            setWizardStep(3);
-            // Re-run smoke test to clear blocked status
-            const report = await api.runSmokeTest();
-            setRuntime(report);
-          } else if (progress.status === "failed") {
-            setBootstrapRunning(false);
-          }
-        } catch (e) {
-          console.error(e);
-        }
-      }, 500);
-    }
-    return () => clearInterval(interval);
-  }, [bootstrapRunning, api]);
-
-  async function handleStartBootstrap() {
-    setBootstrapRunning(true);
-    setWizardStep(2);
+  const recoverBackend = useCallback(async (reason: string) => {
+    if (recoveringBackendRef.current) return;
+    recoveringBackendRef.current = true;
+    setBackendError(null);
+    setBackend({ kind: "starting" });
+    setBackendConnection("restarting");
+    setBackendNotice(reason);
     try {
-      await api.bootstrapVendor(wizardProfile);
+      await invokeRestart();
+      const baseUrl = await waitForBackend({ timeoutMs: 90_000 });
+      setBackend({ kind: "ready", base_url: baseUrl });
+      setBackendConnection("online");
+      setBackendLastOkAt(Date.now());
+      setBackendNotice(null);
+      backendPollFailuresRef.current = 0;
+      const newJobs = await api.listJobs();
+      setJobs(newJobs);
+      if (selectedJobId) {
+        const updated = newJobs.find((j) => j.id === selectedJobId);
+        if (updated) {
+          setSelectedJob(updated);
+          fetchJobCheckpoints(updated.id);
+          fetchJobFiles(updated.id);
+        }
+      }
+      void refreshRuntime();
     } catch (cause) {
-      setBootstrapRunning(false);
-      setError(cause instanceof Error ? cause.message : "Tải môi trường thất bại");
+      if (cause && typeof cause === "object" && "kind" in cause) {
+        setBackend(cause as BackendStatus);
+        setBackendConnection((cause as BackendStatus).kind === "crashed" ? "offline" : "checking");
+      } else {
+        setBackend({
+          kind: "crashed",
+          stderr: cause instanceof Error ? cause.message : String(cause),
+        });
+        setBackendConnection("offline");
+      }
+      setBackendNotice(null);
+    } finally {
+      recoveringBackendRef.current = false;
     }
-  }
+  }, [api, selectedJobId]);
 
   // Fetch initial data
   useEffect(() => {
     refreshJobs();
-    refreshRuntime();
     refreshOutputs();
     loadSettings();
     if (activeTab === "cloning" || activeTab === "settings") {
@@ -277,13 +310,15 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
           const updated = newJobs.find((j) => j.id === selectedJobId);
           if (updated) {
             setSelectedJob(updated);
-            if (updated.current_step === "download" || updated.status === "waiting_for_selection") {
+            if (updated.status === "waiting_for_selection" || updated.current_step === "download") {
               fetchResolveCheckpoint(updated.id);
             }
             fetchJobCheckpoints(updated.id);
             fetchJobFiles(updated.id);
           }
         }
+      }).catch(() => {
+        // Connection recovery is handled by the dedicated backend health poll.
       });
       if (activeTab === "outputs") {
         refreshOutputs();
@@ -294,12 +329,17 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     }, 2000);
 
     return () => clearInterval(interval);
-  }, [api, selectedJobId, activeTab]);
+  }, [api, selectedJobId, activeTab, recoverBackend]);
 
   // Tauri bridge: wait for Python backend to be ready, subscribe to crash events
   useEffect(() => {
     waitForBackend({ timeoutMs: 30_000 })
-      .then((baseUrl) => setBackend({ kind: "ready", base_url: baseUrl }))
+      .then((baseUrl) => {
+        setBackend({ kind: "ready", base_url: baseUrl });
+        setBackendConnection("online");
+        setBackendLastOkAt(Date.now());
+        void refreshRuntime();
+      })
       .catch((e) => {
         if (e && typeof e === "object" && "kind" in e) {
           setBackend(e as BackendStatus);
@@ -308,10 +348,55 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
         }
       });
     const unlisten = subscribeBackendEvents({
-      onCrashed: (stderr) => setBackend({ kind: "crashed", stderr }),
+      onCrashed: () => {
+        void recoverBackend("Backend dừng đột ngột. Đang khởi động lại và tiếp tục job…");
+      },
     });
     return () => { unlisten?.(); };
-  }, []);
+  }, [recoverBackend]);
+
+  // Poll /api/health so we can surface backend drops while the UI stays open.
+  useEffect(() => {
+    if (!backend || backend.kind === "starting" || backend.kind === "crashed" || backend.kind === "portable_missing") {
+      return;
+    }
+    let cancelled = false;
+    const baseUrl = backend?.kind === "ready" ? backend.base_url : BACKEND_BASE;
+
+    const tick = async () => {
+      if (recoveringBackendRef.current) {
+        return;
+      }
+      const ok = await probeBackendHealth(baseUrl);
+      if (cancelled) {
+        return;
+      }
+      const now = Date.now();
+      setBackendCheckedAt(now);
+      if (ok) {
+        backendPollFailuresRef.current = 0;
+        setBackendConnection("online");
+        setBackendLastOkAt(now);
+        setBackendNotice(null);
+        if (backend?.kind !== "ready") {
+          setBackend({ kind: "ready", base_url: baseUrl });
+        }
+        return;
+      }
+      backendPollFailuresRef.current += 1;
+      setBackendConnection((current) => (current === "restarting" ? "restarting" : "offline"));
+      if (backendPollFailuresRef.current >= 2) {
+        setBackendNotice("Backend không phản hồi. Ứng dụng sẽ không tự tắt backend; hãy dùng nút khởi động lại nếu cần.");
+      }
+    };
+
+    void tick();
+    const id = setInterval(() => { void tick(); }, 2_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [backend, recoverBackend]);
 
   async function refreshClonedVoices() {
     try {
@@ -389,10 +474,27 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   }
 
   async function refreshRuntime() {
+    setRuntimeLoading(true);
+    setRuntimeError(null);
     try {
-      setRuntime(await api.runtimeStatus());
+      const latest = await api.runtimeStatus();
+      if (latest.status !== "blocked") {
+        setRuntime(latest);
+        return latest;
+      }
+      try {
+        const checked = await api.runSmokeTest();
+        setRuntime(checked);
+        return checked;
+      } catch {
+        setRuntime(latest);
+        return latest;
+      }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Không thể tải trạng thái môi trường thực thi");
+      setRuntimeError(cause instanceof Error ? cause.message : "Không thể tải trạng thái môi trường thực thi");
+      return null;
+    } finally {
+      setRuntimeLoading(false);
     }
   }
 
@@ -413,15 +515,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     }
   }
 
-  async function fetchResolveCheckpoint(jobId: string) {
-    try {
-      const checkpoint = await api.getCheckpoint(jobId, "resolve");
-      setResolveCp(checkpoint);
-    } catch {
-      setResolveCp(null);
-    }
-  }
-
   async function fetchJobCheckpoints(jobId: string) {
     try {
       const cp = await api.getCheckpoint(jobId, "duration_repair");
@@ -436,26 +529,132 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     }
   }
 
-  async function createJob(event: FormEvent) {
+  async function importVideoJob(event: FormEvent) {
     event.preventDefault();
+    if (videoFiles.length === 0) {
+      setError("Vui lòng chọn ít nhất một video từ máy tính.");
+      return;
+    }
     setError(null);
+    setImportingVideo(true);
+    setImportProgress(null);
+    const createdJobs: Job[] = [];
+    const failures: string[] = [];
     try {
-      const job = await api.createJob(sourceUrl);
+      for (let index = 0; index < videoFiles.length; index += 1) {
+        const file = videoFiles[index];
+        setImportProgress(`Đang tải lên ${index + 1}/${videoFiles.length}: ${file.name}`);
+        try {
+          createdJobs.push(await api.importJob(file));
+        } catch (cause) {
+          failures.push(
+            `${file.name}: ${cause instanceof Error ? cause.message : "Không thể tạo tiến trình"}`,
+          );
+        }
+      }
+      if (createdJobs.length > 0) {
+        setJobs((current) => [...createdJobs, ...current]);
+        setVideoFiles([]);
+        const fileInput = document.getElementById("video-file-input") as HTMLInputElement | null;
+        if (fileInput) fileInput.value = "";
+      }
+      if (failures.length > 0) {
+        const prefix = createdJobs.length > 0
+          ? `Đã tạo ${createdJobs.length} tiến trình. `
+          : "";
+        setError(`${prefix}Không thể import ${failures.length} file:\n${failures.join("\n")}`);
+      }
+    } finally {
+      setImportingVideo(false);
+      setImportProgress(null);
+    }
+  }
+
+  async function createLinkJob(event: FormEvent) {
+    event.preventDefault();
+    const trimmed = sourceUrl.trim();
+    if (!trimmed) {
+      setError("Vui lòng dán liên kết video Douyin hoặc Bilibili.");
+      return;
+    }
+    setError(null);
+    setCreatingLinkJob(true);
+    try {
+      const job = await api.createJob(trimmed);
       setJobs((current) => [job, ...current]);
       setSourceUrl("");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Không thể tạo tiến trình");
+      setError(cause instanceof Error ? cause.message : "Không thể tạo tiến trình từ liên kết");
+    } finally {
+      setCreatingLinkJob(false);
+    }
+  }
+
+  async function fetchResolveCheckpoint(jobId: string) {
+    try {
+      const checkpoint = await api.getCheckpoint(jobId, "resolve");
+      setResolveCp(checkpoint);
+    } catch {
+      setResolveCp(null);
+    }
+  }
+
+  async function handleSelectPlaylistVideo(jobId: string, index: number) {
+    try {
+      await api.selectVideo(jobId, index);
+      setResolveCp(null);
+      await refreshJobs();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Không thể chọn video");
+    }
+  }
+
+  async function handleUpdateYtDlp() {
+    setYtDlpUpdating(true);
+    setYtDlpNotice(null);
+    try {
+      const result = await api.updateYtDlp();
+      setYtDlpNotice(`Đã cập nhật yt-dlp: ${result.previous_version} → ${result.version}`);
+      await refreshRuntime();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Không thể cập nhật yt-dlp");
+    } finally {
+      setYtDlpUpdating(false);
     }
   }
 
   async function runSmokeTest() {
     setTestingRuntime(true);
+    setRuntimeError(null);
     try {
       setRuntime(await api.runSmokeTest());
+      setVramNotice(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Thử nghiệm hệ thống thất bại");
     } finally {
       setTestingRuntime(false);
+    }
+  }
+
+  function openRuntimePanel() {
+    setRuntimeOpen(true);
+    if (!runtime && !runtimeLoading) {
+      void refreshRuntime();
+    }
+  }
+
+  async function handleReleaseVram() {
+    setReleasingVram(true);
+    setError(null);
+    try {
+      const result = await api.releaseVram();
+      setVramNotice(summarizeVramRelease(result));
+      await refreshRuntime();
+      await refreshJobs();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Không thể giải phóng VRAM");
+    } finally {
+      setReleasingVram(false);
     }
   }
 
@@ -575,13 +774,16 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     }
   }
 
-  async function handleSelectPlaylistVideo(jobId: string, index: number) {
+  async function openJobFolder(jobId: string) {
     try {
-      await api.selectVideo(jobId, index);
-      refreshJobs();
-      setResolveCp(null);
+      const folder = await api.getJobFolder(jobId);
+      if (!folder.exists) {
+        setError("Thư mục tiến trình chưa được tạo trên máy.");
+        return;
+      }
+      await invokeOpenFolder(folder.path);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Không thể chọn video");
+      setError(cause instanceof Error ? cause.message : "Không thể mở thư mục tiến trình");
     }
   }
 
@@ -670,12 +872,72 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     return `${minutes}:${seconds.toString().padStart(2, "0")}`;
   }
 
+  function formatStepDuration(ms?: number | null, startedAt?: string | null, status?: string): string {
+    const elapsedMs = status === "running" && startedAt ? Date.now() - Date.parse(startedAt) : null;
+    const value = ms ?? (elapsedMs !== null && Number.isFinite(elapsedMs) && elapsedMs >= 0 ? elapsedMs : null);
+    if (value === null) return "--";
+    if (value < 1000) return `${Math.round(value)} ms`;
+    return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)} s`;
+  }
+
   function formatBytes(bytes?: number): string {
     if (!bytes) return "0 Bytes";
     const k = 1024;
     const sizes = ["Bytes", "KB", "MB", "GB"];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+  }
+
+  function formatBackendClock(timestamp: number | null): string {
+    if (!timestamp) return "chưa có";
+    return new Date(timestamp).toLocaleTimeString("vi-VN", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  }
+
+  function backendConnectionLabel(state: BackendConnectionState): string {
+    switch (state) {
+      case "online":
+        return "Đang chạy";
+      case "offline":
+        return "Không phản hồi";
+      case "restarting":
+        return "Đang khởi động lại";
+      default:
+        return "Đang kiểm tra";
+    }
+  }
+
+  function renderBackendBanner() {
+    if (backendConnection !== "offline" && backendConnection !== "restarting") {
+      return null;
+    }
+    return (
+      <div className={`backend-banner backend-banner--${backendConnection}`}>
+        <AlertTriangle size={20} />
+        <div>
+          <strong>
+            {backendConnection === "restarting"
+              ? "Backend đang được khởi động lại"
+              : "Backend không phản hồi"}
+          </strong>
+          <span>
+            {backendNotice
+              ?? (backendConnection === "restarting"
+                ? "Tiến trình Python có thể đã dừng giữa chừng. Đang thử kết nối lại…"
+                : "Job có thể bị treo nếu backend đã dừng. Kiểm tra lần cuối lúc "
+                  + formatBackendClock(backendCheckedAt) + ".")}
+          </span>
+        </div>
+        {backendConnection === "offline" && (
+          <button type="button" onClick={() => void recoverBackend("Đang khởi động lại backend…")}>
+            Khởi động lại
+          </button>
+        )}
+      </div>
+    );
   }
 
   if (backend?.kind === "portable_missing") {
@@ -698,11 +960,21 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   if (backend?.kind === "crashed") {
     return (
       <div className="p-6 max-w-3xl mx-auto text-zinc-100">
-        <h1 className="text-xl font-semibold text-red-400">Backend crashed</h1>
+        <h1 className="text-xl font-semibold text-red-400">Backend dừng đột ngột</h1>
+        <p className="mt-2 text-sm text-zinc-300">
+          Cửa sổ app vẫn mở nhưng tiến trình xử lý Python có thể đã bị dừng (GPU, bộ nhớ, hoặc lỗi hệ thống).
+          Bạn không cần đóng app — nhấn nút bên dưới để khởi động lại và tiếp tục job từ checkpoint.
+        </p>
         <pre className="mt-3 p-3 bg-zinc-900 text-zinc-100 text-sm overflow-auto rounded">
           {backend.stderr || "(no stderr captured)"}
         </pre>
-        <button onClick={() => location.reload()} className="mt-4 underline">Retry</button>
+        <button
+          type="button"
+          onClick={() => void recoverBackend("Đang khởi động lại backend…")}
+          className="mt-4 underline"
+        >
+          Khởi động lại backend
+        </button>
       </div>
     );
   }
@@ -718,184 +990,14 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
 
   if (!backend || backend.kind === "starting") {
     return (
-      <div className="p-6 text-zinc-600">Starting backend…</div>
-    );
-  }
-
-  if (runtime?.status === "blocked") {
-    return (
-      <div className="wizard-container">
-        <div className="wizard-card">
-          <div className="wizard-header">
-            <h1>Thiết lập môi trường ứng dụng</h1>
-            <p>Ứng dụng cần tải và cấu hình một số thư viện hệ thống để bắt đầu hoạt động.</p>
-          </div>
-
-          {error && (
-            <div className="error" style={{ margin: 0 }}>
-              <CircleAlert size={22} />
-              <div>
-                <strong>Lỗi thiết lập</strong>
-                <span>{error}</span>
-              </div>
-              <button onClick={() => setError(null)} style={{ background: "transparent", color: "inherit", marginLeft: "auto" }}>
-                <X size={18} />
-              </button>
-            </div>
-          )}
-
-          {wizardStep === 1 && (
-            <>
-              <div className="specs-panel">
-                <h4 style={{ margin: "0 0 10px", fontSize: "14px", color: "#a79aff", textTransform: "uppercase", letterSpacing: "0.05em" }}>Thông số phần cứng phát hiện</h4>
-                {hardware ? (
-                  <>
-                    <div className="spec-item">
-                      <span className="label">Hỗ trợ CUDA GPU (Qwen3-ASR 1.7B):</span>
-                      <span className={`value ${hardware.cuda_supported ? "supported" : "unsupported"}`}>
-                        {hardware.cuda_supported ? "Hỗ trợ" : "Không hỗ trợ"}
-                      </span>
-                    </div>
-                    <div className="spec-item">
-                      <span className="label">Hỗ trợ GPU Vulkan:</span>
-                      <span className={`value ${hardware.vulkan_supported ? "supported" : "unsupported"}`}>
-                        {hardware.vulkan_supported ? "Hỗ trợ" : "Không hỗ trợ"}
-                      </span>
-                    </div>
-                    <div className="spec-item">
-                      <span className="label">Hỗ trợ tập lệnh CPU AVX2:</span>
-                      <span className={`value ${hardware.avx2_supported ? "supported" : "unsupported"}`}>
-                        {hardware.avx2_supported ? "Hỗ trợ" : "Không hỗ trợ"}
-                      </span>
-                    </div>
-                    <div className="spec-item">
-                      <span className="label">eSpeak NG (Cần cho Offline Voice Clone):</span>
-                      <span className={`value ${hardware.espeak_installed ? "supported" : "unsupported"}`}>
-                        {hardware.espeak_installed ? "Đã cài đặt" : "Chưa cài đặt"}
-                      </span>
-                    </div>
-                  </>
-                ) : (
-                  <div style={{ color: "#8f97a6", fontStyle: "italic", fontSize: "13px" }}>Đang quét phần cứng...</div>
-                )}
-              </div>
-
-              <div>
-                <h4 style={{ margin: "0 0 12px", fontSize: "14px", color: "#a79aff", textTransform: "uppercase", letterSpacing: "0.05em" }}>Chọn cấu hình ASR</h4>
-                <div className="profile-selection">
-                  <div
-                    className={`profile-card ${wizardProfile === "gpu_cuda" ? "selected" : ""}`}
-                    onClick={() => {
-                      if (hardware?.cuda_supported) {
-                        setWizardProfile("gpu_cuda");
-                      }
-                    }}
-                    style={{ opacity: hardware?.cuda_supported ? 1 : 0.5, cursor: hardware?.cuda_supported ? "pointer" : "not-allowed" }}
-                  >
-                    <span className="profile-badge">Khuyên dùng</span>
-                    <h3>Qwen3-ASR 1.7B trên GPU (CUDA)</h3>
-                    <p>Nhận dạng tiếng Trung chính xác nhất với mô hình Qwen3-ASR-1.7B trên card NVIDIA. Yêu cầu VRAM khoảng 6–8 GB.</p>
-                    {!hardware?.cuda_supported && <small style={{ color: "#f16f7e", fontSize: "11px", marginTop: "auto" }}>Không khả dụng: Không tìm thấy CUDA GPU</small>}
-                  </div>
-
-                  <div
-                    className={`profile-card ${wizardProfile === "cpu_avx2" ? "selected" : ""}`}
-                    onClick={() => setWizardProfile("cpu_avx2")}
-                    style={{ opacity: 0.5, cursor: "not-allowed" }}
-                  >
-                    <span className="profile-badge" style={{ background: "rgba(91, 221, 154, 0.15)", color: "#5bdd9a" }}>Không hỗ trợ</span>
-                    <h3>Chế độ CPU</h3>
-                    <p>Qwen3-ASR 1.7B yêu cầu GPU CUDA. Ứng dụng không còn dùng whisper.cpp CPU làm ASR mặc định.</p>
-                  </div>
-                </div>
-              </div>
-
-              <button
-                type="button"
-                className="smoke-button"
-                onClick={handleStartBootstrap}
-                disabled={!hardware || !hardware.cuda_supported}
-                style={{ marginTop: "10px" }}
-              >
-                Bắt đầu tải và thiết lập môi trường
-              </button>
-            </>
-          )}
-
-          {wizardStep === 2 && (
-            <>
-              <div className="progress-container">
-                <div className="progress-meta">
-                  <strong>{bootstrapProgress?.current_task || "Đang tải xuống..."}</strong>
-                  <span>{bootstrapProgress?.download_percent || 0}%</span>
-                </div>
-                <div className="progress-bar-bg">
-                  <div
-                    className="progress-bar-fill"
-                    style={{ width: `${bootstrapProgress?.download_percent || 0}%` }}
-                  />
-                </div>
-                {bootstrapProgress && bootstrapProgress.download_speed_kb > 0 && (
-                  <div style={{ textAlign: "right", fontSize: "12px", color: "#8f97a6", marginTop: "2px" }}>
-                    Tốc độ: {(bootstrapProgress.download_speed_kb / 1024).toFixed(2)} MB/s | Đã tải: {(bootstrapProgress.downloaded_bytes / 1024 / 1024).toFixed(1)} MB / {(bootstrapProgress.total_bytes / 1024 / 1024).toFixed(1)} MB
-                  </div>
-                )}
-              </div>
-
-              <div>
-                <h4 style={{ margin: "0 0 10px", fontSize: "13px", color: "#8f97a6", textTransform: "uppercase" }}>Nhật ký thiết lập</h4>
-                <div className="logs-panel">
-                  {bootstrapProgress?.logs?.map((line: string, i: number) => (
-                    <div key={i} className="log-line">{line}</div>
-                  )) || <div style={{ color: "#626b7d", fontStyle: "italic" }}>Đang khởi tạo kết nối...</div>}
-                </div>
-              </div>
-
-              {bootstrapProgress?.status === "failed" && (
-                <button
-                  type="button"
-                  className="smoke-button"
-                  onClick={handleStartBootstrap}
-                  style={{ background: "#f16f7e", marginTop: "10px" }}
-                >
-                  Tải lại môi trường (Thử lại)
-                </button>
-              )}
-            </>
-          )}
-
-          {wizardStep === 3 && (
-            <div className="wizard-success">
-              <CheckCircle2 size={64} className="icon" />
-              <h2>Thiết lập môi trường thành công!</h2>
-              <p style={{ color: "#8f97a6", fontSize: "14px", margin: "0 0 10px" }}>
-                Tất cả các thư viện ffmpeg, yt-dlp, Qwen3-ASR 1.7B và mô hình AI đã được cấu hình chính xác. Ứng dụng đã sẵn sàng hoạt động.
-              </p>
-              <button
-                type="button"
-                className="smoke-button"
-                onClick={() => {
-                  refreshRuntime();
-                }}
-              >
-                Bắt đầu sử dụng ứng dụng
-              </button>
-            </div>
-          )}
-        </div>
+      <div className="p-6 text-zinc-600">
+        {backendNotice ?? "Starting backend…"}
       </div>
     );
   }
 
   return (
     <>
-      <button
-        type="button"
-        onClick={() => invokeOpenDevtools().catch(() => {})}
-        className="devtools-button"
-      >
-        Devtools
-      </button>
       <div className="shell">
       <aside>
         <div className="brand">
@@ -920,16 +1022,45 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
             <Settings2 size={18} /> Cài đặt
           </button>
         </nav>
-        <button className={`runtime ${runtime?.status ?? "loading"}`} onClick={() => setRuntimeOpen(true)}>
-          <i />
-          <div>
-            <strong>Môi trường: {translateStatus(runtime?.status)}</strong>
-            <small>Môi trường thực thi</small>
+        <div className="sidebar-foot">
+          <div
+            className={`backend-status backend-status--${backendConnection}`}
+            title={
+              backendConnection === "online"
+                ? `Backend phản hồi ổn định. Lần kiểm tra gần nhất: ${formatBackendClock(backendCheckedAt)}`
+                : `Backend ${backendConnectionLabel(backendConnection).toLowerCase()}`
+            }
+          >
+            <i />
+            <div>
+              <strong>
+                <Server size={14} style={{ display: "inline", marginRight: 6, verticalAlign: "-2px" }} />
+                Backend: {backendConnectionLabel(backendConnection)}
+              </strong>
+              <small>
+                {backendConnection === "online"
+                  ? `OK lúc ${formatBackendClock(backendLastOkAt)}`
+                  : backendConnection === "restarting"
+                    ? (backendNotice ?? "Đang kết nối lại…")
+                    : `Mất kết nối · kiểm tra ${formatBackendClock(backendCheckedAt)}`}
+              </small>
+            </div>
           </div>
-        </button>
+          <button
+            className={`runtime ${runtime?.status ?? (runtimeError ? "warning" : "loading")}`}
+            onClick={openRuntimePanel}
+          >
+            <i />
+            <div>
+              <strong>Môi trường: {formatSidebarEnvironment(runtime)}</strong>
+              <small>VRAM {formatSidebarVram(runtime)}</small>
+            </div>
+          </button>
+        </div>
       </aside>
 
       <main>
+        {renderBackendBanner()}
         {activeTab === "jobs" && (
           <>
             <header>
@@ -955,20 +1086,54 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
             <section className="new-job">
               <div>
                 <h2>Tạo tiến trình lồng tiếng mới</h2>
-                <p>Tải, dịch và lồng tiếng tự động từ liên kết Douyin.</p>
+                <p>Tải từ liên kết Douyin/Bilibili hoặc chọn video local — nhiều file local sẽ được xếp hàng.</p>
               </div>
-              <form onSubmit={createJob}>
+
+              <form onSubmit={createLinkJob} className="link-job-form">
                 <label>
                   <Link2 size={18} />
                   <input
-                    required
+                    aria-label="Dán liên kết video Douyin hoặc Bilibili"
                     value={sourceUrl}
                     onChange={(event) => setSourceUrl(event.target.value)}
-                    placeholder="Dán liên kết video hoặc kênh Douyin (ví dụ: https://www.douyin.com/video/...)"
+                    placeholder="https://www.douyin.com/video/... hoặc https://www.bilibili.com/video/..."
                   />
                 </label>
-                <button type="submit" disabled={runtime?.status === "blocked"}>
-                  <Plus size={18} /> Tạo tiến trình
+                <button type="submit" disabled={runtime?.status === "blocked" || creatingLinkJob || !sourceUrl.trim()}>
+                  <Link2 size={18} /> {creatingLinkJob ? "Đang tạo..." : "Tạo từ liên kết"}
+                </button>
+              </form>
+
+              <form onSubmit={importVideoJob} className="import-job">
+                <label>
+                  <FileVideo size={18} />
+                  <input
+                    id="video-file-input"
+                    aria-label="Chọn video từ máy tính"
+                    multiple
+                    type="file"
+                    accept=".mp4,.mov,.m4v,.mkv,.webm,.flv,.avi,.ts,.mp3,.wav,.m4a,.ogg,.opus,video/*,audio/*"
+                    onChange={(event) => {
+                      const files = Array.from(event.target.files ?? []);
+                      setVideoFiles(files);
+                    }}
+                  />
+                </label>
+                {videoFiles.length > 0 && (
+                  <p className="import-file-count">
+                    Đã chọn {videoFiles.length} file: {videoFiles.map((file) => file.name).join(", ")}
+                  </p>
+                )}
+                {importProgress && (
+                  <p className="import-file-count">{importProgress}</p>
+                )}
+                <button type="submit" disabled={runtime?.status === "blocked" || importingVideo || videoFiles.length === 0}>
+                  <Upload size={18} />{" "}
+                  {importingVideo
+                    ? "Đang tải lên..."
+                    : videoFiles.length > 1
+                      ? `Tạo ${videoFiles.length} tiến trình`
+                      : "Tạo từ file local"}
                 </button>
               </form>
             </section>
@@ -982,7 +1147,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                 <div className="empty">
                   <Clock3 size={32} />
                   <h3>Chưa có tiến trình nào</h3>
-                  <p>Dán liên kết Douyin ở trên để tạo tiến trình lồng tiếng đầu tiên.</p>
+                  <p>Chọn video local hoặc dán liên kết Douyin/Bilibili ở trên để bắt đầu.</p>
                 </div>
               )}
               <div style={{ display: "grid", gap: "12px" }}>
@@ -999,11 +1164,16 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                         <div style={{ flex: 1, marginRight: "12px" }}>
                           <span className={`status ${job.status}`}>{translateJobStatus(job.status)}</span>
                           <h3 style={{ margin: "8px 0 4px", fontSize: "16px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            {job.title_vi || job.title || job.source_url}
+                            {formatJobLabel(job)}
                           </h3>
                           {job.title_vi && job.title && job.title_vi !== job.title && (
                             <small style={{ color: "#747d90", display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                               {job.title}
+                            </small>
+                          )}
+                          {job.last_error_code && job.status === "failed" && (
+                            <small style={{ color: "#f16f7e", display: "block", marginTop: "6px" }}>
+                              {job.last_error_code}: {job.last_error_message}
                             </small>
                           )}
                           <small style={{ fontFamily: "monospace", color: "#626b7d" }}>{job.id}</small>
@@ -1245,7 +1415,9 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                         </div>
                       </div>
                       <p style={{ color: "#8f97a6", fontSize: "13px", margin: "0 0 16px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        Nguồn: <a href={out.source_url} target="_blank" rel="noreferrer" style={{ color: "#8170ff" }}>{out.source_url}</a>
+                        Nguồn: {out.source_url.startsWith("import://")
+                          ? out.source_url.slice("import://".length)
+                          : <a href={out.source_url} target="_blank" rel="noreferrer" style={{ color: "#8170ff" }}>{out.source_url}</a>}
                       </p>
                       <button
                         className="smoke-button"
@@ -1253,6 +1425,13 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                         onClick={() => setActiveVideoUrl(`http://127.0.0.1:8765/api/jobs/${out.job_id}/output`)}
                       >
                         <Play size={16} /> Phát Video Lồng Tiếng
+                      </button>
+                      <button
+                        className="smoke-button"
+                        style={{ marginTop: "8px", display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", background: "#20242e" }}
+                        onClick={() => openJobFolder(out.job_id)}
+                      >
+                        <FolderOpen size={16} /> Mở thư mục
                       </button>
                     </div>
                   ))}
@@ -1272,46 +1451,48 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
             </header>
             <form onSubmit={handleSaveSettings} className="settings-page-layout">
               <div className="settings-column">
-                {/* Cấu hình Dịch thuật và Cookie */}
                 <section className="settings-card">
                   <div className="card-header-accent">
                     <span className="accent-bar"></span>
-                    <h3>Google Dịch Miễn Phí</h3>
+                    <h3>Tải video (Douyin / Bilibili)</h3>
                   </div>
                   <p className="card-description">
-                    Dịch miễn phí qua Google Translate. Tần suất yêu cầu có thể bị giới hạn.
+                    Tự lấy cookie từ Chrome, rồi lần lượt thử Edge → Firefox → Brave nếu cần.
+                    Đăng nhập Douyin/Bilibili trên Chrome trước khi tạo job từ liên kết.
                   </p>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "14px" }}>
-                    <label className="settings-label">
-                      <span>Cookie trình duyệt cho Douyin</span>
-                      <select
-                        className="settings-input"
-                        value={settings.cookies_browser ?? "none"}
-                        onChange={(e) => setSettings({ ...settings, cookies_browser: e.target.value })}
-                      >
-                        <option value="none">Không sử dụng cookie trình duyệt</option>
-                        <option value="edge">Microsoft Edge</option>
-                        <option value="chrome">Google Chrome</option>
-                        <option value="firefox">Mozilla Firefox</option>
-                        <option value="brave">Brave</option>
-                      </select>
-                    </label>
-                    <label className="settings-label">
-                      <span>Bộ dịch thuật</span>
-                      <select
-                        className="settings-input"
-                        value={settings.translation_backend ?? "google_free"}
-                        onChange={(e) => setSettings({ ...settings, translation_backend: e.target.value })}
-                      >
-                        <option value="google_free">Google Dịch Miễn Phí</option>
-                        <option value="gemini">Gemini</option>
-                      </select>
-                    </label>
+                  <button
+                    type="button"
+                    className="gradient-button"
+                    disabled={ytDlpUpdating}
+                    onClick={() => void handleUpdateYtDlp()}
+                    style={{ justifyContent: "center" }}
+                  >
+                    <RefreshCw size={16} /> {ytDlpUpdating ? "Đang cập nhật yt-dlp..." : "Cập nhật yt-dlp"}
+                  </button>
+                  {ytDlpNotice && (
+                    <p className="import-file-count" style={{ marginTop: "10px", color: "#9be7a8" }}>{ytDlpNotice}</p>
+                  )}
+                </section>
+
+                <section className="settings-card">
+                  <div className="card-header-accent">
+                    <span className="accent-bar"></span>
+                    <h3>Dịch thuật</h3>
                   </div>
-                  <div className="alert-info-box warning">
-                    <CircleAlert size={14} style={{ flexShrink: 0, marginTop: "2px" }} />
-                    <span>Cookie dùng cho yt-dlp để tải video, không lưu trữ trên hệ thống.</span>
-                  </div>
+                  <p className="card-description">
+                    Chọn bộ dịch thuật dùng cho phụ đề và lồng tiếng.
+                  </p>
+                  <label className="settings-label">
+                    <span>Bộ dịch thuật</span>
+                    <select
+                      className="settings-input"
+                      value={settings.translation_backend ?? "google_free"}
+                      onChange={(e) => setSettings({ ...settings, translation_backend: e.target.value })}
+                    >
+                      <option value="google_free">Google Dịch Miễn Phí</option>
+                      <option value="gemini">Gemini</option>
+                    </select>
+                  </label>
                 </section>
 
                 {/* Google AI Studio / Khóa API Gemini */}
@@ -1610,15 +1791,15 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
       {/* Selected Job Drawer Panel */}
       {selectedJob && (
         <div className="overlay" onClick={closeSelectedJob}>
-          <section className="runtime-panel" onClick={(event) => event.stopPropagation()} style={{ width: "min(600px, 100%)", display: "flex", flexDirection: "column" }}>
+          <section className="runtime-panel" onClick={(event) => event.stopPropagation()} style={{ width: "min(760px, 100%)", display: "flex", flexDirection: "column" }}>
             <div className="runtime-head">
               <div>
                 <p>Chi tiết tiến trình</p>
-                <h2 style={{ fontSize: "20px", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap", maxWidth: "450px" }}>
-                  {selectedJob.title_vi || selectedJob.title || selectedJob.source_url}
+                <h2 style={{ fontSize: "20px", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap", maxWidth: "620px" }}>
+                  {formatJobLabel(selectedJob)}
                 </h2>
                 {selectedJob.title_vi && selectedJob.title && selectedJob.title_vi !== selectedJob.title && (
-                  <small style={{ color: "#747d90", display: "block", marginTop: "4px", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap", maxWidth: "450px" }}>
+                  <small style={{ color: "#747d90", display: "block", marginTop: "4px", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap", maxWidth: "620px" }}>
                     {selectedJob.title}
                   </small>
                 )}
@@ -1630,28 +1811,42 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
             </div>
 
             {/* Status actions */}
-            <div style={{ display: "flex", gap: "10px", margin: "20px 0 10px" }}>
-              {(selectedJob.status === "failed" || selectedJob.status === "interrupted") && (
-                <button className="smoke-button" style={{ flex: 1 }} onClick={() => startJob(selectedJob.id)}>
-                  <RefreshCw size={16} /> Tiếp tục lồng tiếng
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+                gap: "10px",
+                margin: "20px 0 10px",
+              }}
+            >
+              <button
+                className="smoke-button"
+                style={{ minWidth: 0, background: "#20242e", whiteSpace: "nowrap" }}
+                onClick={() => openJobFolder(selectedJob.id)}
+              >
+                <FolderOpen size={16} /> Mở thư mục
+              </button>
+              {(selectedJob.status === "queued" || selectedJob.status === "failed" || selectedJob.status === "interrupted") && (
+                <button className="smoke-button" style={{ minWidth: 0, whiteSpace: "nowrap" }} onClick={() => startJob(selectedJob.id)}>
+                  <RefreshCw size={16} /> {selectedJob.status === "queued" ? "Bắt đầu lồng tiếng" : "Tiếp tục lồng tiếng"}
                 </button>
               )}
               {(selectedJob.status === "completed" || selectedJob.status === "failed" || selectedJob.status === "interrupted") && (
                 <button
                   className="smoke-button"
-                  style={{ flex: 1, background: "linear-gradient(135deg, #6244f7, #3d29a6)", color: "#fff" }}
+                  style={{ minWidth: 0, background: "linear-gradient(135deg, #6244f7, #3d29a6)", color: "#fff", whiteSpace: "nowrap" }}
                   onClick={() => openRerunModal(selectedJob)}
                 >
                   <RefreshCw size={16} /> Chạy lại
                 </button>
               )}
               {selectedJob.status === "running" && (
-                <button className="smoke-button" style={{ flex: 1, background: "#f16f7e" }} onClick={() => cancelJob(selectedJob.id)}>
+                <button className="smoke-button" style={{ minWidth: 0, background: "#f16f7e", whiteSpace: "nowrap" }} onClick={() => cancelJob(selectedJob.id)}>
                   <X size={16} /> Hủy thực thi
                 </button>
               )}
               {isDeletableJob(selectedJob) && (
-                <button className="smoke-button" style={{ flex: 1, background: "#f16f7e" }} onClick={() => deleteJob(selectedJob.id)}>
+                <button className="smoke-button" style={{ minWidth: 0, background: "#f16f7e", whiteSpace: "nowrap" }} onClick={() => deleteJob(selectedJob.id)}>
                   <Trash2 size={16} /> Xóa tiến trình
                 </button>
               )}
@@ -1751,6 +1946,32 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
             )}
 
             {/* Error messaging */}
+            {selectedJob.status === "waiting_for_selection" && resolveCp?.videos && (
+              <div style={{ background: "#20242e", border: "1px solid #343a48", borderRadius: "12px", padding: "16px", margin: "12px 0" }}>
+                <h3 style={{ margin: "0 0 12px", fontSize: "15px" }}>Chọn video trong playlist</h3>
+                <div style={{ display: "grid", gap: "8px", maxHeight: "250px", overflowY: "auto" }}>
+                  {resolveCp.videos.map((vid: any, idx: number) => (
+                    <button
+                      key={vid.id ?? idx}
+                      type="button"
+                      onClick={() => void handleSelectPlaylistVideo(selectedJob.id, idx)}
+                      className="playlist-item"
+                      style={{ display: "flex", gap: "10px", background: "#12151c", padding: "10px", borderRadius: "8px", cursor: "pointer", border: "1px solid #292f3b", textAlign: "left", color: "inherit" }}
+                    >
+                      <div style={{ flex: 1 }}>
+                        <strong style={{ fontSize: "14px" }}>{vid.title || `Video ${idx + 1}`}</strong>
+                        {vid.duration ? (
+                          <small style={{ display: "block", color: "#747d90", marginTop: "4px" }}>
+                            {Math.round(vid.duration)}s
+                          </small>
+                        ) : null}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {selectedJob.status === "failed" && selectedJob.last_error_code && (
               <div className="error" style={{ margin: "10px 0" }}>
                 <CircleAlert size={22} />
@@ -1758,32 +1979,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                   <strong>{selectedJob.last_error_code}</strong>
                   <p style={{ margin: "4px 0", fontSize: "13px" }}>{selectedJob.last_error_message}</p>
                   <small style={{ color: "#ffbcc9" }}>Gợi ý hành động: Hãy kiểm tra cài đặt của bạn và tiếp tục tiến trình.</small>
-                </div>
-              </div>
-            )}
-
-            {/* Playlist videos resolution selector */}
-            {selectedJob.status === "waiting_for_selection" && resolveCp && resolveCp.videos && (
-              <div style={{ background: "#20242e", border: "1px solid #343a48", borderRadius: "12px", padding: "16px", margin: "12px 0" }}>
-                <h3 style={{ margin: "0 0 12px", fontSize: "15px", display: "flex", alignItems: "center", gap: "8px" }}>
-                  <AlertTriangle size={18} style={{ color: "#f2ba5b" }} /> Chọn video để lồng tiếng
-                </h3>
-                <div style={{ display: "grid", gap: "8px", maxHeight: "250px", overflowY: "auto", paddingRight: "4px" }}>
-                  {resolveCp.videos.map((vid: any, idx: number) => (
-                    <div
-                      key={vid.id}
-                      onClick={() => handleSelectPlaylistVideo(selectedJob.id, idx)}
-                      className="playlist-item"
-                      style={{ display: "flex", gap: "10px", background: "#12151c", padding: "10px", borderRadius: "8px", cursor: "pointer", border: "1px solid #292f3b" }}
-                    >
-                      {vid.thumbnail && <img src={vid.thumbnail} alt="" style={{ width: "60px", height: "45px", objectFit: "cover", borderRadius: "4px" }} />}
-                      <div style={{ flex: 1, overflow: "hidden" }}>
-                        <h4 style={{ margin: 0, fontSize: "13px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{vid.title}</h4>
-                        <small style={{ color: "#747d90" }}>Thời lượng: {formatDuration(vid.duration)}</small>
-                      </div>
-                      <ChevronRight size={18} style={{ alignSelf: "center", color: "#626b7d" }} />
-                    </div>
-                  ))}
                 </div>
               </div>
             )}
@@ -1865,7 +2060,9 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                      </span>
                      <div style={{ flex: 1 }}>
                        <strong style={{ fontSize: "14px" }}>{translateStepName(step.name)}</strong>
-                       <p style={{ margin: "2px 0 0", fontSize: "11px", color: "#747e90" }}>Trạng thái: {translateStepStatus(step.status)}</p>
+                       <p style={{ margin: "2px 0 0", fontSize: "11px", color: "#747e90" }}>
+                         Trạng thái: {translateStepStatus(step.status)} · Thời gian: {formatStepDuration(step.duration_ms, step.started_at, step.status)}
+                       </p>
                      </div>
                    </div>
                  ))
@@ -1971,19 +2168,73 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
       )}
 
       {/* Runtime smoke test panel */}
-      {runtimeOpen && runtime && (
+      {runtimeOpen && (
         <div className="overlay" onClick={() => setRuntimeOpen(false)}>
           <section className="runtime-panel" onClick={(event) => event.stopPropagation()}>
             <div className="runtime-head">
               <div>
                 <p>Môi trường thực thi</p>
-                <h2>Trạng thái: {translateStatus(runtime.status)}</h2>
-                <small>Kiểm tra lần cuối lúc {new Date(runtime.checked_at).toLocaleString()}</small>
+                <h2>
+                  Trạng thái: {runtime ? translateStatus(runtime.status) : runtimeLoading ? "đang kiểm tra" : "chưa tải được"}
+                </h2>
+                <small>
+                  {runtime
+                    ? `Kiểm tra lần cuối lúc ${new Date(runtime.checked_at).toLocaleString()}`
+                    : runtimeError ?? "Đang tải chi tiết môi trường thực thi..."}
+                </small>
               </div>
               <button aria-label="Close runtime panel" onClick={() => setRuntimeOpen(false)}>
                 <X />
               </button>
             </div>
+            {runtime ? (
+              <>
+            {runtime.gpu && (
+              <div className="runtime-resource-card">
+                <div className="runtime-resource-head">
+                  <div>
+                    <strong>VRAM hiện tại</strong>
+                    <small>{runtime.gpu.device_name || (runtime.gpu.cuda_supported ? "CUDA GPU" : "Không phát hiện CUDA GPU")}</small>
+                  </div>
+                  <em className="runtime-status-pill optional">
+                    {runtime.gpu.cuda_supported
+                      ? `${formatVram(runtime.gpu.used_vram_mb)} / ${formatVram(runtime.gpu.total_vram_mb)}`
+                      : "Không khả dụng"}
+                  </em>
+                </div>
+                <div className="runtime-resource-grid">
+                  <span>VRAM còn trống: {formatVram(runtime.gpu.free_vram_mb)}</span>
+                  <span>Tiến trình VoxCPM đang giữ client: {runtime.gpu.active_voxcpm_clients}</span>
+                  <span>PyTorch allocated: {formatVram(runtime.gpu.torch_allocated_mb)}</span>
+                  <span>PyTorch peak: {formatVram(runtime.gpu.torch_peak_mb)}</span>
+                </div>
+                {runtime.gpu.resident_models.length > 0 && (
+                  <div className="runtime-resource-list">
+                    <strong>Model resident</strong>
+                    <ul>
+                      {runtime.gpu.resident_models.map((item) => <li key={item}>{item}</li>)}
+                    </ul>
+                  </div>
+                )}
+                {runtime.gpu.helper_processes.length > 0 && (
+                  <div className="runtime-resource-list">
+                    <strong>Tiến trình helper GPU</strong>
+                    <ul>
+                      {runtime.gpu.helper_processes.map((item) => <li key={item}>{item}</li>)}
+                    </ul>
+                  </div>
+                )}
+                <div className="runtime-resource-actions">
+                  <button className="smoke-button" onClick={handleReleaseVram} disabled={releasingVram}>
+                    <Server size={17} /> {releasingVram ? "Đang giải phóng VRAM..." : "Giải phóng VRAM"}
+                  </button>
+                  <small>
+                    Thao tác này sẽ dừng các tiến trình ASR/TTS đang giữ VRAM và có thể làm job đang chạy thất bại.
+                  </small>
+                  {vramNotice && <div className="runtime-resource-note">{vramNotice}</div>}
+                </div>
+              </div>
+            )}
             <div className="runtime-checks">
               {runtime.checks.map((check) => {
                 const tone = runtimeCheckTone(check);
@@ -2008,6 +2259,16 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
             <button className="smoke-button" onClick={runSmokeTest} disabled={testingRuntime}>
               <RefreshCw size={17} /> {testingRuntime ? "Đang kiểm tra..." : "Chạy thử nghiệm hệ thống"}
             </button>
+              </>
+            ) : (
+              <div className="runtime-empty-state">
+                <p>{runtimeLoading ? "Đang tải chi tiết môi trường thực thi..." : "Chưa lấy được trạng thái môi trường thực thi."}</p>
+                {runtimeError && <small>{runtimeError}</small>}
+                <button className="smoke-button" onClick={() => { void refreshRuntime(); }} disabled={runtimeLoading}>
+                  <RefreshCw size={17} /> {runtimeLoading ? "Đang kiểm tra..." : "Tải lại trạng thái môi trường"}
+                </button>
+              </div>
+            )}
           </section>
         </div>
       )}

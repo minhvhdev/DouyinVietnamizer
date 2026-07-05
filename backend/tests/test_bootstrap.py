@@ -74,5 +74,4 @@ def test_bootstrap_downloads_and_extracts(tmp_path):
          assert (vendor_dir / "manifest.json").is_file()
          assert (vendor_dir / "ffmpeg" / "ffmpeg.exe").is_file()
          assert (vendor_dir / "ffmpeg" / "ffprobe.exe").is_file()
-         assert (vendor_dir / "yt-dlp" / "yt-dlp.exe").is_file()
          mock_qwen.assert_called_once_with(vendor_dir)

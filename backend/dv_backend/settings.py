@@ -25,7 +25,6 @@ from .database import Database
 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "cookies_browser": "none",
     "translation_backend": "google_free",
     "translation_source_language": "zh-CN",
     "translation_target_language": "vi",
@@ -34,12 +33,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "voxcpm_ref_audio": "",
     "voxcpm_instruct": "",
     "voxcpm_auto_voice": True,
-    "voxcpm_num_steps": 10,
+    "voxcpm_num_steps": 8,
     "voxcpm_batch_size": 4,
     "voxcpm_batch_flush_ms": 150,
     "voxcpm_cache_enabled": True,
     "voxcpm_clone_mode": "reference",
-    "mix_mode": "duck",
+    "mix_mode": "background_only",
     "gemini_api_keys": [],
     "gemini_key_cursor": 0,
     "gemini_translation_model": "gemini-2.5-flash",
@@ -49,7 +48,22 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "qwen3_device": "cuda:0",
     "exact_timing_enabled": True,
     "exact_timing_tolerance_ms": 40,
-    "exact_timing_max_stretch": 1.8,
+    "exact_timing_max_stretch": 1.2,
+    "exact_timing_max_safe_stretch": 1.25,
+    "asr_alignment_mode": "accurate",
+    "sparse_asr_enabled": False,
+    "sparse_asr_min_silence_ratio": 0.35,
+    "sparse_asr_chunk_sec": 25,
+    "sparse_asr_padding_ms": 200,
+    "tts_session_reuse_enabled": True,
+    "tts_micro_batch_enabled": True,
+    "vad_adaptive_enabled": False,
+    "vad_neural_fallback_enabled": False,
+    "gpu_model_idle_timeout_sec": 60,
+    "gpu_keep_warm_enabled": True,
+    "gpu_max_resident_models": 1,
+    "tts_conversion_strategy": "lazy_mix",
+    "telemetry_max_file_mb": 16,
     "subtitles_enabled": True,
     "subtitle_font_size": DEFAULT_SUBTITLE_FONT_SIZE,
     "subtitle_font_color": DEFAULT_SUBTITLE_FONT_COLOR,
@@ -60,9 +74,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "subtitle_position": DEFAULT_SUBTITLE_POSITION,
 }
 
-SUPPORTED_COOKIE_BROWSERS = {"none", "edge", "chrome", "firefox", "brave"}
-SUPPORTED_MIX_MODES = {"duck"}
+SUPPORTED_MIX_MODES = {"background_only", "duck"}
 SUPPORTED_VOXCPM_CLONE_MODES = {"reference", "ultimate"}
+SUPPORTED_ASR_ALIGNMENT_MODES = {"fast", "balanced", "accurate"}
 
 
 def mask_api_key(api_key: str) -> str:
@@ -132,6 +146,7 @@ class SettingsService:
         values.pop("gemini_api_key_add", None)
         values.pop("gemini_api_key_remove", None)
         values.pop("gemini_api_key_update", None)
+        values.pop("cookies_browser", None)
         values["gemini_api_keys"] = [
             {
                 "id": item["id"],
@@ -144,18 +159,18 @@ class SettingsService:
         return values
 
     def update(self, values: dict[str, Any]) -> dict[str, Any]:
-        cookie_browser = values.get("cookies_browser")
-        if cookie_browser is not None and cookie_browser not in SUPPORTED_COOKIE_BROWSERS:
-            raise ValueError(
-                "cookies_browser must be one of: "
-                + ", ".join(sorted(SUPPORTED_COOKIE_BROWSERS))
-            )
+        values.pop("cookies_browser", None)
 
         mix_mode = values.get("mix_mode")
-        if mix_mode is not None and mix_mode not in SUPPORTED_MIX_MODES:
-            raise ValueError(
-                "mix_mode must be one of: " + ", ".join(sorted(SUPPORTED_MIX_MODES))
-            )
+        if mix_mode is not None:
+            mix_mode = str(mix_mode).strip().lower()
+            if mix_mode == "separate":
+                mix_mode = "background_only"
+            if mix_mode not in SUPPORTED_MIX_MODES:
+                raise ValueError(
+                    "mix_mode must be one of: " + ", ".join(sorted(SUPPORTED_MIX_MODES))
+                )
+            values["mix_mode"] = mix_mode
 
         clone_mode = values.get("voxcpm_clone_mode")
         if clone_mode is not None and str(clone_mode).strip().lower() not in SUPPORTED_VOXCPM_CLONE_MODES:
@@ -163,6 +178,26 @@ class SettingsService:
                 "voxcpm_clone_mode must be one of: "
                 + ", ".join(sorted(SUPPORTED_VOXCPM_CLONE_MODES))
             )
+        alignment_mode = values.get("asr_alignment_mode")
+        if alignment_mode is not None:
+            mode = str(alignment_mode).strip().lower()
+            if mode not in SUPPORTED_ASR_ALIGNMENT_MODES:
+                raise ValueError(
+                    "asr_alignment_mode must be one of: "
+                    + ", ".join(sorted(SUPPORTED_ASR_ALIGNMENT_MODES))
+                )
+            values["asr_alignment_mode"] = mode
+
+        for flag in (
+            "sparse_asr_enabled",
+            "tts_session_reuse_enabled",
+            "tts_micro_batch_enabled",
+            "vad_adaptive_enabled",
+            "vad_neural_fallback_enabled",
+        ):
+            if values.get(flag) is not None:
+                values[flag] = bool(values[flag])
+
         if values.get("exact_timing_tolerance_ms") is not None:
             try:
                 tolerance_ms = float(values["exact_timing_tolerance_ms"])
@@ -175,7 +210,66 @@ class SettingsService:
                 max_stretch = float(values["exact_timing_max_stretch"])
             except (TypeError, ValueError) as error:
                 raise ValueError("exact_timing_max_stretch must be a number.") from error
-            values["exact_timing_max_stretch"] = max(1.0, min(3.0, max_stretch))
+            values["exact_timing_max_stretch"] = max(1.0, min(1.2, max_stretch))
+
+        if values.get("exact_timing_max_safe_stretch") is not None:
+            try:
+                safe_stretch = float(values["exact_timing_max_safe_stretch"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("exact_timing_max_safe_stretch must be a number.") from error
+            values["exact_timing_max_safe_stretch"] = max(1.0, min(1.35, safe_stretch))
+
+        if values.get("sparse_asr_min_silence_ratio") is not None:
+            try:
+                silence_ratio = float(values["sparse_asr_min_silence_ratio"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("sparse_asr_min_silence_ratio must be a number.") from error
+            values["sparse_asr_min_silence_ratio"] = max(0.0, min(0.95, silence_ratio))
+
+        if values.get("sparse_asr_chunk_sec") is not None:
+            try:
+                chunk_sec = int(values["sparse_asr_chunk_sec"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("sparse_asr_chunk_sec must be an integer.") from error
+            values["sparse_asr_chunk_sec"] = max(5, min(120, chunk_sec))
+
+        if values.get("sparse_asr_padding_ms") is not None:
+            try:
+                padding_ms = int(values["sparse_asr_padding_ms"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("sparse_asr_padding_ms must be an integer.") from error
+            values["sparse_asr_padding_ms"] = max(0, min(1000, padding_ms))
+
+        if values.get("gpu_model_idle_timeout_sec") is not None:
+            try:
+                idle_sec = float(values["gpu_model_idle_timeout_sec"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("gpu_model_idle_timeout_sec must be a number.") from error
+            values["gpu_model_idle_timeout_sec"] = max(0.0, min(3600.0, idle_sec))
+
+        for flag in ("gpu_keep_warm_enabled",):
+            if values.get(flag) is not None:
+                values[flag] = bool(values[flag])
+
+        if values.get("gpu_max_resident_models") is not None:
+            try:
+                max_models = int(values["gpu_max_resident_models"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("gpu_max_resident_models must be an integer.") from error
+            values["gpu_max_resident_models"] = max(1, min(4, max_models))
+
+        if values.get("tts_conversion_strategy") is not None:
+            candidate = str(values["tts_conversion_strategy"]).strip().lower()
+            if candidate not in {"per_segment", "lazy_mix"}:
+                raise ValueError("tts_conversion_strategy must be one of: per_segment, lazy_mix")
+            values["tts_conversion_strategy"] = candidate
+
+        if values.get("telemetry_max_file_mb") is not None:
+            try:
+                max_mb = float(values["telemetry_max_file_mb"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("telemetry_max_file_mb must be a number.") from error
+            values["telemetry_max_file_mb"] = max(0.0, min(1024.0, max_mb))
 
         subtitle_position = values.get("subtitle_position")
         if subtitle_position is not None:

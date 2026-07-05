@@ -2,12 +2,27 @@
 .runtime.warning i{background:#f2ba5b}.runtime.blocked i{background:#f16f7e}
 button:disabled{cursor:not-allowed;opacity:.45}
 .overlay{position:fixed;inset:0;background:#080a0dcc;display:flex;justify-content:flex-end;z-index:10}
-.runtime-panel{width:min(520px,100%);height:100%;background:#12151c;border-left:1px solid #303746;padding:28px;overflow:auto}
+.runtime-panel{width:min(520px,100%);max-width:100vw;height:100%;background:#12151c;border-left:1px solid #303746;padding:28px;overflow:auto}
 .runtime-head{display:flex;justify-content:space-between;gap:18px}.runtime-head p{color:#8170ff;font-weight:600;margin:0 0 5px}.runtime-head h2{margin:0 0 5px;text-transform:capitalize}.runtime-head small{color:#7e8798}.runtime-head button{background:transparent;color:#9098a9}
 .runtime-checks{display:grid;gap:10px;margin:28px 0}.runtime-check{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;border:1px solid #2c3340;border-radius:12px;padding:14px;align-items:start;background:#141820}.runtime-check.ready{border-color:#275542;background:#111b19}.runtime-check.warning{border-color:#5a4827;background:#1b1711}.runtime-check.optional{border-color:#3c4561;background:#151925}.runtime-check.blocked{border-color:#61323d;background:#1d1518}.runtime-check strong{font-size:14px}.runtime-check p{font-size:13px;margin:6px 0 4px;color:#a7afbd}.runtime-check small{font-size:12px;color:#747e90}
 .runtime-check-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.runtime-kind{border:1px solid #344057;border-radius:999px;padding:3px 7px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;color:#aab5c8;background:#19202c}.runtime-kind.required{color:#dfe7f7;border-color:#46536d}.runtime-kind.optional{color:#c2cdf2;border-color:#414f86;background:#181d33}.runtime-status-pill{border-radius:999px;padding:5px 8px;font-size:10px;text-transform:uppercase;font-style:normal;font-weight:800;letter-spacing:.03em;white-space:nowrap;color:#929aaa;background:#1a202b}.runtime-status-pill.ready{color:#68e6a6;background:#123023}.runtime-status-pill.warning{color:#ffd27a;background:#352812}.runtime-status-pill.optional{color:#aebdff;background:#202747}.runtime-status-pill.blocked{color:#ff98a6;background:#3b1720}
 .check-icon{display:grid;place-items:center;width:32px;height:32px;border-radius:999px;color:#5bdd9a;background:#123023}.check-icon.warning{color:#f2ba5b;background:#352812}.check-icon.optional{color:#aebdff;background:#202747}.check-icon.blocked{color:#f16f7e;background:#3b1720}
-.smoke-button{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:13px;border-radius:10px;background:#7258f6;font-weight:600}
+.smoke-button{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:13px;border-radius:10px;background:#7258f6;font-weight:600;white-space:nowrap}
+.runtime-resource-card{display:grid;gap:12px;margin-top:22px;padding:16px;border-radius:14px;border:1px solid #35415a;background:#151b27}
+.runtime-resource-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
+.runtime-resource-head strong{display:block;font-size:15px}
+.runtime-resource-head small{display:block;margin-top:4px;color:#8d97a8}
+.runtime-resource-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 14px;font-size:13px;color:#a7afbd}
+.runtime-resource-list{display:grid;gap:6px}
+.runtime-resource-list strong{font-size:13px}
+.runtime-resource-list ul{margin:0;padding-left:18px;color:#8d97a8;font-size:12px;display:grid;gap:4px}
+.runtime-resource-actions{display:grid;gap:8px}
+.runtime-resource-actions small{font-size:12px;color:#7c8698}
+.runtime-resource-note{font-size:12px;color:#aebdff;background:#1c2340;border:1px solid #394374;border-radius:10px;padding:10px 12px}
+.runtime-empty-state{display:grid;gap:12px;margin-top:24px;padding:18px;border:1px dashed #35415a;border-radius:14px;background:#151b27}
+.runtime-empty-state p{margin:0;font-size:14px;color:#dfe7f7}
+.runtime-empty-state small{color:#8d97a8}
+.drawer-tab-btn{white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis}
 
 /* Setup Wizard Styles */
 .wizard-container {

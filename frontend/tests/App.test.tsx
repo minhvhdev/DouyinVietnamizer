@@ -9,13 +9,17 @@ vi.mock("../src/lib/tauri-bridge", async () => {
     ...actual,
     waitForBackend: vi.fn().mockResolvedValue("http://127.0.0.1:8765"),
     subscribeBackendEvents: vi.fn().mockReturnValue(() => {}),
+    invokeRestart: vi.fn().mockResolvedValue(undefined),
     invokeOpenDevtools: vi.fn().mockResolvedValue(undefined),
+    invokeOpenFolder: vi.fn().mockResolvedValue(undefined),
   };
 });
 
 const job = {
   id: "job-1",
-  source_url: "https://v.douyin.com/demo/",
+  source_url: "import://demo.mp4",
+  title: "demo",
+  title_vi: null,
   status: "queued",
   current_step: null,
   created_at: "2026-06-13T00:00:00Z",
@@ -36,15 +40,17 @@ import { JobsApi } from "../src/shared/contracts";
 const baseApi: JobsApi = {
   listJobs: vi.fn().mockResolvedValue([]),
   createJob: vi.fn().mockResolvedValue(job),
+  selectVideo: vi.fn().mockResolvedValue({ status: "selected", video: {} }),
+  updateYtDlp: vi.fn().mockResolvedValue({ status: "updated", version: "2026.01.01", previous_version: "2025.01.01", method: "binary_replace" }),
   importJob: vi.fn().mockResolvedValue(job),
     bootstrapPyannote: vi.fn().mockResolvedValue({ status: "started" }),
 
   runtimeStatus: vi.fn().mockResolvedValue(readyRuntime),
   runSmokeTest: vi.fn().mockResolvedValue(readyRuntime),
+  releaseVram: vi.fn().mockResolvedValue({ status: "ok", released: [], terminated_processes: [], errors: [], gpu: { cuda_supported: false, active_voxcpm_clients: 0, resident_models: [], helper_processes: [] } }),
   startJob: vi.fn().mockResolvedValue({ status: "started" }),
   cancelJob: vi.fn().mockResolvedValue({ status: "cancelled" }),
   deleteJob: vi.fn().mockResolvedValue({ status: "deleted" }),
-  selectVideo: vi.fn().mockResolvedValue({ status: "selected" }),
   getCheckpoint: vi.fn().mockResolvedValue(null),
   getSettings: vi.fn().mockResolvedValue({}),
   updateSettings: vi.fn().mockResolvedValue({}),
@@ -58,6 +64,7 @@ const baseApi: JobsApi = {
   rerunJob: vi.fn().mockResolvedValue({ status: "queued", job }),
   redubJob: vi.fn().mockResolvedValue({ status: "queued", job }),
   getJobFiles: vi.fn().mockResolvedValue([]),
+  getJobFolder: vi.fn().mockResolvedValue({ path: "C:/data/jobs/job-1", exists: true }),
   detectHardware: vi.fn().mockResolvedValue({ cuda_supported: true, vulkan_supported: true, avx2_supported: true, espeak_installed: true, recommendation: "gpu_cuda" }),
   bootstrapVendor: vi.fn().mockResolvedValue({ status: "started" }),
   bootstrapProgress: vi.fn().mockResolvedValue({ status: "idle", current_task: "", download_percent: 0, download_speed_kb: 0, downloaded_bytes: 0, total_bytes: 0, error_message: "", logs: [] })
@@ -99,24 +106,82 @@ test("shows an actionable backend connection error", async () => {
   expect(screen.getByText(/kiểm tra nhật ký hoạt động hoặc cấu hình/i)).toBeInTheDocument();
 });
 
-test("creates a job and shows it on the dashboard", async () => {
-  const api: JobsApi = { ...baseApi, listJobs: vi.fn().mockResolvedValue([]), createJob: vi.fn().mockResolvedValue(job) };
+test("creates a job from a local video file", async () => {
+  const importJob = vi.fn().mockResolvedValue(job);
+  const api: JobsApi = { ...baseApi, listJobs: vi.fn().mockResolvedValue([]), importJob };
   render(<App api={api} />);
 
-  fireEvent.change(await screen.findByPlaceholderText(/Dán liên kết video hoặc kênh Douyin/), {
-    target: { value: job.source_url }
-  });
-  fireEvent.click(screen.getByRole("button", { name: "Tạo tiến trình" }));
+  const file = new File(["video-bytes"], "demo.mp4", { type: "video/mp4" });
+  const input = await screen.findByLabelText(/Chọn video từ máy tính/i);
+  fireEvent.change(input, { target: { files: [file] } });
+  const form = input.closest("form");
+  expect(form).not.toBeNull();
+  fireEvent.submit(form!);
 
-  await waitFor(() => expect(screen.getByText(job.source_url)).toBeInTheDocument());
+  await waitFor(() => expect(importJob).toHaveBeenCalledWith(file));
+  expect(await screen.findByText("demo")).toBeInTheDocument();
   expect(screen.queryByText("Chi tiết tiến trình")).not.toBeInTheDocument();
 });
+
+test("creates jobs from multiple local video files", async () => {
+  const importJob = vi.fn()
+    .mockResolvedValueOnce({ ...job, id: "job-1", title: "demo-a" })
+    .mockResolvedValueOnce({ ...job, id: "job-2", title: "demo-b" });
+  const api: JobsApi = { ...baseApi, listJobs: vi.fn().mockResolvedValue([]), importJob };
+  render(<App api={api} />);
+
+  const files = [
+    new File(["video-a"], "demo-a.mp4", { type: "video/mp4" }),
+    new File(["video-b"], "demo-b.mp4", { type: "video/mp4" }),
+  ];
+  const input = await screen.findByLabelText(/Chọn video từ máy tính/i);
+  fireEvent.change(input, { target: { files } });
+  fireEvent.submit(input.closest("form")!);
+
+  await waitFor(() => expect(importJob).toHaveBeenCalledTimes(2));
+  expect(importJob).toHaveBeenNthCalledWith(1, files[0]);
+  expect(importJob).toHaveBeenNthCalledWith(2, files[1]);
+  expect(await screen.findByText("demo-a")).toBeInTheDocument();
+  expect(await screen.findByText("demo-b")).toBeInTheDocument();
+});
+
+test("creates a job from a douyin link", async () => {
+  const createJob = vi.fn().mockResolvedValue({ ...job, source_url: "https://www.douyin.com/video/123" });
+  const api: JobsApi = { ...baseApi, listJobs: vi.fn().mockResolvedValue([]), createJob };
+  render(<App api={api} />);
+
+  const input = await screen.findByLabelText(/Dán liên kết video Douyin hoặc Bilibili/i);
+  fireEvent.change(input, { target: { value: "https://www.douyin.com/video/123" } });
+  fireEvent.submit(input.closest("form")!);
+
+  await waitFor(() => expect(createJob).toHaveBeenCalledWith("https://www.douyin.com/video/123"));
+});
+
+test("job details shows live elapsed time for running steps", async () => {
+  const dateNow = vi.spyOn(Date, "now").mockReturnValue(new Date("2026-06-13T00:00:05Z").getTime());
+  try {
+    const runningJob = {
+      ...job,
+      status: "running",
+      steps: [{ name: "asr", position: 0, status: "running", started_at: "2026-06-13T00:00:00Z", duration_ms: null }]
+    };
+    const api: JobsApi = { ...baseApi, listJobs: vi.fn().mockResolvedValue([runningJob]) };
+    render(<App api={api} />);
+
+    fireEvent.click(await screen.findByText("demo"));
+
+    expect(await screen.findByText(/Thời gian: 5.0 s/)).toBeInTheDocument();
+  } finally {
+    dateNow.mockRestore();
+  }
+});
+
 
 test("job details opens only by click and closes without leaving selection active", async () => {
   const api: JobsApi = { ...baseApi, listJobs: vi.fn().mockResolvedValue([job]) };
   const { container } = render(<App api={api} />);
 
-  fireEvent.click(await screen.findByText(job.source_url));
+  fireEvent.click(await screen.findByText("demo"));
   expect(await screen.findByText("Chi tiết tiến trình")).toBeInTheDocument();
 
   fireEvent.click(screen.getByLabelText("Close job details"));
@@ -137,11 +202,11 @@ test("deletes completed jobs from the dashboard", async () => {
   };
   render(<App api={api} />);
 
-  expect(await screen.findByText(job.source_url)).toBeInTheDocument();
+  expect(await screen.findByText("demo")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: `Xóa tiến trình ${job.id}` }));
 
   await waitFor(() => expect(deleteJob).toHaveBeenCalledWith(job.id));
-  await waitFor(() => expect(screen.queryByText(job.source_url)).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.queryByText("demo")).not.toBeInTheDocument());
 });
 
 test("shows runtime checks and reruns the smoke test", async () => {
@@ -149,7 +214,7 @@ test("shows runtime checks and reruns the smoke test", async () => {
   const api: JobsApi = { ...baseApi, listJobs: vi.fn().mockResolvedValue([]), runtimeStatus: vi.fn().mockResolvedValue(warning), runSmokeTest: vi.fn().mockResolvedValue(readyRuntime) };
   render(<App api={api} />);
 
-  fireEvent.click(await screen.findByRole("button", { name: /Môi trường/ }));
+  fireEvent.click(await screen.findByRole("button", { name: /Môi trường:/i }));
   expect(screen.getByText("Install the tool under vendor/ or add it to PATH, then retry.")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Chạy thử nghiệm hệ thống" }));
 
@@ -157,12 +222,41 @@ test("shows runtime checks and reruns the smoke test", async () => {
   expect(await screen.findByText("Đã sẵn sàng")).toBeInTheDocument();
 });
 
-test("shows environment setup wizard when runtime is blocked", async () => {
-  const blocked = { ...readyRuntime, status: "blocked" };
-  const api: JobsApi = { ...baseApi, listJobs: vi.fn().mockResolvedValue([]), runtimeStatus: vi.fn().mockResolvedValue(blocked) };
+test("opens the runtime panel and retries when the first status fetch fails", async () => {
+  const runtimeStatus = vi.fn()
+    .mockRejectedValueOnce(new Error("Backend unavailable"))
+    .mockResolvedValueOnce(readyRuntime);
+  const api: JobsApi = {
+    ...baseApi,
+    listJobs: vi.fn().mockResolvedValue([]),
+    runtimeStatus,
+  };
   render(<App api={api} />);
 
-  expect(await screen.findByText("Thiết lập môi trường ứng dụng")).toBeInTheDocument();
+  const button = await screen.findByRole("button", { name: /Môi trường:/i });
+  fireEvent.click(button);
+
+  expect(await screen.findByText("Môi trường thực thi")).toBeInTheDocument();
+  await waitFor(() => expect(runtimeStatus).toHaveBeenCalledTimes(2));
+  expect(await screen.findByText("Local storage is writable.")).toBeInTheDocument();
+});
+
+test("keeps the main app visible when runtime stays blocked", async () => {
+  const blocked = {
+    ...readyRuntime,
+    status: "blocked",
+    checks: [{ ...readyRuntime.checks[0], status: "blocked", message: "Portable runtime check failed.", action: "Open diagnostics." }]
+  };
+  const api: JobsApi = {
+    ...baseApi,
+    listJobs: vi.fn().mockResolvedValue([]),
+    runtimeStatus: vi.fn().mockResolvedValue(blocked),
+    runSmokeTest: vi.fn().mockResolvedValue(blocked)
+  };
+  render(<App api={api} />);
+
+  expect(await screen.findByText("Bảng điều khiển tiến trình")).toBeInTheDocument();
+  expect(screen.queryByText("Thiết lập môi trường ứng dụng")).not.toBeInTheDocument();
 });
 
 test("runtime panel distinguishes required and optional warnings", async () => {
@@ -178,7 +272,7 @@ test("runtime panel distinguishes required and optional warnings", async () => {
   const api: JobsApi = { ...baseApi, listJobs: vi.fn().mockResolvedValue([]), runtimeStatus: vi.fn().mockResolvedValue(warning) };
   render(<App api={api} />);
 
-  fireEvent.click(await screen.findByRole("button", { name: /Môi trường/ }));
+  fireEvent.click(await screen.findByRole("button", { name: /Môi trường:/i }));
 
   expect(await screen.findByText("FFmpeg")).toBeInTheDocument();
   expect(screen.getAllByText("Bắt buộc").length).toBeGreaterThan(0);
@@ -187,11 +281,34 @@ test("runtime panel distinguishes required and optional warnings", async () => {
   expect(screen.getByText("Thiếu tuỳ chọn")).toBeInTheDocument();
 });
 
-test("shows translation and VoxCPM2 settings with browser cookie disclosure", async () => {
+test("shows the VRAM summary on the sidebar button", async () => {
+  const runtimeWithGpu = {
+    ...readyRuntime,
+    gpu: {
+      cuda_supported: true,
+      device_name: "NVIDIA GeForce RTX 5060",
+      total_vram_mb: 8192,
+      used_vram_mb: 1126.4,
+      free_vram_mb: 7065.6,
+      torch_allocated_mb: 0,
+      torch_reserved_mb: 0,
+      torch_peak_mb: 0,
+      active_voxcpm_clients: 0,
+      resident_models: [],
+      helper_processes: []
+    }
+  };
+  const api: JobsApi = { ...baseApi, listJobs: vi.fn().mockResolvedValue([]), runtimeStatus: vi.fn().mockResolvedValue(runtimeWithGpu) };
+  render(<App api={api} />);
+
+  expect(await screen.findByText("Môi trường: Đủ")).toBeInTheDocument();
+  expect(await screen.findByText("VRAM 1.10 GB / 8.00 GB")).toBeInTheDocument();
+});
+
+test("shows translation and VoxCPM2 settings", async () => {
   const api: JobsApi = {
     ...baseApi,
     getSettings: vi.fn().mockResolvedValue({
-      cookies_browser: "none",
       translation_backend: "google_free",
       tts_backend: "voxcpm",
     })
@@ -200,8 +317,7 @@ test("shows translation and VoxCPM2 settings with browser cookie disclosure", as
 
   fireEvent.click(await screen.findByRole("button", { name: "Cài đặt" }));
 
-  expect((await screen.findAllByText("Google Dịch Miễn Phí")).length).toBeGreaterThan(0);
-  expect(await screen.findByText(/cookie dùng cho yt-dlp/i)).toBeInTheDocument();
+  expect(await screen.findByText("Dịch thuật")).toBeInTheDocument();
   expect(await screen.findByText("Lồng tiếng VoxCPM2")).toBeInTheDocument();
 });
 
@@ -220,7 +336,6 @@ test("manages Gemini API key pool from settings", async () => {
     ...baseApi,
     updateSettings,
     getSettings: vi.fn().mockResolvedValue({
-      cookies_browser: "none",
       translation_backend: "gemini",
       tts_backend: "voxcpm",
       gemini_api_keys: [{ id: "key-1", masked: "AIza...7890", label: "Studio quota 1" }],
@@ -262,7 +377,6 @@ test("saves a pending Gemini key when saving settings", async () => {
     ...baseApi,
     updateSettings,
     getSettings: vi.fn().mockResolvedValue({
-      cookies_browser: "none",
       translation_backend: "gemini",
       tts_backend: "voxcpm",
       gemini_api_keys: []
@@ -293,7 +407,6 @@ test("does not resend stale Gemini key command fields from settings", async () =
     ...baseApi,
     updateSettings,
     getSettings: vi.fn().mockResolvedValue({
-      cookies_browser: "none",
       translation_backend: "gemini",
       tts_backend: "voxcpm",
       gemini_api_keys: [],

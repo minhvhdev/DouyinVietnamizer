@@ -1,7 +1,7 @@
 """Client for the long-lived VoxCPM2 worker.
 
 The client is responsible for:
-* Locating the Python executable in the isolated ``.venv-voxcpm``.
+* Locating the Python executable for the JSONL worker process.
 * Spawning the worker subprocess and managing its lifecycle.
 * Forwarding synthesize requests and reading responses.
 * Re-spawning the worker transparently if it dies (e.g. OOM, crash).
@@ -27,7 +27,7 @@ from ..voxcpm_env import resolve_voxcpm_python
 WORKER_SCRIPT = "dv_backend.adapters.voxcpm_worker"
 DEFAULT_MAX_BATCH = 4
 DEFAULT_FLUSH_MS = 150
-PROCESS_READY_TIMEOUT_SEC = 120.0
+PROCESS_READY_TIMEOUT_SEC = 600.0
 RESPONSE_QUEUE_GET_TIMEOUT_SEC = 0.1
 STARTUP_PING_TIMEOUT_SEC = 30.0
 IDLE_SHUTDOWN_SEC = 300.0
@@ -69,6 +69,7 @@ class VoxCPMWorkerClient:
         self._lock = threading.Lock()
         self._write_lock = threading.Lock()
         self._pending: dict[str, queue.Queue] = {}
+        self._response_queues: dict[str, queue.Queue] = {}
         self._pending_lock = threading.Lock()
         self._reader_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
@@ -127,7 +128,7 @@ class VoxCPMWorkerClient:
                 ErrorInfo(
                     code="VOXCPM_NOT_INSTALLED",
                     message="VoxCPM environment is not installed.",
-                    action="Run 'python scripts/setup_voxcpm.py' in the backend folder.",
+                    action="Run 'python scripts/setup_voxcpm.py' and install voxcpm2-cli from llama.cpp-omni.",
                     detail=str(exc),
                 ),
             ) from exc
@@ -154,6 +155,17 @@ class VoxCPMWorkerClient:
         self._wait_ready()
         self._last_used = time.perf_counter()
 
+    def _terminate_proc(self) -> None:
+        proc = self._proc
+        self._proc = None
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None:
+                proc.kill()
+        except Exception:
+            pass
+
     def _wait_ready(self) -> None:
         if self._proc is None:
             return
@@ -169,24 +181,35 @@ class VoxCPMWorkerClient:
                 self._proc.stdin.write(message)
                 self._proc.stdin.flush()
         except Exception as exc:  # noqa: BLE001
-            self._drain_pending_with_error(
-                request_id,
-                code="VOXCPM_TTS_FAILED",
-                message="Worker did not respond to startup ping.",
-                detail=str(exc),
-                retryable=True,
-            )
-            return
+            with self._pending_lock:
+                self._pending.pop(request_id, None)
+            self._terminate_proc()
+            raise AppError(
+                502,
+                ErrorInfo(
+                    code="VOXCPM_TTS_FAILED",
+                    message="Worker did not respond to startup ping.",
+                    detail=str(exc),
+                    retryable=True,
+                ),
+            ) from exc
         try:
-            q.get(timeout=max(1.0, deadline - time.perf_counter()))
-        except queue.Empty:
-            self._drain_pending_with_error(
-                request_id,
-                code="VOXCPM_TTS_FAILED",
-                message="VoxCPM worker failed to start within timeout.",
-                retryable=True,
-            )
-            return
+            response = q.get(timeout=max(1.0, deadline - time.perf_counter()))
+        except queue.Empty as exc:
+            with self._pending_lock:
+                self._pending.pop(request_id, None)
+            self._terminate_proc()
+            raise AppError(
+                502,
+                ErrorInfo(
+                    code="VOXCPM_TTS_FAILED",
+                    message="VoxCPM worker failed to start within timeout.",
+                    retryable=True,
+                ),
+            ) from exc
+        if not response.get("ok"):
+            self._terminate_proc()
+            self._raise_worker_error(response)
 
     def _drain_pending_with_error(self, request_id: str, *, code: str, message: str, detail: str | None = None, retryable: bool = True) -> None:
         with self._pending_lock:
@@ -300,7 +323,7 @@ class VoxCPMWorkerClient:
             except Exception:
                 pass
 
-    def synthesize(
+    def _build_synthesize_request(
         self,
         *,
         text: str,
@@ -314,7 +337,7 @@ class VoxCPMWorkerClient:
         reference_wav_path: str | None = None,
         anchor_text: str | None = None,
         mode: str = "design",
-    ) -> dict[str, Any]:
+    ) -> tuple[str, dict[str, Any], queue.Queue]:
         output_path = Path(output_path)
         if not text or not text.strip():
             raise AppError(
@@ -325,14 +348,8 @@ class VoxCPMWorkerClient:
                     action="Verify translation output for this segment.",
                 ),
             )
-        self._ensure_alive()
-        self._keep_alive()
-
         request_id = f"req-{uuid.uuid4().hex}"
         response_q: queue.Queue = queue.Queue(maxsize=1)
-        with self._pending_lock:
-            self._pending[request_id] = response_q
-
         request: dict[str, Any] = {
             "id": request_id,
             "op": "synthesize",
@@ -351,14 +368,66 @@ class VoxCPMWorkerClient:
         }
         if cache_key:
             request["cache_key"] = cache_key
+        return request_id, request, response_q
+
+    def submit(
+        self,
+        *,
+        text: str,
+        output_path: Path,
+        prompt_wav_path: str | None,
+        prompt_text: str | None,
+        voice_design: str | None,
+        cfg_value: float,
+        inference_timesteps: int,
+        cache_key: str | None = None,
+        reference_wav_path: str | None = None,
+        anchor_text: str | None = None,
+        mode: str = "design",
+    ) -> str:
+        return self.submit_batch(
+            [
+                {
+                    "text": text,
+                    "output_path": output_path,
+                    "prompt_wav_path": prompt_wav_path,
+                    "prompt_text": prompt_text,
+                    "voice_design": voice_design,
+                    "cfg_value": cfg_value,
+                    "inference_timesteps": inference_timesteps,
+                    "cache_key": cache_key,
+                    "reference_wav_path": reference_wav_path,
+                    "anchor_text": anchor_text,
+                    "mode": mode,
+                }
+            ]
+        )[0]
+
+    def submit_batch(self, requests: list[dict[str, Any]]) -> list[str]:
+        if not requests:
+            return []
+        self._ensure_alive()
+        self._keep_alive()
+        entries = [self._build_synthesize_request(**request) for request in requests]
+        if len(entries) > 1:
+            for _request_id, request, _response_q in entries:
+                request["batch_size_hint"] = len(entries)
+        request_ids = [entry[0] for entry in entries]
+        with self._pending_lock:
+            for request_id, _request, response_q in entries:
+                self._pending[request_id] = response_q
+                self._response_queues[request_id] = response_q
         try:
             assert self._proc is not None and self._proc.stdin is not None
             with self._write_lock:
-                self._proc.stdin.write(_json_line(request))
+                for _request_id, request, _response_q in entries:
+                    self._proc.stdin.write(_json_line(request))
                 self._proc.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
             with self._pending_lock:
-                self._pending.pop(request_id, None)
+                for request_id in request_ids:
+                    self._pending.pop(request_id, None)
+                    self._response_queues.pop(request_id, None)
             raise AppError(
                 502,
                 ErrorInfo(
@@ -369,25 +438,9 @@ class VoxCPMWorkerClient:
                     retryable=True,
                 ),
             ) from exc
+        return request_ids
 
-        try:
-            response = response_q.get(timeout=PROCESS_READY_TIMEOUT_SEC)
-        except queue.Empty:
-            with self._pending_lock:
-                self._pending.pop(request_id, None)
-            raise AppError(
-                504,
-                ErrorInfo(
-                    code="VOXCPM_TIMEOUT",
-                    message="VoxCPM worker did not respond within the expected time.",
-                    action="Check the worker log and GPU availability, then retry.",
-                    retryable=True,
-                ),
-            )
-
-        self._last_used = time.perf_counter()
-        if response.get("ok"):
-            return response
+    def _raise_worker_error(self, response: dict[str, Any]) -> None:
         code = response.get("code") or "VOXCPM_TTS_FAILED"
         if code == "VOXCPM_BAD_REQUEST":
             raise AppError(
@@ -413,6 +466,75 @@ class VoxCPMWorkerClient:
                 retryable=bool(response.get("retryable", True)),
             ),
         )
+
+    def wait(self, request_id: str) -> dict[str, Any]:
+        with self._pending_lock:
+            response_q = self._response_queues.get(request_id)
+        if response_q is None:
+            raise AppError(
+                504,
+                ErrorInfo(
+                    code="VOXCPM_TIMEOUT",
+                    message="VoxCPM worker response queue is missing.",
+                    action="Retry the TTS step.",
+                    retryable=True,
+                ),
+            )
+        try:
+            response = response_q.get(timeout=PROCESS_READY_TIMEOUT_SEC)
+        except queue.Empty:
+            with self._pending_lock:
+                self._pending.pop(request_id, None)
+                self._response_queues.pop(request_id, None)
+            raise AppError(
+                504,
+                ErrorInfo(
+                    code="VOXCPM_TIMEOUT",
+                    message="VoxCPM worker did not respond within the expected time.",
+                    action="Check the worker log and GPU availability, then retry.",
+                    retryable=True,
+                ),
+            )
+        with self._pending_lock:
+            self._response_queues.pop(request_id, None)
+        self._last_used = time.perf_counter()
+        if response.get("ok"):
+            return response
+        self._raise_worker_error(response)
+        return response
+
+    def wait_batch(self, request_ids: list[str]) -> list[dict[str, Any]]:
+        return [self.wait(request_id) for request_id in request_ids]
+
+    def synthesize(
+        self,
+        *,
+        text: str,
+        output_path: Path,
+        prompt_wav_path: str | None,
+        prompt_text: str | None,
+        voice_design: str | None,
+        cfg_value: float,
+        inference_timesteps: int,
+        cache_key: str | None = None,
+        reference_wav_path: str | None = None,
+        anchor_text: str | None = None,
+        mode: str = "design",
+    ) -> dict[str, Any]:
+        request_id = self.submit(
+            text=text,
+            output_path=output_path,
+            prompt_wav_path=prompt_wav_path,
+            prompt_text=prompt_text,
+            voice_design=voice_design,
+            reference_wav_path=reference_wav_path,
+            anchor_text=anchor_text,
+            mode=mode,
+            cfg_value=cfg_value,
+            inference_timesteps=inference_timesteps,
+            cache_key=cache_key,
+        )
+        return self.wait(request_id)
 
     def close(self) -> None:
         with self._lock:
@@ -448,13 +570,13 @@ def acquire_client(
     model: str,
     device: str,
     num_steps: int,
+    max_batch: int = DEFAULT_MAX_BATCH,
+    flush_ms: int = DEFAULT_FLUSH_MS,
 ) -> "VoxCPMWorkerClient":
-    """Return a shared worker client keyed by (model, device, num_steps).
-
-    A single worker is reused across segments that share the same
-    (model, device, num_steps) tuple so the GPU model stays hot.
-    """
-    key = f"{model}|{device}|{int(num_steps)}"
+    """Return a shared worker client keyed by runtime and batch settings."""
+    max_batch = max(1, int(max_batch or DEFAULT_MAX_BATCH))
+    flush_ms = max(20, int(flush_ms or DEFAULT_FLUSH_MS))
+    key = f"{model}|{device}|{int(num_steps)}|batch={max_batch}|flush={flush_ms}"
     with _client_lock:
         client = _clients.get(key)
         if client is None:
@@ -463,6 +585,8 @@ def acquire_client(
                 model=model,
                 device=device,
                 num_steps=num_steps,
+                max_batch=max_batch,
+                flush_ms=flush_ms,
             )
             _clients[key] = client
         return client
@@ -474,3 +598,18 @@ def release_all_clients() -> None:
         _clients.clear()
     for client in clients:
         client.close()
+
+
+def client_debug_snapshot() -> dict[str, object]:
+    with _client_lock:
+        items = [
+            {
+                "key": key,
+                "closed": client._closed,
+            }
+            for key, client in sorted(_clients.items())
+        ]
+    return {
+        "count": len(items),
+        "clients": items,
+    }

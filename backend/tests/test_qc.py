@@ -23,6 +23,9 @@ def test_qc_writes_json_and_html_reports(tmp_path: Path) -> None:
             "repaired_method": "time_stretch_1.2x",
             "duration_budget": 1.0,
             "repaired_duration": 1.1,
+            "time_stretch_factor": 1.2,
+            "duration_repair_risk": "allowed",
+            "tail_speech_detected": False,
         }]
     })
     save_checkpoint(tmp_path, job_id, "render", {"output_path": str(output)})
@@ -30,6 +33,11 @@ def test_qc_writes_json_and_html_reports(tmp_path: Path) -> None:
     report = qc_step(job_id, config, database, runner=None)
 
     assert report["warnings"]
+    assert report["duration_repair_distribution"]["time_stretch_1.2x"] == 1
+    assert report["stretch_factor_distribution"]["1.2"] == 1
+    assert report["risky_trim_count"] == 0
+    assert report["alignment_mode"] == "unknown"
+    assert report["tts_cache_hit_rate"] is None
     assert (tmp_path / "jobs" / job_id / "artifacts" / "qc_report.json").is_file()
     html = (tmp_path / "jobs" / job_id / "artifacts" / "qc_report.html").read_text(encoding="utf-8")
     assert "Douyin Vietnamizer QC Report" in html

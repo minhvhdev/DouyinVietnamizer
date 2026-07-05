@@ -1,4 +1,12 @@
-export type JobStep = { name: string; position: number; status: string; checkpoint_path?: string };
+export type JobStep = {
+  name: string;
+  position: number;
+  status: string;
+  checkpoint_path?: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  duration_ms?: number | null;
+};
 
 export type Job = {
   id: string;
@@ -33,16 +41,23 @@ export type OutputItem = {
   file_size: number;
 };
 
+export type JobFolder = {
+  path: string;
+  exists: boolean;
+};
+
 export type JobsApi = {
   listJobs(): Promise<Job[]>;
   createJob(sourceUrl: string): Promise<Job>;
+  selectVideo(jobId: string, index: number): Promise<{ status: string; video: Record<string, unknown> }>;
+  updateYtDlp(): Promise<{ status: string; version: string; previous_version: string; method: string }>;
   importJob(file: File, title?: string): Promise<Job>;
   runtimeStatus(): Promise<RuntimeReport>;
   runSmokeTest(): Promise<RuntimeReport>;
+  releaseVram(): Promise<ReleaseVramResult>;
   startJob(jobId: string): Promise<{ status: string }>;
   cancelJob(jobId: string): Promise<{ status: string }>;
   deleteJob(jobId: string): Promise<{ status: string }>;
-  selectVideo(jobId: string, index: number): Promise<{ status: string }>;
   getCheckpoint(jobId: string, stepName: string): Promise<any>;
   getSettings(): Promise<Record<string, any>>;
   updateSettings(payload: Record<string, any>): Promise<Record<string, any>>;
@@ -56,6 +71,7 @@ export type JobsApi = {
   rerunJob(jobId: string, keepSteps: string[]): Promise<{ status: string; job: Job }>;
   redubJob(jobId: string): Promise<{ status: string; job: Job }>;
   getJobFiles(jobId: string): Promise<any[]>;
+  getJobFolder(jobId: string): Promise<JobFolder>;
   detectHardware(): Promise<{ cuda_supported: boolean; vulkan_supported: boolean; avx2_supported: boolean; espeak_installed: boolean; recommendation: string }>;
   bootstrapVendor(profile: string): Promise<{ status: string }>;
   bootstrapPyannote(): Promise<{ status: string }>;
@@ -72,4 +88,24 @@ export type JobsApi = {
 };
 
 export type RuntimeCheck = { id: string; display_name: string; status: string; required: boolean; message: string; action: string; source?: string; version?: string; resolved_path?: string };
-export type RuntimeReport = { status: string; checked_at: string; checks: RuntimeCheck[] };
+export type RuntimeGpuStatus = {
+  cuda_supported: boolean;
+  device_name?: string | null;
+  total_vram_mb?: number | null;
+  used_vram_mb?: number | null;
+  free_vram_mb?: number | null;
+  torch_allocated_mb?: number | null;
+  torch_reserved_mb?: number | null;
+  torch_peak_mb?: number | null;
+  active_voxcpm_clients: number;
+  resident_models: string[];
+  helper_processes: string[];
+};
+export type RuntimeReport = { status: string; checked_at: string; checks: RuntimeCheck[]; gpu?: RuntimeGpuStatus | null };
+export type ReleaseVramResult = {
+  status: string;
+  released: string[];
+  terminated_processes: string[];
+  errors: string[];
+  gpu: RuntimeGpuStatus;
+};

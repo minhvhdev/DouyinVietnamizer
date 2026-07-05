@@ -12,10 +12,12 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import tempfile
 import threading
+import wave
 from pathlib import Path
 
-VOXCPM_CACHE_VERSION = "v4"
+VOXCPM_CACHE_VERSION = "v6-gguf"
 MODES = ("design", "reference", "ultimate")
 
 
@@ -30,12 +32,27 @@ def _normalize_mode(mode: str | None) -> str:
     return candidate
 
 
-def reference_audio_content_hash(path: str | os.PathLike | None) -> str:
-    """SHA-256 of the anchor audio file content.
+_REFERENCE_AUDIO_HASH_CACHE: dict[tuple[str, int, int], str] = {}
+_REFERENCE_AUDIO_HASH_LOCK = threading.Lock()
 
-    Returns an empty string when the path is missing or unreadable so the
-    cache key stays stable (and the entry is effectively non-reusable).
-    """
+
+def _reference_audio_cache_key(path: str | os.PathLike | None) -> tuple[str, int, int] | None:
+    if not path:
+        return None
+    p = Path(path)
+    try:
+        stat = p.stat()
+    except OSError:
+        return None
+    if not p.is_file():
+        return None
+    try:
+        resolved = str(p.resolve())
+    except OSError:
+        resolved = str(p.absolute())
+    return (resolved, int(stat.st_size), int(stat.st_mtime_ns))
+
+def _file_hash(path: str | os.PathLike | None) -> str:
     if not path:
         return ""
     p = Path(path)
@@ -51,6 +68,42 @@ def reference_audio_content_hash(path: str | os.PathLike | None) -> str:
     return h.hexdigest()
 
 
+def reference_audio_content_hash(path: str | os.PathLike | None) -> str:
+    """SHA-256 of the anchor audio file content, cached by path/size/mtime."""
+    key = _reference_audio_cache_key(path)
+    if key is None:
+        return ""
+    with _REFERENCE_AUDIO_HASH_LOCK:
+        cached = _REFERENCE_AUDIO_HASH_CACHE.get(key)
+    if cached is not None:
+        return cached
+    digest = _file_hash(path)
+    if digest:
+        with _REFERENCE_AUDIO_HASH_LOCK:
+            _REFERENCE_AUDIO_HASH_CACHE[key] = digest
+    return digest
+
+
+def reference_text_hash(text_or_path: str | os.PathLike | None) -> str:
+    if not text_or_path:
+        return ""
+    value = str(text_or_path)
+    path = Path(value)
+    if path.is_file():
+        return _file_hash(path)
+    return hashlib.sha256(_normalize_text(value).encode("utf-8")).hexdigest()
+
+
+def is_valid_wav(path: Path) -> bool:
+    try:
+        if not path.is_file() or path.stat().st_size <= 44:
+            return False
+        with wave.open(str(path), "rb") as handle:
+            return handle.getnframes() > 0 and handle.getframerate() > 0
+    except Exception:
+        return False
+
+
 def cache_key(
     *,
     voice_id: str,
@@ -61,6 +114,7 @@ def cache_key(
     cfg_value: float = 2.0,
     mode: str = "design",
     reference_wav_path: str | None = None,
+    reference_text: str | None = None,
     anchor_text: str | None = None,
 ) -> str:
     mode_norm = _normalize_mode(mode)
@@ -76,6 +130,7 @@ def cache_key(
             (voice_design or "").strip(),
             f"{float(cfg_value):.4f}",
             reference_audio_content_hash(reference_wav_path),
+            reference_text_hash(reference_text),
             anchor_norm,
         ]
     )
@@ -104,20 +159,28 @@ class VoxCPMCache:
         if not self.enabled or self.cache_dir is None:
             return None
         candidate = cache_path_for(self.cache_dir, key)
-        if candidate.is_file() and candidate.stat().st_size > 0:
+        if is_valid_wav(candidate):
             return candidate
         return None
 
     def put(self, key: str, source_path: Path) -> Path | None:
-        if not self.enabled or self.cache_dir is None:
+        if not self.enabled or self.cache_dir is None or not is_valid_wav(source_path):
             return None
         target = cache_path_for(self.cache_dir, key)
         with self._lock:
-            if target.is_file() and target.stat().st_size > 0:
+            if is_valid_wav(target):
                 return target
+            fd, temp_name = tempfile.mkstemp(dir=str(self.cache_dir), suffix=".tmp")
+            os.close(fd)
+            temp_path = Path(temp_name)
             try:
-                shutil.copy2(source_path, target)
+                shutil.copy2(source_path, temp_path)
+                if not is_valid_wav(temp_path):
+                    temp_path.unlink(missing_ok=True)
+                    return None
+                os.replace(temp_path, target)
             except OSError:
+                temp_path.unlink(missing_ok=True)
                 return None
         return target
 
@@ -128,6 +191,9 @@ class VoxCPMCache:
             return False
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(cached, destination)
+        if not is_valid_wav(destination):
+            destination.unlink(missing_ok=True)
+            return False
         return True
 
     def clear(self) -> None:

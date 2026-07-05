@@ -116,7 +116,15 @@ class GeminiTranslator:
         self.model = model
         self.request = request
 
-    def translate(self, texts: list[str], source: str, target: str) -> list[str]:
+    def translate(
+        self,
+        texts: list[str],
+        source: str,
+        target: str,
+        *,
+        duration_budgets: list[float] | None = None,
+        timing_guidance: list[dict[str, Any]] | None = None,
+    ) -> list[str]:
         if not self.key_pool.keys:
             raise AppError(
                 400,
@@ -127,11 +135,46 @@ class GeminiTranslator:
                 ),
             )
 
-        prompt = (
-            f"Translate this JSON array from {source} to {target}. "
-            "Return only a JSON array of translated strings in the same order.\n"
-            f"{json.dumps(texts, ensure_ascii=False)}"
-        )
+        if (
+            (duration_budgets and len(duration_budgets) == len(texts))
+            or (timing_guidance and len(timing_guidance) == len(texts))
+        ):
+            items = [
+                {
+                    "index": index,
+                    "text": text,
+                    **(
+                        {"duration_budget_sec": round(float(duration_budgets[index]), 2)}
+                        if duration_budgets and len(duration_budgets) == len(texts)
+                        else {}
+                    ),
+                    **(
+                        {
+                            key: value
+                            for key, value in (timing_guidance[index] or {}).items()
+                            if value is not None
+                        }
+                        if timing_guidance and len(timing_guidance) == len(texts)
+                        else {}
+                    ),
+                }
+                for index, text in enumerate(texts)
+            ]
+            prompt = (
+                f"Translate these items from {source} to {target} for natural Vietnamese dubbing. "
+                "Return only a JSON array of translated strings in the same order. "
+                "Treat duration_budget_sec as the timing budget when present. "
+                "Treat source_speech_units as source-side speech context only, not as a literal word-by-word translation target. "
+                "When target_vi_syllables and target_vi_syllable_range are present, aim for that Vietnamese spoken length before TTS while keeping the sentence natural. "
+                "Prefer staying within target_vi_syllable_range without dropping names, numbers, core meaning, or causal relationships.\n"
+                f"{json.dumps(items, ensure_ascii=False)}"
+            )
+        else:
+            prompt = (
+                f"Translate this JSON array from {source} to {target}. "
+                "Return only a JSON array of translated strings in the same order.\n"
+                f"{json.dumps(texts, ensure_ascii=False)}"
+            )
         payload = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {"responseMimeType": "application/json"},

@@ -8,7 +8,7 @@ from ..errors import AppError
 from ..models import ErrorInfo
 
 SUPPORTED_TTS_BACKENDS = ("voxcpm",)
-VOXCPM_DEFAULT_MODEL = "openbmb/VoxCPM2"
+VOXCPM_DEFAULT_MODEL = "gguf-q8"
 VOXCPM_INSTRUCT_PREFIX = "instruct:"
 VOXCPM_MODE_DESIGN = "design"
 VOXCPM_MODE_REFERENCE = "reference"
@@ -102,16 +102,13 @@ def _is_voxcpm_voice_clone(voice: str | None) -> bool:
 
 
 def resolve_voxcpm_model(model: str) -> str:
+    from ..voxcpm_gguf import normalize_voxcpm_model_id
+
     configured = (model or VOXCPM_DEFAULT_MODEL).strip() or VOXCPM_DEFAULT_MODEL
     path = Path(configured)
     if path.exists():
-        return str(path)
-    models_dir = os.environ.get("DV_MODELS_DIR", "").strip()
-    if configured == VOXCPM_DEFAULT_MODEL and models_dir:
-        bundled = Path(models_dir) / "voxcpm2" / "VoxCPM2"
-        if bundled.is_dir() and any(bundled.iterdir()):
-            return str(bundled)
-    return configured
+        return str(path.resolve())
+    return normalize_voxcpm_model_id(configured)
 
 
 def _wav_format_key(params: wave._wave_params) -> tuple:
@@ -216,10 +213,9 @@ class VoxCPMTtsAdapter:
             model=self.model,
             device=self.device,
             num_steps=self.num_steps,
+            max_batch=self._max_batch or 4,
+            flush_ms=self._flush_ms or 150,
         )
-        if self._max_batch is not None or self._flush_ms is not None:
-            self._client.max_batch = self._max_batch or self._client.max_batch
-            self._client.flush_ms = self._flush_ms or self._client.flush_ms
         self._client.register_with_runner(self._runner)
 
     def _run_infer(
@@ -237,7 +233,7 @@ class VoxCPMTtsAdapter:
     ) -> None:
         self._ensure_runtime()
         cache_key = None
-        if self._cache is not None and mode == VOXCPM_MODE_DESIGN:
+        if self._cache is not None:
             from .voxcpm_cache import cache_key as make_cache_key
 
             cache_key = make_cache_key(
@@ -249,6 +245,7 @@ class VoxCPMTtsAdapter:
                 cfg_value=2.0,
                 mode=mode,
                 reference_wav_path=reference_wav_path,
+                reference_text=prompt_text,
                 anchor_text=anchor_text,
             )
             if self._cache.materialize(cache_key, output_path):
@@ -294,7 +291,7 @@ class VoxCPMTtsAdapter:
         if self._cache is not None and cache_key is not None:
             self._cache.put(cache_key, output_path)
 
-    def _synthesize_single(
+    def _single_infer_kwargs(
         self,
         text: str,
         output_path: Path,
@@ -303,15 +300,11 @@ class VoxCPMTtsAdapter:
         ref_text: str | None,
         anchor_text: str | None = None,
         mode: str = VOXCPM_MODE_DESIGN,
-    ) -> None:
+    ) -> dict[str, object]:
         prompt_wav_path, _, voice_design = parse_voxcpm_voice(voice)
         if voice_design:
             text = f"({voice_design}){text}"
         if mode == VOXCPM_MODE_ULTIMATE:
-            # Ultimate mode uses the anchor as both a reference identity
-            # signal and a continuation-style speech prompt. The anchor
-            # transcript is mandatory and is forwarded only to the model,
-            # never to the cache for the design-mode key path.
             if not prompt_wav_path:
                 raise AppError(
                     422,
@@ -342,47 +335,64 @@ class VoxCPMTtsAdapter:
                         ),
                     ),
                 )
-            self._run_infer(
-                text=text,
-                output_path=output_path,
-                prompt_wav_path=prompt_wav_path,
-                prompt_text=anchor_clean,
-                reference_wav_path=prompt_wav_path,
-                anchor_text=anchor_clean,
-                voice_design=voice_design,
-                voice_id=voice or "",
-                mode=VOXCPM_MODE_ULTIMATE,
-            )
-            return
+            return {
+                "text": text,
+                "output_path": output_path,
+                "prompt_wav_path": prompt_wav_path,
+                "prompt_text": anchor_clean,
+                "reference_wav_path": prompt_wav_path,
+                "anchor_text": anchor_clean,
+                "voice_design": voice_design,
+                "voice_id": voice or "",
+                "mode": VOXCPM_MODE_ULTIMATE,
+            }
         if mode == VOXCPM_MODE_REFERENCE and prompt_wav_path is not None:
-            # Reference mode: anchor audio is isolated via VoxCPM2 ref
-            # tokens. No prompt text or prompt audio is forwarded, so the
-            # target text is generated independently of any speech-context
-            # conditioning from the anchor. Any upstream anchor transcript
-            # is ignored here on purpose.
-            self._run_infer(
-                text=text,
-                output_path=output_path,
-                prompt_wav_path=None,
-                prompt_text=None,
-                reference_wav_path=prompt_wav_path,
-                anchor_text=None,
-                voice_design=voice_design,
-                voice_id=voice or "",
-                mode=VOXCPM_MODE_REFERENCE,
-            )
-            return
+            return {
+                "text": text,
+                "output_path": output_path,
+                "prompt_wav_path": None,
+                "prompt_text": None,
+                "reference_wav_path": prompt_wav_path,
+                "anchor_text": None,
+                "voice_design": voice_design,
+                "voice_id": voice or "",
+                "mode": VOXCPM_MODE_REFERENCE,
+            }
+        return {
+            "text": text,
+            "output_path": output_path,
+            "prompt_wav_path": prompt_wav_path,
+            "prompt_text": ref_text,
+            "reference_wav_path": prompt_wav_path,
+            "anchor_text": None,
+            "voice_design": voice_design,
+            "voice_id": voice or "",
+            "mode": VOXCPM_MODE_DESIGN,
+        }
+
+    def _synthesize_single(
+        self,
+        text: str,
+        output_path: Path,
+        *,
+        voice: str,
+        ref_text: str | None,
+        anchor_text: str | None = None,
+        mode: str = VOXCPM_MODE_DESIGN,
+    ) -> None:
         self._run_infer(
-            text=text,
-            output_path=output_path,
-            prompt_wav_path=prompt_wav_path,
-            prompt_text=ref_text,
-            reference_wav_path=prompt_wav_path,
-            anchor_text=None,
-            voice_design=voice_design,
-            voice_id=voice or "",
-            mode=VOXCPM_MODE_DESIGN,
+            **self._single_infer_kwargs(
+                text,
+                output_path,
+                voice=voice,
+                ref_text=ref_text,
+                anchor_text=anchor_text,
+                mode=mode,
+            )
         )
+
+    def close(self) -> None:
+        return None
 
     def synthesize(
         self,
@@ -454,6 +464,347 @@ class VoxCPMTtsAdapter:
         finally:
             for part_path in output_path.parent.glob(f"{output_path.stem}.part*.wav"):
                 part_path.unlink(missing_ok=True)
+
+    def synthesize_batch(self, items: list[dict]) -> None:
+        if not items:
+            return
+        self._ensure_runtime()
+        assert self._client is not None
+        from .voxcpm_cache import cache_key as make_cache_key
+
+        submitted: list[tuple[str, Path, str | None]] = []
+        requests: list[dict] = []
+        for item in items:
+            text = str(item.get("text") or "")
+            output_path = Path(item["output_path"])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            chunks = split_tts_text(text)
+            if not chunks:
+                raise AppError(
+                    422,
+                    ErrorInfo(
+                        code="EMPTY_TTS_TEXT",
+                        message="Cannot synthesize empty narration text.",
+                        action="Verify translation output for this segment.",
+                    ),
+                )
+            if len(chunks) != 1:
+                self.synthesize(
+                    text,
+                    output_path,
+                    voice=str(item.get("voice") or "auto"),
+                    ref_text=item.get("ref_text"),
+                    anchor_text=item.get("anchor_text"),
+                    clone=bool(item.get("clone", False)),
+                    clone_mode=item.get("clone_mode"),
+                )
+                continue
+            mode = (
+                _normalize_clone_mode(item.get("clone_mode"))
+                if bool(item.get("clone", False)) and item.get("clone_mode")
+                else (VOXCPM_MODE_REFERENCE if bool(item.get("clone", False)) else VOXCPM_MODE_DESIGN)
+            )
+            infer = self._single_infer_kwargs(
+                chunks[0],
+                output_path,
+                voice=str(item.get("voice") or "auto"),
+                ref_text=item.get("ref_text"),
+                anchor_text=item.get("anchor_text"),
+                mode=mode,
+            )
+            cache_key = None
+            if self._cache is not None:
+                cache_key = make_cache_key(
+                    voice_id=str(infer["voice_id"]),
+                    text=str(infer["text"]),
+                    model=self.model,
+                    num_step=self.num_steps,
+                    voice_design=infer.get("voice_design"),
+                    cfg_value=2.0,
+                    mode=str(infer["mode"]),
+                    reference_wav_path=infer.get("reference_wav_path"),
+                    reference_text=infer.get("prompt_text"),
+                    anchor_text=infer.get("anchor_text"),
+                )
+                if self._cache.materialize(cache_key, output_path):
+                    continue
+            requests.append(
+                {
+                    "text": str(infer["text"]),
+                    "output_path": output_path,
+                    "prompt_wav_path": infer.get("prompt_wav_path"),
+                    "prompt_text": infer.get("prompt_text"),
+                    "voice_design": infer.get("voice_design"),
+                    "reference_wav_path": infer.get("reference_wav_path"),
+                    "anchor_text": infer.get("anchor_text"),
+                    "mode": str(infer["mode"]),
+                    "cfg_value": 2.0,
+                    "inference_timesteps": self.num_steps,
+                    "cache_key": cache_key,
+                }
+            )
+            submitted.append(("", output_path, cache_key))
+        request_ids = self._client.submit_batch(requests)
+        for index, request_id in enumerate(request_ids):
+            submitted[index] = (request_id, submitted[index][1], submitted[index][2])
+        responses = self._client.wait_batch(request_ids)
+        for (_request_id, output_path, cache_key), response in zip(submitted, responses):
+            if not response.get("ok", False):
+                raise AppError(
+                    502,
+                    ErrorInfo(
+                        code=response.get("code") or "VOXCPM_TTS_FAILED",
+                        message=response.get("message") or "VoxCPM2 could not generate narration.",
+                        action=(
+                            "Check VoxCPM2 model, GPU availability, and reference audio settings. "
+                            "Run 'python scripts/setup_voxcpm.py' if the isolated env is missing."
+                        ),
+                        detail=response.get("detail"),
+                        retryable=bool(response.get("retryable", True)),
+                    ),
+                )
+            if not output_path.is_file() or output_path.stat().st_size == 0:
+                raise AppError(
+                    502,
+                    ErrorInfo(
+                        code="VOXCPM_TTS_FAILED",
+                        message="VoxCPM2 produced an empty audio file.",
+                        action="Try another reference clip or switch to auto voice mode.",
+                        retryable=True,
+                    ),
+                )
+            if self._cache is not None and cache_key is not None:
+                self._cache.put(cache_key, output_path)
+
+
+class TtsSession:
+    def __init__(
+        self,
+        settings: dict,
+        *,
+        data_dir: Path | None,
+        runner: object | None,
+        adapter_factory=create_tts_adapter if "create_tts_adapter" in globals() else None,
+        gpu_manager=None,
+    ) -> None:
+        self.settings = dict(settings)
+        self.data_dir = data_dir
+        self.runner = runner
+        self._adapter_factory = adapter_factory or create_tts_adapter
+        self._adapter = None
+        self.voice = self._default_voice()
+        self.clone = bool(str(self.settings.get("voxcpm_ref_audio") or "").strip())
+        self.clone_mode = self._clone_mode() if self.clone else "reference"
+        self.anchor_text = self._anchor_transcript() if self.clone else None
+        if gpu_manager is None:
+            from ..gpu_manager import global_gpu_manager
+            self.gpu_manager = global_gpu_manager()
+        else:
+            self.gpu_manager = gpu_manager
+        self._lease = None
+        self._model_key = self._build_model_key()
+
+    def _build_model_key(self) -> str:
+        model = str(self.settings.get("voxcpm_model", "") or "")
+        device = str(self.settings.get("voxcpm_device", "cuda:0") or "cuda:0")
+        steps = self.settings.get("voxcpm_num_steps", 10)
+        return f"{model}|{device}|{int(steps or 0)}|{self.clone_mode}"
+
+    def __enter__(self) -> "TtsSession":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def _adapter_instance(self):
+        if self._adapter is not None:
+            return self._adapter
+        device = str(self.settings.get("voxcpm_device", "cuda:0") or "cuda:0")
+        if self.gpu_manager is not None and not self._session_disabled():
+            self._lease = self.gpu_manager.acquire("tts", device, self._model_key, serialize=False)
+            self._lease.__enter__()
+        try:
+            self._adapter = self._adapter_factory(self.settings, data_dir=self.data_dir, runner=self.runner)
+        except Exception:
+            if self._lease is not None:
+                self._lease.__exit__(None, None, None)
+                self._lease = None
+            raise
+        return self._adapter
+
+    def _session_disabled(self) -> bool:
+        return not bool(self.settings.get("tts_session_reuse_enabled", True))
+
+    def _default_voice(self) -> str:
+        instruct = str(self.settings.get("voxcpm_instruct") or "").strip()
+        if instruct:
+            return f"{VOXCPM_INSTRUCT_PREFIX}{instruct}"
+        ref_audio = str(self.settings.get("voxcpm_ref_audio") or "").strip()
+        if ref_audio:
+            return ref_audio
+        return "auto"
+
+    def _anchor_transcript(self) -> str | None:
+        ref_audio = str(self.settings.get("voxcpm_ref_audio") or "").strip()
+        if not ref_audio:
+            return None
+        sidecar = Path(ref_audio).with_suffix(".txt")
+        if not sidecar.is_file():
+            return None
+        try:
+            transcript = sidecar.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        if not transcript:
+            return None
+        # Long anchor transcripts crash or stall GGUF ultimate mode; keep a
+        # short prefix that still conditions timbre without blowing the graph.
+        if len(transcript) > 400:
+            return transcript[:400].rstrip()
+        return transcript
+
+    def _clone_mode(self) -> str:
+        return _normalize_clone_mode(self.settings.get("voxcpm_clone_mode"))
+
+    def synthesize(self, text: str, output_path: Path, *, segment: dict | None = None) -> None:
+        segment = segment or {}
+        if not bool(self.settings.get("tts_session_reuse_enabled", True)):
+            factory = self._adapter_factory
+            for attempt in range(2):
+                try:
+                    factory(self.settings, data_dir=self.data_dir, runner=self.runner).synthesize(
+                        text,
+                        output_path,
+                        voice=self.voice,
+                        ref_text=str(segment.get("text") or "").strip() or None,
+                        clone=self.clone,
+                        clone_mode=self.clone_mode,
+                        anchor_text=self.anchor_text,
+                    )
+                    return
+                except AppError as error:
+                    if not error.info.retryable or attempt:
+                        raise
+                    self._reset_caches_after_failure()
+            return
+        last_error: AppError | None = None
+        for attempt in range(2):
+            try:
+                self._adapter_instance().synthesize(
+                    text,
+                    output_path,
+                    voice=self.voice,
+                    ref_text=str(segment.get("text") or "").strip() or None,
+                    clone=self.clone,
+                    clone_mode=self.clone_mode,
+                    anchor_text=self.anchor_text,
+                )
+                return
+            except AppError as error:
+                last_error = error
+                if not error.info.retryable or attempt:
+                    raise
+                self._reset_caches_after_failure()
+        if last_error is not None:
+            raise last_error
+
+    def synthesize_batch(self, items: list[dict]) -> None:
+        if not items:
+            return
+        adapter_items = [
+            {
+                "text": item["text"],
+                "output_path": item["output_path"],
+                "voice": self.voice,
+                "ref_text": str((item.get("segment") or {}).get("text") or "").strip() or None,
+                "clone": self.clone,
+                "clone_mode": self.clone_mode,
+                "anchor_text": self.anchor_text,
+            }
+            for item in items
+        ]
+        if not bool(self.settings.get("tts_session_reuse_enabled", True)):
+            factory = self._adapter_factory
+            for attempt in range(2):
+                try:
+                    adapter = factory(self.settings, data_dir=self.data_dir, runner=self.runner)
+                    synthesize_batch = getattr(adapter, "synthesize_batch", None)
+                    if callable(synthesize_batch):
+                        synthesize_batch(adapter_items)
+                    else:
+                        for item in adapter_items:
+                            adapter.synthesize(
+                                item["text"],
+                                item["output_path"],
+                                voice=item["voice"],
+                                ref_text=item["ref_text"],
+                                clone=item["clone"],
+                                clone_mode=item["clone_mode"],
+                                anchor_text=item["anchor_text"],
+                            )
+                    return
+                except AppError as error:
+                    if not error.info.retryable or attempt:
+                        raise
+                    self._reset_caches_after_failure()
+            return
+        last_error: AppError | None = None
+        for attempt in range(2):
+            try:
+                adapter = self._adapter_instance()
+                synthesize_batch = getattr(adapter, "synthesize_batch", None)
+                if callable(synthesize_batch):
+                    synthesize_batch(adapter_items)
+                else:
+                    for item in adapter_items:
+                        adapter.synthesize(
+                            item["text"],
+                            item["output_path"],
+                            voice=item["voice"],
+                            ref_text=item["ref_text"],
+                            clone=item["clone"],
+                            clone_mode=item["clone_mode"],
+                            anchor_text=item["anchor_text"],
+                        )
+                return
+            except AppError as error:
+                last_error = error
+                if not error.info.retryable or attempt:
+                    raise
+                self._reset_caches_after_failure()
+        if last_error is not None:
+            raise last_error
+
+    @staticmethod
+    def _reset_caches_after_failure() -> None:
+        try:
+            from .asr import reset_model_cache
+            from .. import pipeline as _pipeline  # noqa: F401  pragma: no cover - imported for side effects
+
+            reset_model_cache()
+        except Exception:
+            pass
+        try:
+            import gc
+
+            import torch
+
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        adapter = self._adapter
+        self._adapter = None
+        close = getattr(adapter, "close", None)
+        if callable(close):
+            close()
+        lease = self._lease
+        self._lease = None
+        if lease is not None:
+            lease.__exit__(None, None, None)
 
 
 def create_tts_adapter(settings: dict, *, data_dir: Path | None = None, runner: object | None = None):

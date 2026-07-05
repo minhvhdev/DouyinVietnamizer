@@ -1,62 +1,43 @@
-"""Resolve the isolated VoxCPM Python environment."""
+"""Resolve the VoxCPM2 GGUF runtime (voxcpm2-cli + model weights)."""
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
 from pathlib import Path
+
+from .voxcpm_gguf import (
+    is_gguf_runtime_ready,
+    resolve_voxcpm_cli,
+    resolve_voxcpm_gguf_paths,
+    resolve_worker_python,
+)
 
 
 def voxcpm_venv_root() -> Path:
-    override = os.environ.get("DV_VOXCPM_VENV", "").strip()
+    """Legacy name kept for portable-runtime env wiring.
+
+    Returns the default GGUF model directory under ``DV_MODELS_DIR`` when set,
+    otherwise ``backend/models/voxcpm2``.
+    """
+    import os
+
+    override = os.environ.get("DV_MODELS_DIR", "").strip()
     if override:
-        return Path(override).expanduser().resolve()
-    return Path(__file__).resolve().parents[1] / ".venv-voxcpm"
+        return Path(override).expanduser().resolve() / "voxcpm2"
+    return Path(__file__).resolve().parents[1] / "models" / "voxcpm2"
 
 
 def resolve_voxcpm_python() -> Path:
-    env_override = os.environ.get("DV_VOXCPM_PYTHON", "").strip()
-    if env_override:
-        path = Path(env_override).expanduser().resolve()
-        if path.is_file():
-            return path
-        raise FileNotFoundError(f"DV_VOXCPM_PYTHON does not exist: {path}")
-
-    venv_root = voxcpm_venv_root()
-    if sys.platform == "win32":
-        candidates = (
-            venv_root / "Scripts" / "python.exe",
-            venv_root / "Scripts" / "python",
-        )
-    else:
-        candidates = (
-            venv_root / "bin" / "python3",
-            venv_root / "bin" / "python",
-        )
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    raise FileNotFoundError(
-        "VoxCPM environment was not found. "
-        f"Expected virtualenv at {venv_root}. "
-        "Run: python scripts/setup_voxcpm.py"
-    )
+    return resolve_worker_python()
 
 
 def is_voxcpm_available() -> bool:
-    try:
-        python = resolve_voxcpm_python()
-    except FileNotFoundError:
-        return False
-    try:
-        completed = subprocess.run(
-            [str(python), "-c", "import voxcpm"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return completed.returncode == 0
+    return is_gguf_runtime_ready()
+
+
+__all__ = [
+    "is_voxcpm_available",
+    "resolve_voxcpm_cli",
+    "resolve_voxcpm_gguf_paths",
+    "resolve_voxcpm_python",
+    "voxcpm_venv_root",
+]

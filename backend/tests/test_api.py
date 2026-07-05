@@ -6,6 +6,8 @@ from fastapi.testclient import TestClient
 from dv_backend.api import create_app
 from dv_backend.checkpoints import PIPELINE_STEPS, save_checkpoint
 from dv_backend.config import AppConfig
+from dv_backend.database import Database
+from dv_backend.jobs import JobService
 
 
 def make_client(tmp_path: Path) -> TestClient:
@@ -24,33 +26,125 @@ def test_health_and_capabilities(tmp_path: Path) -> None:
     assert capabilities.json()["implemented_steps"] == list(PIPELINE_STEPS)
 
 
-def test_create_and_list_job(tmp_path: Path) -> None:
-    client = make_client(tmp_path)
+def _create_imported_job_id(client: TestClient, tmp_path: Path) -> str:
+    sample = tmp_path / "sample.mp4"
+    sample.write_bytes(b"fake-video")
+    with sample.open("rb") as handle:
+        response = client.post(
+            "/api/jobs/import",
+            files={"file": ("sample.mp4", handle, "video/mp4")},
+        )
+    assert response.status_code == 201
+    return response.json()["id"]
 
-    created = client.post("/api/jobs", json={"source_url": "https://v.douyin.com/demo/"})
+
+def test_import_and_list_job(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    sample = tmp_path / "sample.mp4"
+    sample.write_bytes(b"fake-video")
+
+    with sample.open("rb") as handle:
+        created = client.post(
+            "/api/jobs/import",
+            files={"file": ("sample.mp4", handle, "video/mp4")},
+        )
     listed = client.get("/api/jobs")
 
     assert created.status_code == 201
+    assert created.json()["source_url"] == "import://sample.mp4"
     assert listed.json()[0]["id"] == created.json()["id"]
-    assert [step["name"] for step in created.json()["steps"]] == list(PIPELINE_STEPS)
+    step_names = [step["name"] for step in created.json()["steps"]]
+    steps_by_name = {step["name"]: step for step in created.json()["steps"]}
+    assert steps_by_name["resolve"]["status"] == "completed"
+    assert steps_by_name["download"]["status"] == "completed"
+    assert step_names[2] == "extract_audio"
+    assert steps_by_name["extract_audio"]["status"] == "pending"
 
 
-def test_create_bilibili_job(tmp_path: Path) -> None:
+def test_create_job_rejects_invalid_url(tmp_path: Path) -> None:
     client = make_client(tmp_path)
+    response = client.post("/api/jobs", json={"source_url": "https://example.com/video/1"})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "INVALID_SOURCE_URL"
 
-    created = client.post(
+
+@patch("dv_backend.api.JobRunner.start_job")
+def test_create_job_accepts_douyin_url(mock_start_job, tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    response = client.post(
         "/api/jobs",
-        json={"source_url": "https://www.bilibili.com/video/BV1MEJw6qE8b/"},
+        json={"source_url": "https://www.douyin.com/video/7123456789012345678"},
     )
+    assert response.status_code == 201
+    assert response.json()["source_url"].startswith("https://www.douyin.com/video/")
+    mock_start_job.assert_called_once()
 
-    assert created.status_code == 201
-    assert created.json()["source_url"] == "https://www.bilibili.com/video/BV1MEJw6qE8b/"
+
+@patch("dv_backend.api.JobRunner.start_job")
+def test_create_app_marks_running_jobs_interrupted_without_autostart(mock_start_job, tmp_path: Path) -> None:
+    config = AppConfig(tmp_path)
+    config.ensure_directories()
+    database = Database(config.database_path)
+    database.migrate()
+    service = JobService(database, tmp_path)
+    sample = tmp_path / "sample.mp4"
+    sample.write_bytes(b"fake-video")
+    job = service.create_imported(sample, original_filename="sample.mp4")
+
+    with database.connection:
+        database.connection.execute(
+            "UPDATE jobs SET status = 'running', current_step = 'tts' WHERE id = ?",
+            (job.id,),
+        )
+        database.connection.execute(
+            "UPDATE job_steps SET status = 'running', started_at = 'now' WHERE job_id = ? AND name = 'tts'",
+            (job.id,),
+        )
+
+    app = create_app(config)
+
+    hydrated = app.state.jobs.get(job.id)
+    assert hydrated.status == "interrupted"
+    tts_step = next(step for step in hydrated.steps if step.name == "tts")
+    assert tts_step.status == "pending"
+    mock_start_job.assert_not_called()
+
+
+def test_start_endpoint_allows_manual_restart_for_queued_job(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    app = client.app
+    sample = tmp_path / "queued.mp4"
+    sample.write_bytes(b"fake-video")
+    job = app.state.jobs.create_imported(sample, original_filename="queued.mp4")
+
+    with patch.object(app.state.runner, "start_job") as mock_start_job:
+        response = client.post(f"/api/jobs/{job.id}/start")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "started"}
+    mock_start_job.assert_called_once_with(job.id)
+    assert app.state.jobs.get(job.id).status == "queued"
+
+
+def test_import_rejects_unsupported_format(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    sample = tmp_path / "sample.txt"
+    sample.write_text("not-a-video", encoding="utf-8")
+
+    with sample.open("rb") as handle:
+        response = client.post(
+            "/api/jobs/import",
+            files={"file": ("sample.txt", handle, "text/plain")},
+        )
+
+    assert response.status_code == 415
+    assert response.json()["error"]["code"] == "IMPORT_UNSUPPORTED_FORMAT"
 
 
 def test_delete_finished_job(tmp_path: Path) -> None:
     client = make_client(tmp_path)
     app = client.app
-    job_id = app.state.jobs.create("https://v.douyin.com/demo/").id
+    job_id = _create_imported_job_id(client, tmp_path)
     with app.state.database.connection:
         app.state.database.connection.execute(
             "UPDATE jobs SET status = 'completed' WHERE id = ?",
@@ -67,7 +161,7 @@ def test_delete_finished_job(tmp_path: Path) -> None:
 def test_delete_running_job_is_rejected(tmp_path: Path) -> None:
     client = make_client(tmp_path)
     app = client.app
-    job_id = app.state.jobs.create("https://v.douyin.com/demo/").id
+    job_id = _create_imported_job_id(client, tmp_path)
     with app.state.database.connection:
         app.state.database.connection.execute(
             "UPDATE jobs SET status = 'running' WHERE id = ?",
@@ -80,17 +174,6 @@ def test_delete_running_job_is_rejected(tmp_path: Path) -> None:
     assert response.json()["error"]["code"] == "JOB_NOT_DELETABLE"
 
 
-def test_invalid_url_returns_actionable_error(tmp_path: Path) -> None:
-    client = make_client(tmp_path)
-
-    response = client.post("/api/jobs", json={"source_url": "https://example.com/video"})
-
-    assert response.status_code == 422
-    assert response.json()["error"]["code"] == "INVALID_SOURCE_URL"
-    assert response.json()["error"]["action"]
-    assert response.json()["error"]["retryable"] is False
-
-
 def test_settings_and_events(tmp_path: Path) -> None:
     client = make_client(tmp_path)
 
@@ -106,45 +189,7 @@ def test_loopback_renderer_origin_is_allowed(tmp_path: Path) -> None:
     client = make_client(tmp_path)
 
     response = client.options(
-        "/api/jobs",
-        headers={
-            "Origin": "http://localhost:5173",
-            "Access-Control-Request-Method": "POST",
-        },
-    )
-
-    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
-
-
-
-
-def test_invalid_url_returns_actionable_error(tmp_path: Path) -> None:
-    client = make_client(tmp_path)
-
-    response = client.post("/api/jobs", json={"source_url": "https://example.com/video"})
-
-    assert response.status_code == 422
-    assert response.json()["error"]["code"] == "INVALID_SOURCE_URL"
-    assert response.json()["error"]["action"]
-    assert response.json()["error"]["retryable"] is False
-
-
-def test_settings_and_events(tmp_path: Path) -> None:
-    client = make_client(tmp_path)
-
-    updated = client.put("/api/settings", json={"translation_api_base": "https://api.example.com/v1"})
-    events = client.get("/api/events")
-
-    assert updated.json()["translation_api_base"] == "https://api.example.com/v1"
-    assert client.get("/api/settings").json()["translation_api_base"] == "https://api.example.com/v1"
-    assert events.json()[0]["code"] == "SETTINGS_UPDATED"
-
-
-def test_loopback_renderer_origin_is_allowed(tmp_path: Path) -> None:
-    client = make_client(tmp_path)
-
-    response = client.options(
-        "/api/jobs",
+        "/api/jobs/import",
         headers={
             "Origin": "http://localhost:5173",
             "Access-Control-Request-Method": "POST",
@@ -247,15 +292,29 @@ def test_preview_preset_voice_rejects_unknown(tmp_path: Path) -> None:
     assert resp.json()["error"]["code"] == "INVALID_PRESET_VOICE"
 
 
+def test_segment_wav_serves_lazy_mix_raw_file(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    app = client.app
+    job_id = _create_imported_job_id(client, tmp_path)
+    raw = tmp_path / "jobs" / job_id / "artifacts" / "tts" / "tts_raw_0.wav"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_bytes(b"RIFFraw")
+
+    response = client.get(f"/api/jobs/{job_id}/segments/0/wav")
+
+    assert response.status_code == 200
+    assert response.content == b"RIFFraw"
+
+
 def test_job_files(tmp_path: Path) -> None:
     client = make_client(tmp_path)
     app = client.app
-    job_id = app.state.jobs.create("https://v.douyin.com/demo/").id
+    job_id = _create_imported_job_id(client, tmp_path)
     
-    # Check empty list when no files exist yet
+    # Check imported original video is listed once artifacts exist
     resp = client.get(f"/api/jobs/{job_id}/files")
     assert resp.status_code == 200
-    assert resp.json() == []
+    assert any(item["key"] == "original_video" for item in resp.json())
     
     # Create some mock files in the job directory
     job_dir = tmp_path / "jobs" / job_id
@@ -270,11 +329,12 @@ def test_job_files(tmp_path: Path) -> None:
     resp = client.get(f"/api/jobs/{job_id}/files")
     assert resp.status_code == 200
     files_list = resp.json()
-    assert len(files_list) == 2
+    assert len(files_list) == 3
     
     keys = {f["key"] for f in files_list}
     assert "dubbed_video" in keys
     assert "bgm" in keys
+    assert "original_video" in keys
     
     # Test streaming file content
     resp = client.get(f"/api/jobs/{job_id}/files/bgm")
@@ -292,10 +352,24 @@ def test_job_files(tmp_path: Path) -> None:
     assert resp.json()["error"]["code"] == "INVALID_FILE_KEY"
 
 
+def test_job_folder(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    job_id = _create_imported_job_id(client, tmp_path)
+
+    resp = client.get(f"/api/jobs/{job_id}/folder")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["exists"] is True
+    assert payload["path"] == str((tmp_path / "jobs" / job_id).resolve())
+
+    resp = client.get("/api/jobs/missing-job/folder")
+    assert resp.status_code == 404
+
+
 def test_update_segment_speaker_updates_checkpoints(tmp_path: Path) -> None:
     client = make_client(tmp_path)
     app = client.app
-    job_id = app.state.jobs.create("https://v.douyin.com/demo/").id
+    job_id = _create_imported_job_id(client, tmp_path)
 
     client.put("/api/settings", json={"speaker_diarization": True})
     checkpoint = {

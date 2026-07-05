@@ -65,6 +65,44 @@ def test_gemini_translator_reports_all_keys_failed() -> None:
     assert error.value.info.code == "GEMINI_KEYS_EXHAUSTED"
 
 
+def test_gemini_translator_includes_timing_guidance_in_prompt() -> None:
+    captured: dict[str, dict] = {}
+
+    def request(_api_key: str, _model: str, payload: dict) -> dict:
+        captured["payload"] = payload
+        return {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {"text": json.dumps(["Xin chao ban"])}
+                        ]
+                    }
+                }
+            ]
+        }
+
+    pool = GeminiKeyPool([{"id": "a", "key": "key-a"}])
+    translated = GeminiTranslator(pool, request=request).translate(
+        ["你好朋友"],
+        source="zh-CN",
+        target="vi",
+        duration_budgets=[1.2],
+        timing_guidance=[{
+            "source_speech_units": 4,
+            "target_vi_syllables": 4,
+            "target_vi_syllable_range": [3, 5],
+        }],
+    )
+
+    prompt = captured["payload"]["contents"][0]["parts"][0]["text"]
+    assert translated == ["Xin chao ban"]
+    assert "source_speech_units" in prompt
+    assert "target_vi_syllables" in prompt
+    assert "target_vi_syllable_range" in prompt
+    assert "duration_budget_sec" in prompt
+
+
 def test_gemini_tts_writes_wave_from_inline_pcm(tmp_path: Path) -> None:
     pcm = (b"\x01\x00" * 2400)
 

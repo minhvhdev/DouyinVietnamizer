@@ -45,7 +45,6 @@ pub fn validate_portable_runtime(root: &Path) -> Result<PortableRuntime, Portabl
         (python.clone(), "python executable"),
         (backend_dir.join("dv_backend"), "backend/dv_backend"),
         (tools_dir.join("ffmpeg"), "tools/ffmpeg"),
-        (tools_dir.join("yt-dlp"), "tools/yt-dlp"),
         (models_dir.join("qwen3-asr"), "models/qwen3-asr"),
         (models_dir.join("voxcpm2"), "models/voxcpm2"),
     ];
@@ -96,12 +95,32 @@ pub fn prepend_path(dir: &Path, current: Option<OsString>) -> OsString {
     env::join_paths(paths).unwrap_or_else(|_| OsString::from(dir.as_os_str()))
 }
 
+fn macos_bundle_runtime_roots(exe_dir: &Path) -> Option<(PathBuf, PathBuf)> {
+    let contents_dir = exe_dir.parent()?;
+    let app_dir = contents_dir.parent()?;
+    let app_parent = app_dir.parent()?;
+    Some((
+        app_parent.join("portable-runtime"),
+        contents_dir.join("Resources").join("portable-runtime"),
+    ))
+}
+
 fn release_runtime_root() -> PathBuf {
     let exe = env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
     let exe_dir = exe.parent().unwrap_or_else(|| Path::new("."));
     let beside_exe = exe_dir.join("portable-runtime");
     if beside_exe.exists() {
         return beside_exe;
+    }
+    #[cfg(target_os = "macos")]
+    if let Some((bundle_sibling, bundled_resource)) = macos_bundle_runtime_roots(exe_dir) {
+        if bundle_sibling.exists() {
+            return bundle_sibling;
+        }
+        if bundled_resource.exists() {
+            return bundled_resource;
+        }
+        return bundle_sibling;
     }
     exe_dir.join("resources").join("portable-runtime")
 }
@@ -122,7 +141,6 @@ mod tests {
         fs::write(python, b"").unwrap();
         fs::create_dir_all(root.join("backend/dv_backend")).unwrap();
         fs::create_dir_all(root.join("tools/ffmpeg")).unwrap();
-        fs::create_dir_all(root.join("tools/yt-dlp")).unwrap();
         fs::create_dir_all(root.join("models/qwen3-asr")).unwrap();
         fs::create_dir_all(root.join("models/voxcpm2")).unwrap();
     }
@@ -155,7 +173,6 @@ mod tests {
                 assert!(missing_items.iter().any(|item| item.contains("python executable")));
                 assert!(missing_items.iter().any(|item| item.contains("backend/dv_backend")));
                 assert!(missing_items.iter().any(|item| item.contains("tools/ffmpeg")));
-                assert!(missing_items.iter().any(|item| item.contains("tools/yt-dlp")));
                 assert!(missing_items.iter().any(|item| item.contains("models/qwen3-asr")));
                 assert!(missing_items.iter().any(|item| item.contains("models/voxcpm2")));
             }
@@ -196,13 +213,20 @@ mod tests {
         assert_eq!(parts[1], system);
     }
 
+    #[test]
+    fn macos_bundle_runtime_roots_use_app_sibling_and_contents_resources() {
+        let exe_dir = Path::new("/tmp/DouyinVietnamizer.app/Contents/MacOS");
+        let (sibling, resource) = macos_bundle_runtime_roots(exe_dir).unwrap();
+        assert_eq!(sibling, PathBuf::from("/tmp/portable-runtime"));
+        assert_eq!(resource, PathBuf::from("/tmp/DouyinVietnamizer.app/Contents/Resources/portable-runtime"));
+    }
+
     #[cfg(target_os = "macos")]
     fn make_runtime_macos(root: &Path) {
         fs::create_dir_all(root.join(".venv/bin")).unwrap();
         fs::write(root.join(".venv/bin/python"), b"").unwrap();
         fs::create_dir_all(root.join("backend/dv_backend")).unwrap();
         fs::create_dir_all(root.join("tools/ffmpeg")).unwrap();
-        fs::create_dir_all(root.join("tools/yt-dlp")).unwrap();
         fs::create_dir_all(root.join("models/qwen3-asr")).unwrap();
         fs::create_dir_all(root.join("models/voxcpm2")).unwrap();
     }

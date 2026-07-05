@@ -47,10 +47,11 @@ vendor/portable-runtime/
 ├── backend/
 ├── tools/
 │   ├── ffmpeg/
-│   └── yt-dlp/
+│   ├── yt-dlp/
+│   └── voxcpm2/          # voxcpm2-cli.exe + llama-tts-server.exe + ggml DLLs
 ├── models/
 │   ├── qwen3-asr/
-│   └── voxcpm2/
+│   └── voxcpm2/          # VoxCPM2-BaseLM-Q8_0.gguf + Acoustic F16
 └── manifest.json
 ```
 
@@ -59,7 +60,21 @@ Hot-reload during development:
 - Edit `backend/dv_backend/**` — uvicorn reloads because `DV_RELOAD=1`.
 - Edit `src-tauri/src/**` — Cargo rebuilds the affected crate, window refreshes.
 
-`pnpm tauri:build` produces a Windows app bundle (NSIS) that includes the prepared portable runtime. For the folder-style portable release, copy the built `DouyinVietnamizer.exe` together with its sibling `portable-runtime/` directory. Target machines must be Windows x64 with compatible NVIDIA/CUDA drivers. Existing `pnpm dev` and `pnpm test` workflows remain available for non-Tauri work.
+`pnpm tauri:build` produces a Windows app bundle (NSIS) that includes the prepared portable runtime. For the folder-style portable release, run:
+
+```powershell
+pnpm tauri:build:portable
+```
+
+This refreshes `vendor/portable-runtime` (GGUF weights + `voxcpm2-cli` under `tools/voxcpm2/`), mirrors it into `dist-portable/DouyinVietnamizer-0.1.0-portable/`, builds the Tauri binary, and syncs backend code. To refresh only the runtime folder (for `tauri:dev`), use `pnpm tauri:build:portable:runtime`.
+
+Prerequisites before the first portable build:
+
+1. `vendor/portable-runtime/` with embedded Python `.venv` (existing dev bootstrap).
+2. `vendor/voxcpm2/voxcpm2-cli.exe` (+ CUDA DLLs) built from llama.cpp-omni.
+3. Network access for the first GGUF download (~3.3 GB into `portable-runtime/models/voxcpm2/`).
+
+Copy `douyin-vietnamizer.exe` together with its sibling `portable-runtime/` directory to another Windows x64 machine with compatible NVIDIA/CUDA drivers.
 
 ## macOS portable (Apple Silicon)
 
@@ -76,9 +91,44 @@ The `.app` looks for a sibling `portable-runtime/` folder with the bundled Pytho
 
 ### Building from source (maintainers)
 
-The build runs in GitHub Actions on `macos-14` (M1). Trigger the **Build macOS portable** workflow from the Actions tab, or push a `v*` tag. The job uploads the zip as a workflow artifact and, on tag push, attaches it to the GitHub Release.
+Build host requirements:
+- Apple Silicon Mac (M1/M2/M3/M4), macOS 12+
+- Internet connection (first run downloads Python runtime, pip packages, tools, and models)
+- Free disk space: at least 20 GB recommended
 
-Local Mac builds are also possible:
+```bash
+# from repository root
+pnpm run tauri:build:mac:m4
+```
+
+What this command does automatically:
+- Homebrew (if missing)
+- Node.js + pnpm
+- rustup + Rust target `aarch64-apple-darwin`
+- uv
+- python-build-standalone runtime, Python packages, tools, and models
+
+Step-by-step flow on a fresh Mac:
+1. Install/prepare Xcode Command Line Tools.
+2. Install missing package/build tools listed above.
+3. Build frontend assets.
+4. Build Tauri app for `aarch64-apple-darwin`.
+5. Build portable runtime at `dist-portable/macos-staging/portable-runtime`.
+6. Assemble final bundle and zip.
+
+If Xcode Command Line Tools are missing, the script will trigger `xcode-select --install` and stop. Complete installation, then run the same build command again.
+
+Build outputs:
+- App bundle: `dist-portable/DouyinVietnamizer-0.1.0-portable/DouyinVietnamizer.app`
+- Runtime folder: `dist-portable/DouyinVietnamizer-0.1.0-portable/portable-runtime`
+- Release zip: `dist-portable/DouyinVietnamizer-0.1.0-portable-macos.zip`
+
+Run the built app locally:
+1. Unzip `DouyinVietnamizer-0.1.0-portable-macos.zip`.
+2. Keep `DouyinVietnamizer.app` and `portable-runtime/` in the same folder.
+3. First launch: right-click `DouyinVietnamizer.app` -> **Open** -> confirm.
+
+Equivalent manual steps (if you want full control):
 
 ```bash
 pnpm install
@@ -87,7 +137,11 @@ bash scripts/build-portable-runtime-mac.sh
 bash scripts/build-portable-mac.sh
 ```
 
-The first run downloads ~11 GB of models; subsequent runs reuse `dist-portable/macos-staging/` and the GitHub Actions cache.
+Common issues:
+- `xcode-select: error`: install Command Line Tools, then rerun.
+- `pnpm` not found: rerun once; bootstrap installs it automatically.
+- Download/model step is slow: first run may download ~11 GB; later runs reuse `dist-portable/macos-staging/`.
+- Gatekeeper blocks app: use right-click -> Open for first launch.
 
 ## Vendor tools
 
@@ -101,6 +155,6 @@ Missing tools or Qwen3 models? Use the setup wizard in the UI (Môi trường) t
 
 - Douyin and Bilibili URLs and downloaded media are processed locally.
 - Google Translate or Gemini receives transcript text when selected for translation.
-- VoxCPM2 runs through the isolated `backend/.venv-voxcpm` environment after setup.
+- VoxCPM2 runs through native `voxcpm2-cli` + GGUF weights bundled under `portable-runtime/tools/voxcpm2` and `portable-runtime/models/voxcpm2`.
 - Browser cookies are optional and are only passed to yt-dlp when selected.
 - Douyin and Bilibili may change their sites or require authentication, which can break a URL.

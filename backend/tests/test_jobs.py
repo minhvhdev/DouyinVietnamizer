@@ -24,7 +24,7 @@ def _create_completed_job(service: JobService, job_id: str = "job-rerun") -> Non
     with service.database.connection:
         service.database.connection.execute(
             "INSERT INTO jobs (id, source_url, status, created_at, updated_at) VALUES (?, ?, 'completed', ?, ?)",
-            (job_id, "https://www.douyin.com/video/123", now, now),
+            (job_id, "https://www.bilibili.com/video/BV123", now, now),
         )
         service.database.connection.executemany(
             "INSERT INTO job_steps (job_id, name, position, status, checkpoint_path) VALUES (?, ?, ?, 'completed', ?)",
@@ -101,3 +101,18 @@ def test_redub_keeps_through_translate(job_service: JobService) -> None:
     for step_name in PIPELINE_STEPS[translate_index + 1 :]:
         step = next(item for item in job.steps if item.name == step_name)
         assert step.status == "pending"
+
+
+def test_rerun_from_tts_clears_tts_artifacts(job_service: JobService) -> None:
+    job_id = "job-tts-artifacts"
+    _create_completed_job(job_service, job_id)
+    tts_dir = job_service.data_dir / "jobs" / job_id / "artifacts" / "tts"
+    tts_dir.mkdir(parents=True, exist_ok=True)
+    stale = tts_dir / "tts_0.wav"
+    stale.write_bytes(b"RIFF" + b"\x00" * 40)
+
+    keep_steps = list(PIPELINE_STEPS[: PIPELINE_STEPS.index("tts")])
+    job_service.rerun(job_id, keep_steps)
+
+    assert not stale.is_file()
+    assert not tts_dir.is_dir()

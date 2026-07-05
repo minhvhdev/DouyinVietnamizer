@@ -1,4 +1,4 @@
-import type { Job, JobsApi, RuntimeReport } from "./contracts";
+import type { Job, JobFolder, JobsApi, RuntimeReport } from "./contracts";
 
 const baseUrl = import.meta.env.VITE_BACKEND_URL ?? "http://127.0.0.1:8765";
 
@@ -8,7 +8,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { "Content-Type": "application/json", ...init?.headers }
   });
   const body = await response.json();
-  if (!response.ok) throw new Error(body.error?.message ?? "Backend unavailable");
+  if (!response.ok) {
+    const err = body.error;
+    const parts = [err?.message, err?.action, err?.detail ? `Chi tiết: ${err.detail}` : null].filter(Boolean);
+    throw new Error(parts.join("\n\n") || "Backend unavailable");
+  }
   return body;
 }
 
@@ -16,6 +20,12 @@ export const api: JobsApi = {
   listJobs: () => request<Job[]>("/api/jobs"),
   createJob: (sourceUrl) =>
     request<Job>("/api/jobs", { method: "POST", body: JSON.stringify({ source_url: sourceUrl }) }),
+  selectVideo: (jobId, index) =>
+    request(`/api/jobs/${jobId}/select-video`, { method: "POST", body: JSON.stringify({ index }) }),
+  updateYtDlp: () => request<{ status: string; version: string; previous_version: string; method: string }>(
+    "/api/runtime/update-yt-dlp",
+    { method: "POST" },
+  ),
   importJob: async (file: File, title?: string) => {
     const formData = new FormData();
     formData.append("file", file);
@@ -30,11 +40,10 @@ export const api: JobsApi = {
   },
   runtimeStatus: () => request<RuntimeReport>("/api/runtime/status"),
   runSmokeTest: () => request<RuntimeReport>("/api/runtime/smoke-test", { method: "POST" }),
+  releaseVram: () => request("/api/runtime/release-vram", { method: "POST" }),
   startJob: (jobId) => request(`/api/jobs/${jobId}/start`, { method: "POST" }),
   cancelJob: (jobId) => request(`/api/jobs/${jobId}/cancel`, { method: "POST" }),
   deleteJob: (jobId) => request(`/api/jobs/${jobId}`, { method: "DELETE" }),
-  selectVideo: (jobId, index) =>
-    request(`/api/jobs/${jobId}/select-video`, { method: "POST", body: JSON.stringify({ index }) }),
   getCheckpoint: (jobId, stepName) => request(`/api/jobs/${jobId}/checkpoint/${stepName}`),
   getSettings: () => request("/api/settings"),
   updateSettings: (payload) => request("/api/settings", { method: "PUT", body: JSON.stringify(payload) }),
@@ -82,6 +91,7 @@ export const api: JobsApi = {
     request(`/api/jobs/${jobId}/rerun`, { method: "POST", body: JSON.stringify({ keep_steps: keepSteps }) }),
   redubJob: (jobId) => request(`/api/jobs/${jobId}/redub`, { method: "POST" }),
   getJobFiles: (jobId) => request(`/api/jobs/${jobId}/files`),
+  getJobFolder: (jobId) => request<JobFolder>(`/api/jobs/${jobId}/folder`),
   detectHardware: () => request("/api/runtime/detect-hardware"),
   bootstrapVendor: (profile) => request("/api/runtime/bootstrap-vendor", { method: "POST", body: JSON.stringify({ profile }) }),
   bootstrapPyannote: () => request("/api/runtime/bootstrap-pyannote", { method: "POST" }),

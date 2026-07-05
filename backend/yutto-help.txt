@@ -1,0 +1,170 @@
+﻿usage: yutto download [-h] [-n NUM_WORKERS]
+                      [-q {127,126,125,120,116,112,100,80,74,64,32,16}]
+                      [-aq {30251,30255,30250,30280,30232,30216}]
+                      [--vcodec DOWNLOAD_VCODEC:SAVE_VCODEC]
+                      [--acodec DOWNLOAD_ACODEC:SAVE_ACODEC]
+                      [--download-vcodec-priority DOWNLOAD_VCODEC_PRIORITY]
+                      [--output-format {infer,mp4,mkv,mov}]
+                      [--output-format-audio-only {infer,m4a,aac,mp3,flac,mp4,mkv,mov}]
+                      [--ai-translation-language AI_TRANSLATION_LANGUAGE]
+                      [-df {xml,ass,protobuf}] [-bs BLOCK_SIZE] [-w]
+                      [-x PROXY] [-d DIR] [--tmp-dir TMP_DIR] [-c SESSDATA]
+                      [-tp SUBPATH_TEMPLATE] [-af ALIASES]
+                      [--metadata-format-premiered METADATA_FORMAT_PREMIERED]
+                      [--download-interval DOWNLOAD_INTERVAL]
+                      [--banned-mirrors-pattern BANNED_MIRRORS_PATTERN]
+                      [--vip-strict] [--login-strict] [--no-color]
+                      [--no-progress] [--debug] [--auth AUTH]
+                      [--auth-file AUTH_FILE] [--auth-profile AUTH_PROFILE]
+                      [--video-only] [--audio-only] [--no-danmaku]
+                      [--danmaku-only] [--no-subtitle] [--subtitle-only]
+                      [--with-metadata] [--metadata-only] [--no-cover]
+                      [--cover-only] [--no-chapter-info] [--save-cover]
+                      [--danmaku-font-size DANMAKU_FONT_SIZE]
+                      [--danmaku-font DANMAKU_FONT]
+                      [--danmaku-opacity DANMAKU_OPACITY]
+                      [--danmaku-display-region-ratio DANMAKU_DISPLAY_REGION_RATIO]
+                      [--danmaku-speed DANMAKU_SPEED] [--danmaku-block-top]
+                      [--danmaku-block-bottom] [--danmaku-block-scroll]
+                      [--danmaku-block-reverse] [--danmaku-block-fixed]
+                      [--danmaku-block-special] [--danmaku-block-colorful]
+                      [--danmaku-block-keyword-patterns DANMAKU_BLOCK_KEYWORD_PATTERNS]
+                      [-b] [-p EPISODES] [-s]
+                      [--batch-filter-start-time BATCH_FILTER_START_TIME]
+                      [--batch-filter-end-time BATCH_FILTER_END_TIME]
+                      [--no-inherit] [--config CONFIG]
+                      url
+
+positional arguments:
+  url                   ΦºåΘóæΣ╕╗Θí╡ url µêû url σêùΦí¿∩╝êΘ£ÇΣ╜┐τö¿ file scheme∩╝ë
+
+options:
+  -h, --help            show this help message and exit
+
+basic:
+  σƒ║τíÇσÅéµò░
+
+  -n NUM_WORKERS, --num-workers NUM_WORKERS
+                        σÉîµù╢τö¿Σ║ÄΣ╕ïΦ╜╜τÜäµ£Çσñº Worker µò░
+  -q {127,126,125,120,116,112,100,80,74,64,32,16}, --video-quality {127,126,125,120,116,112,100,80,74,64,32,16}
+                        ΦºåΘóæµ╕àµÖ░σ║ªτ¡ëτ║º∩╝ê127:8K, 126:Dolby Vision, 125:4K┬╖HDR10,
+                        120:4K, 116:1080P60, 112:1080P+, 100:µÖ║Φâ╜Σ┐«σñì, 80:1080P,
+                        74:720P60, 64:720P, 32:480P, 16:360P∩╝ë
+  -aq {30251,30255,30250,30280,30232,30216}, --audio-quality {30251,30255,30250,30280,30232,30216}
+                        Θƒ│ΘóæτáüτÄçτ¡ëτ║º∩╝ê30251:Hi-Res, 30255:Dolby Audio, 30250:Dolby
+                        Atmos, 30280:320kbps, 30232:128kbps, 30216:64kbps∩╝ë
+  --vcodec DOWNLOAD_VCODEC:SAVE_VCODEC
+                        ΦºåΘóæτ╝ûτáüµá╝σ╝Å∩╝ê<Σ╕ïΦ╜╜µá╝σ╝Å>:<τöƒµêÉµá╝σ╝Å>∩╝ë
+  --acodec DOWNLOAD_ACODEC:SAVE_ACODEC
+                        Θƒ│Θóæτ╝ûτáüµá╝σ╝Å∩╝ê<Σ╕ïΦ╜╜µá╝σ╝Å>:<τöƒµêÉµá╝σ╝Å>∩╝ë
+  --download-vcodec-priority DOWNLOAD_VCODEC_PRIORITY
+                        ΦºåΘóæτ╝ûτáüµá╝σ╝ÅΣ╝ÿσàêτ║º∩╝îΣ╜┐τö¿ `,` σêåΘÜö∩╝îσªé `hevc,avc,av1`∩╝îΘ╗ÿΦ«ñΣ╕║ `auto`∩╝îσì│µá╣µì«
+                        vcodec Σ╕¡πÇîΣ╕ïΦ╜╜τ╝ûτáüπÇìΦç¬σè¿µÄ¿µû¡
+  --output-format {infer,mp4,mkv,mov}
+                        Φ╛ôσç║µá╝σ╝Å∩╝êinfer Σ╕║Φç¬σè¿µÄ¿µû¡∩╝ë
+  --output-format-audio-only {infer,m4a,aac,mp3,flac,mp4,mkv,mov}
+                        Σ╗àσîàσÉ½Θƒ│Θóæµ╡üµù╢µëÇΣ╜┐τö¿τÜäΦ╛ôσç║µá╝σ╝Å∩╝êinfer Σ╕║Φç¬σè¿µÄ¿µû¡∩╝ë
+  --ai-translation-language AI_TRANSLATION_LANGUAGE
+                        σÉ»τö¿ AI σÄƒσú░τ┐╗Φ»æσèƒΦâ╜∩╝îσ╣╢µîçσ«Üτ┐╗Φ»æτ¢«µáçΦ»¡Φ¿Ç∩╝êσªé en τ¡ë∩╝ë
+  -df {xml,ass,protobuf}, --danmaku-format {xml,ass,protobuf}
+                        σ╝╣σ╣òτ▒╗σ₧ï
+  -bs BLOCK_SIZE, --block-size BLOCK_SIZE
+                        σêåσ¥ùΣ╕ïΦ╜╜µù╢σÉäσ¥ùσñºσ░Å∩╝îσìòΣ╜ìΣ╕║ MiB∩╝îΘ╗ÿΦ«ñΣ╕║ 0.5MiB
+  -w, --overwrite       σ╝║σê╢Φªåτ¢ûσ╖▓Σ╕ïΦ╜╜σåàσ«╣
+  -x PROXY, --proxy PROXY
+                        Φ«╛τ╜«Σ╗úτÉå∩╝êauto Σ╕║τ│╗τ╗ƒΣ╗úτÉåπÇüno Σ╕║Σ╕ìΣ╜┐τö¿Σ╗úτÉåπÇüσ╜ôτä╢Σ╣ƒσÅ»Σ╗ÑΦ«╛τ╜«Σ╗úτÉåσÇ╝∩╝ë
+  -d DIR, --dir DIR     Σ╕ïΦ╜╜τ¢«σ╜ò∩╝îΘ╗ÿΦ«ñΣ╕║Φ┐ÉΦíîτ¢«σ╜ò
+  --tmp-dir TMP_DIR     τö¿µ¥Ñσ¡ÿµö╛Σ╕ïΦ╜╜Φ┐çτ¿ïΣ╕¡Σ╕┤µù╢µûçΣ╗╢τÜäτ¢«σ╜ò∩╝îΘ╗ÿΦ«ñΣ╕║Σ╕ïΦ╜╜τ¢«σ╜ò
+  -c SESSDATA, --sessdata SESSDATA
+                        ∩╝êσ╝âτö¿∩╝ëCookies Σ╕¡τÜä SESSDATA σ¡ùµ«╡∩╝îµÄ¿ΦìÉµö╣τö¿ --auth
+  -tp SUBPATH_TEMPLATE, --subpath-template SUBPATH_TEMPLATE
+                        σñÜτ║ºτ¢«σ╜òτÜäσ¡ÿσé¿Φ╖»σ╛äµ¿íµ¥┐
+  -af ALIASES, --alias-file ALIASES
+                        Φ«╛τ╜« url σê½σÉìµûçΣ╗╢Φ╖»σ╛ä
+  --metadata-format-premiered METADATA_FORMAT_PREMIERED
+                        Σ╕ôτö¿Σ║Ä metadata µûçΣ╗╢Σ╕¡ premiered σ¡ùµ«╡τÜäµùÑµ£ƒµá╝σ╝Å
+  --download-interval DOWNLOAD_INTERVAL
+                        Φ«╛τ╜«Σ╕ïΦ╜╜Θù┤ΘÜö∩╝îσìòΣ╜ìΣ╕║τºÆ
+  --banned-mirrors-pattern BANNED_MIRRORS_PATTERN
+                        τªüτö¿Σ╕ïΦ╜╜Θô╛µÄÑτÜäΘò£σâÅµ║É∩╝îΣ╜┐τö¿µ¡úσêÖσî╣Θàì
+  --vip-strict          σÉ»τö¿Σ╕Ñµá╝µúÇµƒÑσñºΣ╝Üσæÿτöƒµòê
+  --login-strict        σÉ»τö¿Σ╕Ñµá╝µúÇµƒÑτÖ╗σ╜òτè╢µÇü
+  --no-color            Σ╕ìΣ╜┐τö¿Θó£Φë▓
+  --no-progress         Σ╕ìµÿ╛τñ║Φ┐¢σ║ªµ¥í
+  --debug               σÉ»τö¿ debug µ¿íσ╝Å
+
+auth:
+  Σ╕¬Σ║║Σ┐íµü»Φ«ñΦ»üσÅéµò░
+
+  --auth AUTH           τÖ╗σ╜ò Cookie∩╝îµá╝σ╝Åσªé `SESSDATA=xxxxx; bili_jct=yyyyy`
+  --auth-file AUTH_FILE
+                        Φ«ñΦ»üΣ┐íµü»µûçΣ╗╢Φ╖»σ╛ä
+  --auth-profile AUTH_PROFILE
+                        Φ«ñΦ»üΣ┐íµü» profile σÉìτº░∩╝îΘ╗ÿΦ«ñ default
+
+resource:
+  Φ╡äµ║ÉΘÇëµï⌐σÅéµò░
+
+  --video-only          Σ╗àΣ╕ïΦ╜╜ΦºåΘóæµ╡ü
+  --audio-only          Σ╗àΣ╕ïΦ╜╜Θƒ│Θóæµ╡ü
+  --no-danmaku          Σ╕ìτöƒµêÉσ╝╣σ╣òµûçΣ╗╢
+  --danmaku-only        Σ╗àτöƒµêÉσ╝╣σ╣òµûçΣ╗╢
+  --no-subtitle         Σ╕ìτöƒµêÉσ¡ùσ╣òµûçΣ╗╢
+  --subtitle-only       Σ╗àτöƒµêÉσ¡ùσ╣òµûçΣ╗╢
+  --with-metadata       τöƒµêÉσàâµò░µì«µûçΣ╗╢
+  --metadata-only       Σ╗àτöƒµêÉσàâµò░µì«µûçΣ╗╢
+  --no-cover            Σ╕ìτöƒµêÉσ░üΘ¥ó
+  --cover-only          Σ╗àτöƒµêÉσ░üΘ¥ó
+  --no-chapter-info     Σ╕ìσ░üΦúàτ½áΦèéΣ┐íµü»
+  --save-cover          τöƒµêÉΦºåΘóæµ╡üσ░üΘ¥óσÉÄσìòτï¼Σ┐¥σ¡ÿσ░üΘ¥óµûçΣ╗╢
+
+danmaku:
+  σ╝╣σ╣òΦ«╛τ╜«σÅéµò░
+
+  --danmaku-font-size DANMAKU_FONT_SIZE
+                        σ╝╣σ╣òσ¡ùΣ╜ôσñºσ░Å
+  --danmaku-font DANMAKU_FONT
+                        σ╝╣σ╣òσ¡ùΣ╜ô
+  --danmaku-opacity DANMAKU_OPACITY
+                        σ╝╣σ╣òΣ╕ìΘÇÅµÿÄσ║ª
+  --danmaku-display-region-ratio DANMAKU_DISPLAY_REGION_RATIO
+                        σ╝╣σ╣òµÿ╛τñ║σî║σƒƒΣ╕ÄΦºåΘóæΘ½ÿσ║ªτÜäµ»öΣ╛ï
+  --danmaku-speed DANMAKU_SPEED
+                        σ╝╣σ╣òΘÇƒσ║ª
+  --danmaku-block-top   σ▒ÅΦö╜Θí╢Θâ¿σ╝╣σ╣ò
+  --danmaku-block-bottom
+                        σ▒ÅΦö╜σ║òΘâ¿σ╝╣σ╣ò
+  --danmaku-block-scroll
+                        σ▒ÅΦö╜µ╗Üσè¿σ╝╣σ╣ò
+  --danmaku-block-reverse
+                        σ▒ÅΦö╜ΘÇåσÉæσ╝╣σ╣ò
+  --danmaku-block-fixed
+                        σ▒ÅΦö╜σ¢║σ«Üσ╝╣σ╣ò∩╝êΘí╢Θâ¿πÇüσ║òΘâ¿∩╝ë
+  --danmaku-block-special
+                        σ▒ÅΦö╜Θ½ÿτ║ºσ╝╣σ╣ò
+  --danmaku-block-colorful
+                        σ▒ÅΦö╜σ╜⌐Φë▓σ╝╣σ╣ò
+  --danmaku-block-keyword-patterns DANMAKU_BLOCK_KEYWORD_PATTERNS
+                        σ▒ÅΦö╜σî╣Θàìσà│Θö«Φ»ìτÜäσ╝╣σ╣ò∩╝îΣ╜┐τö¿ΘÇùσÅ╖σêåΘÜö
+
+batch:
+  µë╣ΘçÅΣ╕ïΦ╜╜σÅéµò░
+
+  -b, --batch           µë╣ΘçÅΣ╕ïΦ╜╜
+  -p EPISODES, --episodes EPISODES
+                        ΘÇëΘ¢å
+  -s, --with-section    σÉîµù╢Σ╕ïΦ╜╜ΘÖäσèáσëºΘ¢å∩╝êPVπÇüΘóäσæèΣ╗ÑσÅèτë╣σê½τ»çτ¡ëΣ╕ôσî║σåàσ«╣∩╝ë
+  --batch-filter-start-time BATCH_FILTER_START_TIME
+                        σÅ¬Σ╕ïΦ╜╜Φ»Ñµù╢Θù┤Σ╣ïσÉÄ∩╝êσîàσÉ½Σ╕┤τòîσÇ╝∩╝ëσÅæσ╕âτÜäτ¿┐Σ╗╢
+  --batch-filter-end-time BATCH_FILTER_END_TIME
+                        σÅ¬Σ╕ïΦ╜╜Φ»Ñµù╢Θù┤Σ╣ïσëì∩╝êΣ╕ìσîàσÉ½Σ╕┤τòîσÇ╝∩╝ëσÅæσ╕âτÜäτ¿┐Σ╗╢
+
+batch file:
+  µë╣ΘçÅΣ╕ïΦ╜╜µûçΣ╗╢σÅéµò░
+
+  --no-inherit          Σ╕ìτ╗ºµë┐τê╢τ║ºσÅéµò░
+
+config:
+  Θàìτ╜«µûçΣ╗╢σÅéµò░
+
+  --config CONFIG       Θàìτ╜«µûçΣ╗╢Φ╖»σ╛ä

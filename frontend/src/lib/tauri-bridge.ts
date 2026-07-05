@@ -10,19 +10,38 @@ export type BackendStatus =
 
 const DEFAULT_INTERVAL = 200;
 const DEFAULT_TIMEOUT = 30_000;
-const BACKEND_BASE = "http://127.0.0.1:8765";
+export const BACKEND_BASE = "http://127.0.0.1:8765";
+
+export type BackendConnectionState = "checking" | "online" | "offline" | "restarting";
 
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-async function browserHealthCheck(): Promise<boolean> {
+export async function probeBackendHealth(
+  baseUrl: string = BACKEND_BASE,
+  timeoutMs = 3_000,
+): Promise<boolean> {
   try {
-    const res = await fetch(`${BACKEND_BASE}/api/health`);
+    const res = await fetch(`${baseUrl}/api/health`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
     return res.ok;
   } catch {
     return false;
   }
+}
+
+export async function inspectBackend(
+  baseUrl: string = BACKEND_BASE,
+): Promise<BackendStatus | "unreachable"> {
+  if (await probeBackendHealth(baseUrl)) {
+    return { kind: "ready", base_url: baseUrl };
+  }
+  if (!isTauri()) {
+    return "unreachable";
+  }
+  return (await invoke("get_backend_status")) as BackendStatus;
 }
 
 export async function waitForBackend(
@@ -34,7 +53,7 @@ export async function waitForBackend(
   let last: BackendStatus | null = null;
   while (Date.now() < deadline) {
     if (!isTauri()) {
-      if (await browserHealthCheck()) return BACKEND_BASE;
+      if (await probeBackendHealth()) return BACKEND_BASE;
       last = { kind: "starting" };
       await new Promise((r) => setTimeout(r, interval));
       continue;
@@ -78,6 +97,16 @@ export async function invokeSetup(): Promise<void> {
 export async function invokeOpenDevtools(): Promise<void> {
   if (!isTauri()) return;
   await invoke("open_devtools");
+}
+
+export async function invokeOpenFolder(path: string): Promise<void> {
+  if (!isTauri()) {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(path);
+    }
+    throw new Error(`Đường dẫn đã được sao chép: ${path}`);
+  }
+  await invoke("open_folder", { path });
 }
 
 export type SetupProgress = { stage: string; pct: number };

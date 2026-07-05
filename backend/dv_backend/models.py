@@ -14,6 +14,9 @@ class JobStep(BaseModel):
     position: int
     status: str
     checkpoint_path: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+    duration_ms: int | None = None
 
 
 class Job(BaseModel):

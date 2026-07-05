@@ -27,6 +27,9 @@ cp -R "$STAGING_RUNTIME" "$DST/portable-runtime"
 rsync -a --delete "$REPO_ROOT/backend/dv_backend/" "$DST/portable-runtime/backend/dv_backend/"
 rsync -a "$REPO_ROOT/backend/scripts/" "$DST/portable-runtime/backend/scripts/"
 cp "$REPO_ROOT/backend/pyproject.toml" "$DST/portable-runtime/backend/pyproject.toml"
+if [ -f "$REPO_ROOT/backend/uv.lock" ]; then
+  cp "$REPO_ROOT/backend/uv.lock" "$DST/portable-runtime/backend/uv.lock"
+fi
 
 cd "$REPO_ROOT/dist-portable"
 ditto -c -k --sequesterRsrc --keepParent "$DST_NAME" "${DST_NAME}-macos.zip"

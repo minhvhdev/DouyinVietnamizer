@@ -16,40 +16,52 @@ def service(tmp_path: Path) -> SettingsService:
 def test_defaults_use_free_portable_pipeline(tmp_path: Path) -> None:
     settings = service(tmp_path)
 
-    assert settings.get_all()["cookies_browser"] == "none"
     assert settings.get_all()["translation_backend"] == "google_free"
-    assert settings.get_all()["voxcpm_model"] == "openbmb/VoxCPM2"
+    assert settings.get_all()["voxcpm_model"] == "gguf-q8"
     assert settings.get_all()["voxcpm_device"] == "cuda:0"
+    assert settings.get_all()["voxcpm_num_steps"] == 8
     assert settings.get_all()["voxcpm_clone_mode"] == "reference"
-    assert settings.get_all()["mix_mode"] == "duck"
+    assert settings.get_all()["mix_mode"] == "background_only"
     assert settings.get_all()["exact_timing_enabled"] is True
     assert settings.get_all()["exact_timing_tolerance_ms"] == 40
+    assert settings.get_all()["exact_timing_max_stretch"] == 1.2
     assert settings.get_all()["subtitles_enabled"] is True
     assert settings.get_all()["subtitle_font_size"] == 48
     assert settings.get_all()["subtitle_position"] == "bottom"
     assert settings.get_all()["asr_backend"] == "qwen3_asr"
     assert settings.get_all()["qwen3_asr_model"] == "Qwen/Qwen3-ASR-1.7B"
     assert settings.get_all()["gemini_api_keys"] == []
+    assert settings.get_all()["asr_alignment_mode"] == "accurate"
+    assert settings.get_all()["sparse_asr_enabled"] is False
+    assert settings.get_all()["sparse_asr_min_silence_ratio"] == 0.35
+    assert settings.get_all()["sparse_asr_chunk_sec"] == 25
+    assert settings.get_all()["sparse_asr_padding_ms"] == 200
+    assert settings.get_all()["tts_session_reuse_enabled"] is True
+    assert settings.get_all()["tts_micro_batch_enabled"] is True
+    assert settings.get_all()["exact_timing_max_safe_stretch"] == 1.25
+    assert settings.get_all()["vad_adaptive_enabled"] is False
+    assert settings.get_all()["vad_neural_fallback_enabled"] is False
+    assert settings.get_all()["gpu_model_idle_timeout_sec"] == 60
+    assert settings.get_all()["gpu_keep_warm_enabled"] is True
+    assert settings.get_all()["gpu_max_resident_models"] == 1
+    assert settings.get_all()["tts_conversion_strategy"] == "lazy_mix"
+    assert settings.get_all()["telemetry_max_file_mb"] == 16
 
 
-def test_cookie_browser_accepts_only_supported_values(tmp_path: Path) -> None:
+def test_mix_mode_accepts_background_only_and_duck(tmp_path: Path) -> None:
     settings = service(tmp_path)
 
-    settings.update({"cookies_browser": "edge"})
-    assert settings.get_all()["cookies_browser"] == "edge"
-
-    with pytest.raises(ValueError, match="cookies_browser"):
-        settings.update({"cookies_browser": "opera"})
-
-
-def test_mix_mode_accepts_only_duck(tmp_path: Path) -> None:
-    settings = service(tmp_path)
+    settings.update({"mix_mode": "background_only"})
+    assert settings.get_all()["mix_mode"] == "background_only"
 
     settings.update({"mix_mode": "duck"})
     assert settings.get_all()["mix_mode"] == "duck"
 
+    settings.update({"mix_mode": "separate"})
+    assert settings.get_all()["mix_mode"] == "background_only"
+
     with pytest.raises(ValueError, match="mix_mode"):
-        settings.update({"mix_mode": "separate"})
+        settings.update({"mix_mode": "invalid"})
 
 
 def test_voxcpm_clone_mode_accepts_supported_values(tmp_path: Path) -> None:
@@ -62,6 +74,65 @@ def test_voxcpm_clone_mode_accepts_supported_values(tmp_path: Path) -> None:
         settings.update({"voxcpm_clone_mode": "design"})
 
 
+def test_pipeline_optimization_settings_are_validated(tmp_path: Path) -> None:
+    settings = service(tmp_path)
+
+    updated = settings.update({
+        "asr_alignment_mode": "balanced",
+        "sparse_asr_enabled": True,
+        "sparse_asr_min_silence_ratio": 0.5,
+        "sparse_asr_chunk_sec": 40,
+        "sparse_asr_padding_ms": 300,
+        "tts_session_reuse_enabled": False,
+        "tts_micro_batch_enabled": True,
+        "exact_timing_max_safe_stretch": 1.3,
+        "vad_adaptive_enabled": True,
+        "vad_neural_fallback_enabled": True,
+    })
+
+    assert updated["asr_alignment_mode"] == "balanced"
+    assert updated["sparse_asr_enabled"] is True
+    assert updated["sparse_asr_min_silence_ratio"] == 0.5
+    assert updated["sparse_asr_chunk_sec"] == 40
+    assert updated["sparse_asr_padding_ms"] == 300
+    assert updated["tts_session_reuse_enabled"] is False
+    assert updated["tts_micro_batch_enabled"] is True
+    assert updated["exact_timing_max_safe_stretch"] == 1.3
+    assert updated["vad_adaptive_enabled"] is True
+    assert updated["vad_neural_fallback_enabled"] is True
+
+    with pytest.raises(ValueError, match="asr_alignment_mode"):
+        settings.update({"asr_alignment_mode": "maximum"})
+
+
+def test_gpu_settings_are_normalized(tmp_path: Path) -> None:
+    settings = service(tmp_path)
+    updated = settings.update({
+        "gpu_model_idle_timeout_sec": 120.5,
+        "gpu_keep_warm_enabled": False,
+        "gpu_max_resident_models": 3,
+    })
+    assert updated["gpu_model_idle_timeout_sec"] == 120.5
+    assert updated["gpu_keep_warm_enabled"] is False
+    assert updated["gpu_max_resident_models"] == 3
+
+    with pytest.raises(ValueError, match="gpu_max_resident_models"):
+        settings.update({"gpu_max_resident_models": "abc"})
+
+
+def test_conversion_and_telemetry_settings_are_validated(tmp_path: Path) -> None:
+    settings = service(tmp_path)
+    updated = settings.update({
+        "tts_conversion_strategy": "lazy_mix",
+        "telemetry_max_file_mb": 64,
+    })
+    assert updated["tts_conversion_strategy"] == "lazy_mix"
+    assert updated["telemetry_max_file_mb"] == 64
+
+    with pytest.raises(ValueError, match="tts_conversion_strategy"):
+        settings.update({"tts_conversion_strategy": "batch"})
+
+
 def test_exact_timing_settings_are_normalized(tmp_path: Path) -> None:
     settings = service(tmp_path)
 
@@ -70,7 +141,7 @@ def test_exact_timing_settings_are_normalized(tmp_path: Path) -> None:
         "exact_timing_max_stretch": 4.2,
     })
     assert updated["exact_timing_tolerance_ms"] == 120.5
-    assert updated["exact_timing_max_stretch"] == 3.0
+    assert updated["exact_timing_max_stretch"] == 1.2
 
     with pytest.raises(ValueError, match="exact_timing_tolerance_ms"):
         settings.update({"exact_timing_tolerance_ms": "abc"})

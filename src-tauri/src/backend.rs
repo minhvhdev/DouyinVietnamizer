@@ -1,15 +1,107 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use thiserror::Error;
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 
 use crate::portable::{prepend_path, PortableRuntime};
 
 /// Port the backend listens on. Duplicated from `state::BackendState::base_url` to avoid
 /// pulling tokio sync types into a pure parser.
 const BACKEND_PORT: u16 = 8765;
+const MAX_STDERR_TAIL_BYTES: usize = 16 * 1024;
+
+#[derive(Debug)]
+pub struct ManagedChild {
+    pub process: tokio::process::Child,
+    stderr_tail: Arc<StdMutex<String>>,
+}
+
+impl ManagedChild {
+    fn new(mut process: tokio::process::Child) -> Self {
+        let stderr_tail = Arc::new(StdMutex::new(String::new()));
+
+        if let Some(stdout) = process.stdout.take() {
+            tokio::spawn(discard_stream("stdout", stdout));
+        }
+        if let Some(stderr) = process.stderr.take() {
+            tokio::spawn(capture_stderr(stderr, stderr_tail.clone()));
+        }
+
+        Self { process, stderr_tail }
+    }
+
+    fn stderr_tail(&self) -> String {
+        self.stderr_tail
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+async fn discard_stream<R>(stream_name: &'static str, reader: R)
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error) => {
+                log::debug!("backend {stream_name} drain stopped: {error}");
+                break;
+            }
+        }
+    }
+}
+
+async fn capture_stderr<R>(reader: R, stderr_tail: Arc<StdMutex<String>>)
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => break,
+            Ok(_) => {
+                let mut tail = stderr_tail
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                tail.push_str(&line);
+                trim_to_last_bytes(&mut tail, MAX_STDERR_TAIL_BYTES);
+            }
+            Err(error) => {
+                let mut tail = stderr_tail
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                tail.push_str(&format!("[stderr drain error] {error}\n"));
+                trim_to_last_bytes(&mut tail, MAX_STDERR_TAIL_BYTES);
+                break;
+            }
+        }
+    }
+}
+
+fn trim_to_last_bytes(text: &mut String, max_bytes: usize) {
+    if text.len() <= max_bytes {
+        return;
+    }
+    let trim_from = text.len() - max_bytes;
+    let boundary = text
+        .char_indices()
+        .find(|(idx, _)| *idx >= trim_from)
+        .map(|(idx, _)| idx)
+        .unwrap_or(trim_from);
+    text.drain(..boundary);
+}
 
 /// Parse `netstat -ano -p TCP` output and return PIDs holding `LISTENING` sockets on `port`.
 /// Pure function; no IO. Excludes other ports (`87650` must not match `8765`) and non-LISTENING
@@ -128,10 +220,22 @@ pub fn build_backend_env(runtime: &PortableRuntime, dev_profile: bool) -> HashMa
     let mut envs = HashMap::new();
     envs.insert("DV_RELOAD", OsString::from(if dev_profile { "1" } else { "0" }));
     envs.insert("DV_PORTABLE_RUNTIME_DIR", runtime.root.as_os_str().to_os_string());
-    envs.insert("DV_VENDOR_DIR", runtime.root.as_os_str().to_os_string());
+    // vendor resolver joins DV_VENDOR_DIR + manifest executable path.
+    // Portable manifests use paths like "ffmpeg/ffmpeg.exe", while binaries live
+    // under runtime/tools/{ffmpeg,yt-dlp}, so DV_VENDOR_DIR must be tools_dir.
+    envs.insert("DV_VENDOR_DIR", runtime.tools_dir.as_os_str().to_os_string());
     envs.insert("DV_VENDOR_MANIFEST", runtime.root.join("manifest.json").as_os_str().to_os_string());
     envs.insert("DV_MODELS_DIR", runtime.models_dir.as_os_str().to_os_string());
-    envs.insert("DV_VOXCPM_VENV", runtime.backend_dir.join("dv_backend").join(".venv-voxcpm").as_os_str().to_os_string());
+    let voxcpm_cli_name = if cfg!(windows) { "voxcpm2-cli.exe" } else { "voxcpm2-cli" };
+    let voxcpm_cli = runtime.tools_dir.join("voxcpm2").join(voxcpm_cli_name);
+    if voxcpm_cli.is_file() {
+        envs.insert("DV_VOXCPM_CLI", voxcpm_cli.as_os_str().to_os_string());
+    }
+    let tts_server_name = if cfg!(windows) { "llama-tts-server.exe" } else { "llama-tts-server" };
+    let tts_server = runtime.tools_dir.join("voxcpm2").join(tts_server_name);
+    if tts_server.is_file() {
+        envs.insert("DV_VOXCPM_TTS_SERVER", tts_server.as_os_str().to_os_string());
+    }
     envs.insert("DV_ALLOW_PATH_TOOLS", OsString::from("0"));
     envs.insert("PATH", prepend_path(&runtime.tools_dir, std::env::var_os("PATH")));
     envs
@@ -145,7 +249,7 @@ pub fn spawn_uvicorn(
     runtime: &PortableRuntime,
     source_backend_dir: &Path,
     dev_profile: bool,
-) -> Result<tokio::process::Child, BackendStartError> {
+) -> Result<ManagedChild, BackendStartError> {
     use std::process::Stdio;
     #[cfg(windows)]
     {
@@ -166,21 +270,23 @@ pub fn spawn_uvicorn(
         // Hide the uvicorn console window. Without this, Rust spawns a visible
         // `python.exe` console that the user can close by accident and silently
         // kill the backend.
-        use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     for (key, value) in build_backend_env(runtime, dev_profile) {
         cmd.env(key, value);
     }
-    cmd.spawn().map_err(|e| BackendStartError::Spawn(format!("{} using runtime {}", e, runtime.root.display())))
+    let child = cmd
+        .spawn()
+        .map_err(|e| BackendStartError::Spawn(format!("{} using runtime {}", e, runtime.root.display())))?;
+    Ok(ManagedChild::new(child))
 }
 
 /// Poll `GET {base_url}/health` every 100ms up to `timeout`. On timeout, kill child.
 /// If child exits during polling, drain stderr and return Crashed.
 pub async fn wait_for_ready(
     base_url: &str,
-    child: &mut tokio::process::Child,
+    child: &mut ManagedChild,
     timeout: Duration,
 ) -> Result<(), BackendStartError> {
     let poll_interval = Duration::from_millis(100);
@@ -189,19 +295,18 @@ pub async fn wait_for_ready(
         if is_health_ok(base_url).await {
             return Ok(());
         }
-        match child.try_wait() {
+        match child.process.try_wait() {
             Ok(Some(status)) => {
-                let stderr = drain_stderr(child).await;
                 return Err(BackendStartError::Crashed {
                     code: status.code(),
-                    stderr: parse_uvicorn_stderr(&stderr),
+                    stderr: parse_uvicorn_stderr(&child.stderr_tail()),
                 });
             }
             Ok(None) => { /* still running */ }
             Err(e) => return Err(BackendStartError::Spawn(e.to_string())),
         }
         if start.elapsed() >= timeout {
-            let _ = child.start_kill();
+            let _ = child.process.start_kill();
             return Err(BackendStartError::Timeout(timeout));
         }
         tokio::time::sleep(poll_interval).await;
@@ -221,14 +326,29 @@ pub async fn is_health_ok(base_url: &str) -> bool {
     }
 }
 
-async fn drain_stderr(child: &mut tokio::process::Child) -> String {
-    use tokio::io::AsyncReadExt;
-    if let Some(mut s) = child.stderr.take() {
-        let mut buf = String::new();
-        let _ = s.read_to_string(&mut buf);
-        return buf;
+pub async fn request_release_vram(base_url: &str) -> Result<(), String> {
+    let url = format!("{}/api/runtime/release-vram", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(4))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = client
+        .post(&url)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if response.status().is_success() {
+        return Ok(());
     }
-    String::new()
+    let detail = response
+        .text()
+        .await
+        .unwrap_or_else(|_| "failed to read backend response".into());
+    Err(detail)
+}
+
+pub fn buffered_stderr(child: &ManagedChild) -> String {
+    child.stderr_tail()
 }
 
 #[cfg(test)]
@@ -251,19 +371,35 @@ mod tests {
         let runtime = runtime(root.clone());
         let envs = build_backend_env(&runtime, true);
         assert_eq!(envs.get("DV_PORTABLE_RUNTIME_DIR").unwrap(), &root.as_os_str().to_os_string());
+        assert_eq!(
+            envs.get("DV_VENDOR_DIR").unwrap(),
+            &root.join("tools").as_os_str().to_os_string()
+        );
         assert_eq!(envs.get("DV_RELOAD").unwrap(), "1");
         assert!(envs.get("PATH").unwrap().to_string_lossy().contains("tools"));
     }
 
     #[test]
-    fn build_backend_command_env_uses_portable_voxcpm_venv() {
-        let root = PathBuf::from("C:/rt");
-        let runtime = runtime(root);
+    fn build_backend_command_env_points_voxcpm_cli_at_portable_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let voxcpm_tools = root.join("tools").join("voxcpm2");
+        std::fs::create_dir_all(&voxcpm_tools).unwrap();
+        let cli_name = if cfg!(windows) { "voxcpm2-cli.exe" } else { "voxcpm2-cli" };
+        let server_name = if cfg!(windows) { "llama-tts-server.exe" } else { "llama-tts-server" };
+        std::fs::write(voxcpm_tools.join(cli_name), b"x").unwrap();
+        std::fs::write(voxcpm_tools.join(server_name), b"x").unwrap();
+        let runtime = runtime(root.clone());
         let envs = build_backend_env(&runtime, true);
         assert_eq!(
-            envs.get("DV_VOXCPM_VENV").unwrap(),
-            &PathBuf::from("C:/rt").join("backend").join("dv_backend").join(".venv-voxcpm").as_os_str().to_os_string(),
+            envs.get("DV_VOXCPM_CLI").unwrap(),
+            &voxcpm_tools.join(cli_name).as_os_str().to_os_string(),
         );
+        assert_eq!(
+            envs.get("DV_VOXCPM_TTS_SERVER").unwrap(),
+            &voxcpm_tools.join(server_name).as_os_str().to_os_string(),
+        );
+        assert!(!envs.contains_key("DV_VOXCPM_VENV"));
     }
 
     #[test]

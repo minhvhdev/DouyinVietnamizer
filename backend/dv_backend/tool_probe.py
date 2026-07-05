@@ -32,11 +32,15 @@ def probe_executable(
         )
         output = (completed.stdout + "\n" + completed.stderr).strip()[:16_384]
         duration_ms = round((time.perf_counter() - started) * 1000)
-        if completed.returncode != 0:
+        if completed.returncode not in tool.success_exit_codes:
             return ProbeResult(
                 status="blocked",
                 message=f"{tool.display_name} exited with code {completed.returncode}.",
-                action="Replace the executable with a supported release.",
+                action=(
+                    "Replace the executable with a supported release."
+                    if tool.success_exit_codes == [0]
+                    else f"Verify the probe arguments and expected exit codes: {tool.success_exit_codes}."
+                ),
                 detail=output,
                 duration_ms=duration_ms,
             )
