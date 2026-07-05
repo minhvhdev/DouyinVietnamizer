@@ -44,6 +44,13 @@ backend/.data*/
 graphify-out/
 .claude/
 .superpowers/
+.cache/
+
+# Local VoxCPM2 build tree (see scripts/build-voxcpm2-mac.sh)
+backend/models/
+backend/data/
+backend/out*.wav
+backend/benchmark_report*.json
 
 # Local generated samples and portable builds
 sample/

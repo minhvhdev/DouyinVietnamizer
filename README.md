@@ -91,57 +91,22 @@ The `.app` looks for a sibling `portable-runtime/` folder with the bundled Pytho
 
 ### Building from source (maintainers)
 
-Build host requirements:
-- Apple Silicon Mac (M1/M2/M3/M4), macOS 12+
-- Internet connection (first run downloads Python runtime, pip packages, tools, and models)
-- Free disk space: at least 20 GB recommended
+**Full guide (Cursor-friendly, step-by-step):** [docs/BUILD_MACOS.md](docs/BUILD_MACOS.md)
+
+Quick path on a fresh Apple Silicon Mac (M1–M4):
 
 ```bash
-# from repository root
+git clone https://github.com/minhvhdev/DouyinVietnamizer.git
+cd DouyinVietnamizer
+xcode-select --install   # if needed; wait for GUI install to finish
+brew install cmake git   # if Homebrew already present
+pnpm run voxcpm:build:mac
 pnpm run tauri:build:mac:m4
 ```
 
-What this command does automatically:
-- Homebrew (if missing)
-- Node.js + pnpm
-- rustup + Rust target `aarch64-apple-darwin`
-- uv
-- python-build-standalone runtime, Python packages, tools, and models
+`voxcpm:build:mac` builds `vendor/voxcpm2/voxcpm2-cli` from [llama.cpp-omni](https://github.com/tc-mb/llama.cpp-omni) (required before the portable build). `tauri:build:mac:m4` bootstraps Node/pnpm/rust/uv, downloads models (~11 GB first run), and produces `dist-portable/DouyinVietnamizer-0.1.0-portable-macos.zip`.
 
-Step-by-step flow on a fresh Mac:
-1. Install/prepare Xcode Command Line Tools.
-2. Install missing package/build tools listed above.
-3. Build frontend assets.
-4. Build Tauri app for `aarch64-apple-darwin`.
-5. Build portable runtime at `dist-portable/macos-staging/portable-runtime`.
-6. Assemble final bundle and zip.
-
-If Xcode Command Line Tools are missing, the script will trigger `xcode-select --install` and stop. Complete installation, then run the same build command again.
-
-Build outputs:
-- App bundle: `dist-portable/DouyinVietnamizer-0.1.0-portable/DouyinVietnamizer.app`
-- Runtime folder: `dist-portable/DouyinVietnamizer-0.1.0-portable/portable-runtime`
-- Release zip: `dist-portable/DouyinVietnamizer-0.1.0-portable-macos.zip`
-
-Run the built app locally:
-1. Unzip `DouyinVietnamizer-0.1.0-portable-macos.zip`.
-2. Keep `DouyinVietnamizer.app` and `portable-runtime/` in the same folder.
-3. First launch: right-click `DouyinVietnamizer.app` -> **Open** -> confirm.
-
-Equivalent manual steps (if you want full control):
-
-```bash
-pnpm install
-pnpm tauri build --target aarch64-apple-darwin
-bash scripts/build-portable-runtime-mac.sh
-bash scripts/build-portable-mac.sh
-```
-
-Common issues:
-- `xcode-select: error`: install Command Line Tools, then rerun.
-- `pnpm` not found: rerun once; bootstrap installs it automatically.
-- Download/model step is slow: first run may download ~11 GB; later runs reuse `dist-portable/macos-staging/`.
-- Gatekeeper blocks app: use right-click -> Open for first launch.
+Requirements: macOS 12+, arm64, ≥ 25 GB free disk, stable internet. See [docs/BUILD_MACOS.md](docs/BUILD_MACOS.md) for dev mode, troubleshooting, and agent checklist.
 
 ## Vendor tools
 
