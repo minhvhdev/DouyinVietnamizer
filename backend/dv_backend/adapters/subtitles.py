@@ -267,6 +267,24 @@ def ffmpeg_subtitles_filter(ass_path: Path) -> str:
     return f"subtitles=filename='{ffmpeg_escape_path(ass_path)}'"
 
 
+def subtitles_filter_available(ffmpeg_path: Path) -> bool:
+    """Return True when ffmpeg was built with libass (subtitles/ass filter)."""
+    try:
+        completed = subprocess.run(
+            [str(ffmpeg_path), "-filters"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+        output = f"{completed.stdout}\n{completed.stderr}".lower()
+        return " subtitles " in output or " ass " in output
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def probe_video_dimensions(ffmpeg_path: Path, video_path: Path) -> tuple[int, int]:
     ffprobe = ffmpeg_path.with_name(
         "ffprobe.exe" if ffmpeg_path.name.lower().startswith("ffmpeg") else "ffprobe"

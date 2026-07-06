@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import tempfile
 import threading
 import wave
@@ -41,12 +42,33 @@ _campplus_model_cache_key: tuple[str, str] | None = None
 
 
 def cuda_available() -> bool:
-    try:
-        import torch
+    from ..hardware import accelerator_available
 
-        return bool(torch.cuda.is_available())
-    except Exception:
-        return False
+    return accelerator_available()
+
+
+def _require_asr_accelerator() -> None:
+    from ..hardware import accelerator_available, default_inference_device
+
+    if accelerator_available():
+        return
+    raise AppError(
+        503,
+        ErrorInfo(
+            code="ACCELERATOR_UNAVAILABLE",
+            message="Qwen3-ASR requires a GPU accelerator (NVIDIA CUDA or Apple MPS).",
+            action=(
+                "Use a CUDA-capable GPU on Windows/Linux, or run on Apple Silicon with "
+                f"PyTorch MPS enabled (resolved device: {default_inference_device()})."
+            ),
+        ),
+    )
+
+
+def _resolve_asr_device(device: str) -> str:
+    from ..hardware import resolve_inference_device
+
+    return resolve_inference_device(device)
 
 
 def configure_gpu_manager(settings: dict | None) -> None:
@@ -318,24 +340,15 @@ def _clear_campplus_model() -> None:
 
 def _load_campplus_model(device: str) -> Any:
     global _campplus_model_instance, _campplus_model_cache_key
-    resolved_device = device if device.startswith("cuda") else "cuda:0"
+    resolved_device = _resolve_asr_device(device)
     cache_key = (CAMPPLUS_MODEL, resolved_device)
     with _model_lock:
         if _campplus_model_instance is not None and _campplus_model_cache_key == cache_key:
             return _campplus_model_instance
 
-        import torch
         from funasr import AutoModel
 
-        if not torch.cuda.is_available():
-            raise AppError(
-                503,
-                ErrorInfo(
-                    code="CUDA_UNAVAILABLE",
-                    message="CampPlus speaker embedding requires an NVIDIA GPU with CUDA.",
-                    action="Install NVIDIA drivers and a CUDA-enabled PyTorch build, then retry.",
-                ),
-            )
+        _require_asr_accelerator()
 
         os.environ.setdefault("MODELSCOPE_CACHE", str(Path.home() / ".cache" / "modelscope"))
         model = AutoModel(
@@ -639,32 +652,25 @@ def _clear_funasr_model() -> None:
 
 def _load_model(asr_model: str, aligner_model: str, device: str) -> Any:
     global _model_instance, _model_cache_key
-    cache_key = (asr_model, aligner_model, device)
+    resolved_device = _resolve_asr_device(device)
+    cache_key = (asr_model, aligner_model, resolved_device)
     with _model_lock:
         if _model_instance is not None and _model_cache_key == cache_key:
             return _model_instance
 
-        import torch
         from qwen_asr import Qwen3ASRModel
 
-        if not torch.cuda.is_available():
-            raise AppError(
-                503,
-                ErrorInfo(
-                    code="CUDA_UNAVAILABLE",
-                    message="Qwen3-ASR requires an NVIDIA GPU with CUDA.",
-                    action="Install NVIDIA drivers and a CUDA-enabled PyTorch build, then retry.",
-                ),
-            )
+        from ..hardware import inference_dtype_for_device
 
-        resolved_device = device if device.startswith("cuda") else "cuda:0"
+        _require_asr_accelerator()
+        dtype = inference_dtype_for_device(resolved_device)
         model = Qwen3ASRModel.from_pretrained(
             asr_model,
-            dtype=torch.bfloat16,
+            dtype=dtype,
             device_map=resolved_device,
             forced_aligner=aligner_model,
             forced_aligner_kwargs={
-                "dtype": torch.bfloat16,
+                "dtype": dtype,
                 "device_map": resolved_device,
             },
             max_inference_batch_size=1,
@@ -677,25 +683,15 @@ def _load_model(asr_model: str, aligner_model: str, device: str) -> Any:
 
 def _load_funasr_model(funasr_model: str, aligner_model: str, device: str) -> Any:
     global _funasr_model_instance, _funasr_model_cache_key
-    cache_key = (funasr_model, aligner_model, device)
+    resolved_device = _resolve_asr_device(device)
+    cache_key = (funasr_model, aligner_model, resolved_device)
     with _model_lock:
         if _funasr_model_instance is not None and _funasr_model_cache_key == cache_key:
             return _funasr_model_instance
 
-        import torch
         from funasr import AutoModel
 
-        if not torch.cuda.is_available():
-            raise AppError(
-                503,
-                ErrorInfo(
-                    code="CUDA_UNAVAILABLE",
-                    message="FunASR speaker diarization requires an NVIDIA GPU with CUDA.",
-                    action="Install NVIDIA drivers and a CUDA-enabled PyTorch build, then retry.",
-                ),
-            )
-
-        resolved_device = device if device.startswith("cuda") else "cuda:0"
+        _require_asr_accelerator()
         os.environ.setdefault("MODELSCOPE_CACHE", str(Path.home() / ".cache" / "modelscope"))
         model = AutoModel(
             model=funasr_model or DEFAULT_FUNASR_ASR_MODEL,
@@ -732,6 +728,8 @@ def reset_model_cache() -> None:
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        elif sys.platform == "darwin" and torch.backends.mps.is_available() and hasattr(torch.mps, "empty_cache"):
+            torch.mps.empty_cache()
     except Exception:
         pass
 
@@ -938,6 +936,7 @@ def transcribe_audio(
         aligner_model,
         DEFAULT_ALIGNER_MODEL,
     )
+    device = _resolve_asr_device(device)
 
     from ..gpu_manager import global_gpu_manager
 

@@ -15,6 +15,7 @@ from dv_backend.adapters.subtitles import (
     normalize_position,
     segment_subtitle_end,
     split_translation_sentences,
+    subtitles_filter_available,
     write_ass_file,
 )
 
@@ -211,6 +212,23 @@ def test_ffmpeg_subtitles_filter_escapes_path(tmp_path: Path) -> None:
     assert filter_value.startswith("subtitles=filename='")
     if len(ass_path.drive) == 2 and ass_path.drive[1] == ":":
         assert r"\:" in filter_value
+
+
+def test_subtitles_filter_available_detects_missing_filter(tmp_path: Path, monkeypatch) -> None:
+    ffmpeg_path = tmp_path / "ffmpeg"
+    ffmpeg_path.write_text("fake", encoding="utf-8")
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout=" T. a drawtext\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert subtitles_filter_available(ffmpeg_path) is False
+
+    def fake_run_with_subtitles(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout=" T. subtitles V->V\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run_with_subtitles)
+    assert subtitles_filter_available(ffmpeg_path) is True
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg required")

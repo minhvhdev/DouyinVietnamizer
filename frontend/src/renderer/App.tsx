@@ -162,7 +162,8 @@ function formatSidebarVram(runtime: RuntimeReport | null): string {
 }
 
 function formatSidebarEnvironment(runtime: RuntimeReport | null): "Đủ" | "Thiếu" {
-  return runtime?.status?.toLowerCase() === "ready" ? "Đủ" : "Thiếu";
+  const status = runtime?.status?.toLowerCase();
+  return status === "ready" || status === "warning" ? "Đủ" : "Thiếu";
 }
 
 function summarizeVramRelease(result: ReleaseVramResult): string {
