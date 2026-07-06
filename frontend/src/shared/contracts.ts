@@ -68,6 +68,8 @@ export type JobsApi = {
   deleteClonedVoice(voiceId: string): Promise<{ status: string }>;
   testClonedVoice(voiceId: string, text: string, mode?: "reference" | "ultimate"): Promise<Blob>;
   previewPresetVoice(voice: string, text: string): Promise<Blob>;
+  listTtsVoices(backend: string): Promise<Array<{ id: string; name: string; gender?: string; kind?: string }>>;
+  previewTts(text: string, options?: { backend?: string; voice?: string; settings?: Record<string, unknown> }): Promise<Blob>;
   rerunJob(jobId: string, keepSteps: string[]): Promise<{ status: string; job: Job }>;
   redubJob(jobId: string): Promise<{ status: string; job: Job }>;
   getJobFiles(jobId: string): Promise<any[]>;

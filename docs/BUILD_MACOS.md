@@ -103,7 +103,7 @@ Lệnh này (qua `scripts/build-portable-runtime-mac.sh --full-build`) tự:
 2. `pnpm install --frozen-lockfile`
 3. Build frontend
 4. `pnpm tauri build --target aarch64-apple-darwin --no-sign`
-5. Tải Python embedded 3.12, pip packages (PyTorch MPS/CPU)
+5. Tải Python embedded 3.12, pip packages (PyTorch MPS/CPU, Silero VAD, Edge TTS, Demucs, …)
 6. Tải ffmpeg, yt-dlp
 7. Bundle `vendor/voxcpm2/` vào runtime
 8. Tải models Qwen3-ASR + VoxCPM2 GGUF (~3.3 GB cho TTS)
@@ -307,6 +307,15 @@ rustup default stable
 ### Tải model Hugging Face chậm / timeout
 
 Lần sau script bỏ qua file đã có trong `dist-portable/macos-staging/portable-runtime/models/`. Có thể set `HF_TOKEN` nếu rate-limit.
+
+### VAD / TTS mới không chạy sau khi pull code mới
+
+Script Mac luôn chạy lại `uv pip install` và `uv pip install -e backend` khi build runtime. Nếu venv cũ vẫn lỗi, xóa staging rồi build lại:
+
+```bash
+rm -rf dist-portable/macos-staging/portable-runtime/.venv
+pnpm run tauri:build:mac:m4
+```
 
 ### Gatekeeper chặn app
 

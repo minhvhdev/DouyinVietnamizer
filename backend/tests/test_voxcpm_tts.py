@@ -47,9 +47,11 @@ def test_parse_voxcpm_voice_with_ref_audio(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_create_tts_adapter_always_selects_voxcpm() -> None:
-    adapter = create_tts_adapter({"tts_backend": "other", "voxcpm_device": "cuda:0"})
-    assert type(adapter).__name__ == "VoxCPMTtsAdapter"
+def test_create_tts_adapter_selects_backend() -> None:
+    voxcpm = create_tts_adapter({"tts_backend": "voxcpm", "voxcpm_device": "cuda:0"})
+    assert type(voxcpm).__name__ == "VoxCPMTtsAdapter"
+    edge = create_tts_adapter({"tts_backend": "edge_tts"})
+    assert type(edge).__name__ == "EdgeTtsAdapter"
 
 
 # ---------------------------------------------------------------------------

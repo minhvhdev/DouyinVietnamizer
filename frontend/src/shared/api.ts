@@ -87,6 +87,24 @@ export const api: JobsApi = {
     }
     return response.blob();
   },
+  listTtsVoices: async (backend) => request(`/api/tts/voices?backend=${encodeURIComponent(backend)}`),
+  previewTts: async (text, options = {}) => {
+    const response = await fetch(`${baseUrl}/api/tts/preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text,
+        backend: options.backend,
+        voice: options.voice,
+        settings: options.settings,
+      }),
+    });
+    if (!response.ok) {
+      const body = await response.json();
+      throw new Error(body.error?.message ?? "Failed to preview TTS");
+    }
+    return response.blob();
+  },
   rerunJob: (jobId, keepSteps) =>
     request(`/api/jobs/${jobId}/rerun`, { method: "POST", body: JSON.stringify({ keep_steps: keepSteps }) }),
   redubJob: (jobId) => request(`/api/jobs/${jobId}/redub`, { method: "POST" }),

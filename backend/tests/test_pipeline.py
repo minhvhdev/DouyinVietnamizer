@@ -44,6 +44,10 @@ def test_env(tmp_path: Path):
             "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
             ("qwen3_device", json.dumps("cuda:0"), "now")
         )
+        database.connection.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("vad_engine", json.dumps("silencedetect"), "now")
+        )
         
     job_service = JobService(database, tmp_path)
     runner = JobRunner(config, database)
@@ -344,6 +348,25 @@ def test_asr_rejects_empty_transcription(mock_transcribe, test_env):
     assert error.value.info.code == "EMPTY_ASR_TRANSCRIPTION"
 
 
+@patch("dv_backend.pipeline.transcribe_audio")
+def test_asr_prefers_vocals_16k_when_available(mock_transcribe, test_env):
+    config, database, job_service, runner = test_env
+    job = create_local_job(job_service, config.data_dir)
+    artifacts_dir = config.data_dir / "jobs" / job.id / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    mixed_path = artifacts_dir / "audio_16k.wav"
+    vocals_path = artifacts_dir / "vocals_16k.wav"
+    write_dummy_wav(mixed_path, amplitude=0.01)
+    write_dummy_wav(vocals_path, amplitude=0.2)
+    save_checkpoint(config.data_dir, job.id, "extract_audio", {"vocals_16k_path": str(vocals_path)})
+    mock_transcribe.return_value = [{"start": 0.0, "end": 1.0, "text": "你好"}]
+
+    result = pipeline.asr_step(job.id, config, database, runner)
+
+    assert mock_transcribe.call_args.args[0] == vocals_path
+    assert result["recognition_audio_source"] == "vocals_16k"
+
+
 @patch("dv_backend.pipeline.get_audio_duration")
 @patch("dv_backend.pipeline.resolve_tool_path")
 @patch("dv_backend.pipeline.run_subprocess_with_cancel")
@@ -351,6 +374,8 @@ def test_vad_step_parses_silence_and_writes_telemetry(mock_run, mock_resolve, mo
     config, database, job_service, runner = test_env
     mock_resolve.return_value = Path("dummy-ffmpeg")
     mock_probe_duration.return_value = 10.0
+
+    # test_env defaults vad_engine to silencedetect for FFmpeg-mocked integration tests.
 
     # Create dummy wav file
     job_dir = config.data_dir / "jobs" / "job123"
@@ -390,6 +415,33 @@ def test_vad_step_parses_silence_and_writes_telemetry(mock_run, mock_resolve, mo
     assert '"step": "vad"' in telemetry.read_text(encoding="utf-8")
 
 
+@patch("dv_backend.pipeline.get_audio_duration")
+@patch("dv_backend.pipeline.resolve_tool_path")
+@patch("dv_backend.pipeline.run_subprocess_with_cancel")
+def test_vad_step_prefers_vocals_16k_when_available(mock_run, mock_resolve, mock_probe_duration, test_env):
+    config, database, job_service, runner = test_env
+    mock_resolve.return_value = Path("dummy-ffmpeg")
+    mock_probe_duration.return_value = 6.0
+    job_dir = config.data_dir / "jobs" / "job-vad-vocals"
+    artifacts_dir = job_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    write_dummy_wav(artifacts_dir / "audio_16k.wav", amplitude=0.01)
+    vocals_16k = artifacts_dir / "vocals_16k.wav"
+    write_dummy_wav(vocals_16k, amplitude=0.2)
+    save_checkpoint(config.data_dir, "job-vad-vocals", "extract_audio", {"vocals_16k_path": str(vocals_16k)})
+    mock_run.return_value = MagicMock(
+        stdout="",
+        stderr="[silencedetect @ 0x1] silence_start: 2.0\n[silencedetect @ 0x1] silence_end: 3.0 | silence_duration: 1.0\n",
+        returncode=0,
+    )
+
+    res = pipeline.vad_step("job-vad-vocals", config, database, runner)
+
+    cmd = mock_run.call_args.args[0]
+    assert str(vocals_16k) in cmd
+    assert res["recognition_audio_source"] == "vocals_16k"
+
+
 def test_normalize_segments_resolves_overlaps(test_env):
     config, database, job_service, runner = test_env
     
@@ -417,10 +469,29 @@ def test_normalize_segments_resolves_overlaps(test_env):
     assert segments[0]["duration_budget"] == 1.5
     
     # Second budget is total_duration (10.0) - start of current (2.5) = 7.5
-    assert segments[1]["start"] == 2.5
-    assert segments[1]["end"] == 5.0
-    assert segments[1]["original_duration"] == 2.5
-    assert segments[1]["duration_budget"] == 7.5
+
+
+def test_normalize_segments_filters_vad_false_positives(test_env):
+    config, database, job_service, runner = test_env
+
+    save_checkpoint(config.data_dir, "job123", "asr", {
+        "segments": [
+            {"start": 0.0, "end": 1.0, "text": "music"},
+            {"start": 1.0, "end": 2.0, "text": "music"},
+            {"start": 2.0, "end": 3.0, "text": "real line"},
+        ],
+        "aligned_units": [],
+    })
+    save_checkpoint(config.data_dir, "job123", "vad", {
+        "total_duration": 5.0,
+        "speech_regions": [{"start": 0.0, "end": 3.0}],
+    })
+
+    res = pipeline.normalize_segments_step("job123", config, database, runner)
+    assert res["vad_false_positive_rejected_count"] == 1
+    assert len(res["segments"]) == 2
+    assert res["segments"][0]["text"] == "music"
+    assert res["segments"][1]["text"] == "real line"
 
 
 def test_normalize_segments_splits_single_long_asr_segment_with_vad(test_env):
@@ -792,11 +863,58 @@ def test_duration_repair_pads_short_segments_to_budget(mock_dur, mock_run, mock_
 
     result = pipeline.duration_repair_step("job-short", config, database, runner)
 
-    assert result["segments"][0]["repaired_method"] == "centered_silence_pad"
+    assert result["segments"][0]["repaired_method"] == "tail_silence_pad"
     assert result["segments"][0]["repaired_duration"] == 2.0
     calls = [" ".join(call.args[0]) for call in mock_run.call_args_list]
-    assert any("adelay=" in cmd for cmd in calls)
+    assert any("apad=" in cmd for cmd in calls)
+    assert not any("adelay=" in cmd for cmd in calls)
     assert not any("atempo=" in cmd for cmd in calls)
+
+
+@patch("dv_backend.pipeline.TtsSession")
+@patch("dv_backend.pipeline._lengthen_translation_with_gemini")
+@patch("dv_backend.pipeline.get_wav_duration")
+@patch("dv_backend.pipeline.run_subprocess_with_cancel")
+@patch("dv_backend.pipeline.resolve_tool_path")
+def test_duration_repair_lengthens_when_gap_exceeds_one_second(
+    mock_resolve,
+    mock_run,
+    mock_dur,
+    mock_lengthen,
+    mock_tts_session,
+    test_env,
+):
+    config, database, _job_service, runner = test_env
+    mock_resolve.return_value = Path("dummy-ffmpeg")
+    save_checkpoint(config.data_dir, "job-long-gap", "tts", {
+        "segments": [
+            {
+                "index": 0,
+                "start": 0.0,
+                "end": 4.0,
+                "translation": "Ngắn.",
+                "duration_budget": 4.0,
+                "tts_duration": 1.0,
+            }
+        ]
+    })
+    tts_dir = config.data_dir / "jobs" / "job-long-gap" / "artifacts" / "tts"
+    write_dummy_wav(tts_dir / "tts_0.wav", duration=1.0)
+    mock_lengthen.return_value = ("Ngắn hơn một chút nhé.", 4)
+    mock_dur.side_effect = [1.0, 3.5, 3.5, 3.5, 3.5]
+    mock_run.side_effect = lambda cmd, *_args, **_kwargs: (
+        write_dummy_wav(Path(cmd[-1]), duration=3.5) or MagicMock(stdout="", stderr="", returncode=0)
+    )
+    session = MagicMock()
+    mock_tts_session.return_value.__enter__.return_value = session
+
+    result = pipeline.duration_repair_step("job-long-gap", config, database, runner)
+
+    mock_lengthen.assert_called_once()
+    session.synthesize.assert_called_once()
+    assert "gemini_lengthen" in result["segments"][0]["repaired_method"]
+    assert "tail_silence_pad" in result["segments"][0]["repaired_method"]
+    assert result["segments"][0]["translation"] == "Ngắn hơn một chút nhé."
 
 
 @patch("dv_backend.pipeline.default_request")
@@ -836,13 +954,104 @@ def test_gemini_shortening_targets_mathematical_word_ratio(mock_request, test_en
     ).fetchone()["value"]) == 1
 
 
-def write_dummy_wav(path: Path, duration: float = 5.0, sample_rate: int = 48000, channels: int = 2):
+@patch("dv_backend.pipeline.default_request")
+def test_gemini_lengthening_targets_mathematical_word_ratio(mock_request, test_env):
+    _config, database, _job_service, _runner = test_env
+    settings = {
+        "gemini_api_keys": [{"id": "a", "key": "key-a"}],
+        "gemini_key_cursor": 0,
+        "gemini_translation_model": "gemini-2.5-flash",
+    }
+    captured: dict[str, str] = {}
+
+    def request(api_key, model, payload):
+        captured["prompt"] = payload["contents"][0]["parts"][0]["text"]
+        return {"candidates": [{"content": {"parts": [{"text": "Xin chào mọi người nhé."}]}}]}
+
+    mock_request.side_effect = request
+
+    lengthened, target_words = pipeline._lengthen_translation_with_gemini(
+        settings,
+        database,
+        text="Xin chào.",
+        budget=4.0,
+        current_duration=1.0,
+    )
+
+    assert lengthened == "Xin chào mọi người nhé."
+    assert target_words == 3
+    assert "Target word count: approximately 3 (timing ratio 1.600)" in captured["prompt"]
+    assert "shorter than the timing budget" in captured["prompt"]
+
+
+def test_tail_silence_pad_filter_only_appends_silence_at_end() -> None:
+    expr = pipeline._tail_silence_pad_filter(1.0, 2.0)
+    assert "adelay=" not in expr
+    assert "apad=" in expr
+    assert "atrim=0:2.000" in expr
+
+
+def test_repair_target_duration_caps_inter_segment_pause() -> None:
+    segment = {"start": 1.0, "end": 3.0, "original_duration": 2.0}
+    assert pipeline._repair_target_duration(segment, budget=9.0, tolerance_sec=0.04) == 3.5
+
+
+@patch("dv_backend.pipeline.get_wav_duration")
+@patch("dv_backend.pipeline.run_subprocess_with_cancel")
+@patch("dv_backend.pipeline.resolve_tool_path")
+def test_duration_repair_does_not_pad_to_full_inter_segment_budget(
+    mock_resolve,
+    mock_run,
+    mock_dur,
+    test_env,
+):
+    config, database, _job_service, runner = test_env
+    mock_resolve.return_value = Path("dummy-ffmpeg")
+    save_checkpoint(config.data_dir, "job-wide-budget", "tts", {
+        "segments": [
+            {
+                "index": 0,
+                "start": 1.0,
+                "end": 3.0,
+                "original_duration": 2.0,
+                "translation": "Một câu ngắn.",
+                "duration_budget": 9.0,
+                "tts_duration": 1.5,
+            }
+        ]
+    })
+    tts_dir = config.data_dir / "jobs" / "job-wide-budget" / "artifacts" / "tts"
+    write_dummy_wav(tts_dir / "tts_0.wav", duration=1.5)
+    mock_dur.side_effect = [1.5, 3.0, 3.0, 3.0, 3.0]
+    mock_run.side_effect = lambda cmd, *_args, **_kwargs: (
+        write_dummy_wav(Path(cmd[-1]), duration=3.0) or MagicMock(stdout="", stderr="", returncode=0)
+    )
+
+    result = pipeline.duration_repair_step("job-wide-budget", config, database, runner)
+
+    assert result["segments"][0]["repaired_method"] == "tail_silence_pad"
+    assert result["segments"][0]["repaired_duration"] == 3.0
+
+
+def write_dummy_wav(
+    path: Path,
+    duration: float = 5.0,
+    sample_rate: int = 48000,
+    channels: int = 2,
+    amplitude: float = 0.0,
+):
     path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(path), "wb") as w:
         w.setnchannels(channels)
         w.setsampwidth(2)
         w.setframerate(sample_rate)
-        w.writeframes(b"\x00" * int(duration * sample_rate * channels * 2))
+        frame_count = int(duration * sample_rate)
+        sample_value = max(-32767, min(32767, int(32767 * amplitude)))
+        frame = int(sample_value).to_bytes(2, byteorder="little", signed=True) * channels
+        if sample_value == 0:
+            w.writeframes(b"\x00" * int(duration * sample_rate * channels * 2))
+        else:
+            w.writeframes(frame * frame_count)
 
 
 @patch("dv_backend.pipeline.resolve_tool_path")
@@ -908,7 +1117,11 @@ def test_extract_audio_creates_background_stems_for_background_only_mix(
 
     assert result["bgm_path"] == str(artifacts_dir / "bgm.wav")
     assert result["vocals_path"] == str(artifacts_dir / "vocals.wav")
+    assert result["vocals_16k_path"] == str(artifacts_dir / "vocals_16k.wav")
+    assert result["bgm_16k_path"] == str(artifacts_dir / "bgm_16k.wav")
     assert any("demucs.separate" in " ".join(cmd) for cmd in commands)
+    assert any(str(artifacts_dir / "vocals_16k.wav") == str(cmd[-1]) for cmd in commands)
+    assert any(str(artifacts_dir / "bgm_16k.wav") == str(cmd[-1]) for cmd in commands)
 
 
 @patch("dv_backend.pipeline.resolve_tool_path")

@@ -74,12 +74,20 @@ def detect_cuda() -> bool:
     return accelerator_available()
 
 
-def default_inference_device() -> str:
+def get_best_device() -> str:
+    """Return the best available torch device without unconditional CUDA calls."""
     if cuda_available():
-        return "cuda:0"
+        return "cuda"
     if mps_available():
         return "mps"
     return "cpu"
+
+
+def default_inference_device() -> str:
+    best = get_best_device()
+    if best == "cuda":
+        return "cuda:0"
+    return best
 
 
 def resolve_inference_device(device: str | None = "") -> str:

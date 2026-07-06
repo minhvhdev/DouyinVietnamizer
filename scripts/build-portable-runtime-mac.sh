@@ -130,16 +130,19 @@ onnxruntime>=1.20
 demucs>=4.0
 pyannote-audio>=4.0,<5
 hf-xet>=1.5
+edge-tts>=7,<8
+silero-vad>=5.1,<6
 EOF
 
 if [ ! -x "$RUNTIME/.venv/bin/python" ]; then
-  echo ">>> Creating venv with uv..."
+  echo ">>> Creating venv..."
   "$PY" -m venv "$RUNTIME/.venv"
-  export VIRTUAL_ENV="$RUNTIME/.venv"
-  export UV_DEFAULT_INDEX="https://pypi.org/simple"
-  uv pip install --upgrade pip
-  uv pip install -r "$MAC_REQUIREMENTS"
 fi
+export VIRTUAL_ENV="$RUNTIME/.venv"
+export UV_DEFAULT_INDEX="https://pypi.org/simple"
+echo ">>> Syncing portable Python venv (macOS CPU/MPS torch)..."
+"$RUNTIME/.venv/bin/python" -m pip install --upgrade pip
+uv pip install --python "$RUNTIME/.venv/bin/python" -r "$MAC_REQUIREMENTS"
 echo ">>> Venv ready: $RUNTIME/.venv"
 
 # Sync backend sources.
@@ -151,6 +154,9 @@ cp "$REPO_ROOT/backend/pyproject.toml" "$RUNTIME/backend/pyproject.toml"
 if [ -f "$REPO_ROOT/backend/uv.lock" ]; then
   cp "$REPO_ROOT/backend/uv.lock" "$RUNTIME/backend/uv.lock"
 fi
+
+echo ">>> Installing backend package into portable venv..."
+uv pip install --python "$RUNTIME/.venv/bin/python" -e "$RUNTIME/backend"
 
 # Tools.
 TOOLS="$RUNTIME/tools"

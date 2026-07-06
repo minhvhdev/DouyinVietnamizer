@@ -55,10 +55,23 @@ def test_group_time_stamps_splits_long_unpunctuated_alignment() -> None:
     segments = _group_time_stamps(stamps)
 
     assert len(segments) >= 2
-    assert all(segment["end"] - segment["start"] <= 7.0 for segment in segments)
+    assert all(segment["end"] - segment["start"] <= 13.0 for segment in segments)
     assert "".join(str(segment["text"]) for segment in segments) == "".join(
         stamp.text for stamp in stamps
     )
+
+
+def test_group_time_stamps_splits_at_internal_punctuation_before_hard_limit() -> None:
+    stamps = [
+        SimpleNamespace(text="前面很长", start_time=0.0, end_time=1.0),
+        SimpleNamespace(text="的内容。", start_time=1.0, end_time=2.0),
+        SimpleNamespace(text="后面", start_time=2.0, end_time=3.0),
+        SimpleNamespace(text="继续。", start_time=3.0, end_time=4.0),
+    ]
+
+    segments = _group_time_stamps(stamps)
+
+    assert [segment["text"] for segment in segments] == ["前面很长的内容。", "后面继续。"]
 
 
 def test_result_to_segments_falls_back_to_full_text() -> None:

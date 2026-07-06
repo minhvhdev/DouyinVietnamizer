@@ -28,6 +28,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "translation_backend": "google_free",
     "translation_source_language": "zh-CN",
     "translation_target_language": "vi",
+    "tts_backend": "voxcpm",
+    "edge_tts_voice": "vi-VN-HoaiMyNeural",
+    "google_tts_voice": "vi-VN-Standard-A",
+    "google_tts_api_key": "",
+    "google_tts_speaking_rate": 1.0,
+    "gemini_tts_model": "gemini-2.5-flash-preview-tts",
+    "gemini_tts_voice": "Zephyr",
     "voxcpm_model": VOXCPM_DEFAULT_MODEL,
     "voxcpm_device": "cuda:0",
     "voxcpm_ref_audio": "",
@@ -50,11 +57,26 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "exact_timing_tolerance_ms": 40,
     "exact_timing_max_stretch": 1.2,
     "exact_timing_max_safe_stretch": 1.25,
+    "short_tts_lengthen_min_gap_sec": 1.5,
+    "short_tts_lengthen_max_ratio": 1.6,
+    "tts_global_speed": 1.0,
     "asr_alignment_mode": "accurate",
     "sparse_asr_enabled": False,
     "sparse_asr_min_silence_ratio": 0.35,
     "sparse_asr_chunk_sec": 25,
     "sparse_asr_padding_ms": 200,
+    "sparse_asr_merge_gap_sec": 0.25,
+    "vad_engine": "silero",
+    "silero_vad_threshold": 0.5,
+    "silero_vad_min_speech_duration_ms": 250,
+    "silero_vad_min_silence_duration_ms": 300,
+    "silero_vad_speech_pad_ms": 150,
+    "silencedetect_noise_db": -30,
+    "silencedetect_min_silence_sec": 0.5,
+    "vad_false_positive_filter_enabled": True,
+    "vad_energy_filter_enabled": True,
+    "vad_energy_min_vocal_ratio": 1.15,
+    "vietnamese_speaking_rate_wps": 3.2,
     "tts_session_reuse_enabled": True,
     "tts_micro_batch_enabled": True,
     "vad_adaptive_enabled": False,
@@ -77,6 +99,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 SUPPORTED_MIX_MODES = {"background_only", "duck"}
 SUPPORTED_VOXCPM_CLONE_MODES = {"reference", "ultimate"}
 SUPPORTED_ASR_ALIGNMENT_MODES = {"fast", "balanced", "accurate"}
+SUPPORTED_VAD_ENGINES = {"silero", "silencedetect"}
 
 
 def mask_api_key(api_key: str) -> str:
@@ -156,6 +179,10 @@ class SettingsService:
             for item in values.get("gemini_api_keys", [])
             if isinstance(item, dict) and item.get("key")
         ]
+        raw_google_tts_key = str(values.get("google_tts_api_key") or "").strip()
+        values["google_tts_api_key_configured"] = bool(raw_google_tts_key)
+        values["google_tts_api_key_masked"] = mask_api_key(raw_google_tts_key) if raw_google_tts_key else ""
+        values.pop("google_tts_api_key", None)
         return values
 
     def update(self, values: dict[str, Any]) -> dict[str, Any]:
@@ -194,9 +221,60 @@ class SettingsService:
             "tts_micro_batch_enabled",
             "vad_adaptive_enabled",
             "vad_neural_fallback_enabled",
+            "vad_false_positive_filter_enabled",
+            "vad_energy_filter_enabled",
         ):
             if values.get(flag) is not None:
                 values[flag] = bool(values[flag])
+
+        vad_engine = values.get("vad_engine")
+        if vad_engine is not None:
+            engine = str(vad_engine).strip().lower()
+            if engine not in SUPPORTED_VAD_ENGINES:
+                raise ValueError(
+                    "vad_engine must be one of: " + ", ".join(sorted(SUPPORTED_VAD_ENGINES))
+                )
+            values["vad_engine"] = engine
+
+        if values.get("silero_vad_threshold") is not None:
+            try:
+                threshold = float(values["silero_vad_threshold"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("silero_vad_threshold must be a number.") from error
+            values["silero_vad_threshold"] = max(0.0, min(1.0, threshold))
+
+        for key, minimum, maximum in (
+            ("silero_vad_min_speech_duration_ms", 0, 5000),
+            ("silero_vad_min_silence_duration_ms", 0, 5000),
+            ("silero_vad_speech_pad_ms", 0, 2000),
+        ):
+            if values.get(key) is not None:
+                try:
+                    parsed = int(values[key])
+                except (TypeError, ValueError) as error:
+                    raise ValueError(f"{key} must be an integer.") from error
+                values[key] = max(minimum, min(maximum, parsed))
+
+        if values.get("silencedetect_noise_db") is not None:
+            try:
+                noise_db = float(values["silencedetect_noise_db"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("silencedetect_noise_db must be a number.") from error
+            values["silencedetect_noise_db"] = max(-90.0, min(0.0, noise_db))
+
+        if values.get("silencedetect_min_silence_sec") is not None:
+            try:
+                min_silence_sec = float(values["silencedetect_min_silence_sec"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("silencedetect_min_silence_sec must be a number.") from error
+            values["silencedetect_min_silence_sec"] = max(0.05, min(5.0, min_silence_sec))
+
+        if values.get("sparse_asr_merge_gap_sec") is not None:
+            try:
+                merge_gap_sec = float(values["sparse_asr_merge_gap_sec"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("sparse_asr_merge_gap_sec must be a number.") from error
+            values["sparse_asr_merge_gap_sec"] = max(0.0, min(2.0, merge_gap_sec))
 
         if values.get("exact_timing_tolerance_ms") is not None:
             try:
@@ -218,6 +296,41 @@ class SettingsService:
             except (TypeError, ValueError) as error:
                 raise ValueError("exact_timing_max_safe_stretch must be a number.") from error
             values["exact_timing_max_safe_stretch"] = max(1.0, min(1.35, safe_stretch))
+
+        if values.get("short_tts_lengthen_min_gap_sec") is not None:
+            try:
+                min_gap = float(values["short_tts_lengthen_min_gap_sec"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("short_tts_lengthen_min_gap_sec must be a number.") from error
+            values["short_tts_lengthen_min_gap_sec"] = max(0.2, min(5.0, min_gap))
+
+        if values.get("short_tts_lengthen_max_ratio") is not None:
+            try:
+                max_ratio = float(values["short_tts_lengthen_max_ratio"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("short_tts_lengthen_max_ratio must be a number.") from error
+            values["short_tts_lengthen_max_ratio"] = max(1.05, min(2.0, max_ratio))
+
+        if values.get("tts_global_speed") is not None:
+            try:
+                speed = float(values["tts_global_speed"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("tts_global_speed must be a number.") from error
+            values["tts_global_speed"] = max(0.9, min(1.3, speed))
+
+        if values.get("vietnamese_speaking_rate_wps") is not None:
+            try:
+                rate = float(values["vietnamese_speaking_rate_wps"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("vietnamese_speaking_rate_wps must be a number.") from error
+            values["vietnamese_speaking_rate_wps"] = max(2.0, min(5.0, rate))
+
+        if values.get("vad_energy_min_vocal_ratio") is not None:
+            try:
+                ratio = float(values["vad_energy_min_vocal_ratio"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("vad_energy_min_vocal_ratio must be a number.") from error
+            values["vad_energy_min_vocal_ratio"] = max(0.8, min(3.0, ratio))
 
         if values.get("sparse_asr_min_silence_ratio") is not None:
             try:
@@ -311,6 +424,21 @@ class SettingsService:
                 values["subtitle_edge_margin"]
             )
 
+        if values.get("google_tts_speaking_rate") is not None:
+            try:
+                rate = float(values["google_tts_speaking_rate"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("google_tts_speaking_rate must be a number.") from error
+            values["google_tts_speaking_rate"] = max(0.5, min(1.5, rate))
+
+        if values.get("google_tts_voice") is not None:
+            from .adapters.google_tts import GOOGLE_TTS_VOICE_IDS, DEFAULT_GOOGLE_TTS_VOICE
+
+            voice = str(values["google_tts_voice"]).strip()
+            if voice and voice not in GOOGLE_TTS_VOICE_IDS:
+                raise ValueError("google_tts_voice is not a supported Google Cloud TTS voice.")
+            values["google_tts_voice"] = voice or DEFAULT_GOOGLE_TTS_VOICE
+
         tts_backend = values.get("tts_backend")
         if tts_backend is not None and tts_backend not in SUPPORTED_TTS_BACKENDS:
             raise ValueError(
@@ -329,6 +457,9 @@ class SettingsService:
         remove_gemini_key = values.pop("gemini_api_key_remove", None)
         update_gemini_key = values.pop("gemini_api_key_update", None)
         values.pop("gemini_api_keys", None)
+        google_tts_api_key = values.pop("google_tts_api_key", None)
+        values.pop("google_tts_api_key_masked", None)
+        values.pop("google_tts_api_key_configured", None)
 
         now = datetime.now(timezone.utc).isoformat()
         with self.database.connection:
@@ -366,6 +497,11 @@ class SettingsService:
                     else item
                     for item in raw.get("gemini_api_keys", [])
                 ]
+
+            if google_tts_api_key is not None:
+                key = str(google_tts_api_key).strip()
+                if key:
+                    values["google_tts_api_key"] = key
 
             for key, value in values.items():
                 self.database.connection.execute(

@@ -36,9 +36,19 @@ def test_defaults_use_free_portable_pipeline(tmp_path: Path) -> None:
     assert settings.get_all()["sparse_asr_min_silence_ratio"] == 0.35
     assert settings.get_all()["sparse_asr_chunk_sec"] == 25
     assert settings.get_all()["sparse_asr_padding_ms"] == 200
+    assert settings.get_all()["sparse_asr_merge_gap_sec"] == 0.25
+    assert settings.get_all()["vad_engine"] == "silero"
+    assert settings.get_all()["silero_vad_threshold"] == 0.5
+    assert settings.get_all()["vad_false_positive_filter_enabled"] is True
+    assert settings.get_all()["vad_energy_filter_enabled"] is True
+    assert settings.get_all()["vad_energy_min_vocal_ratio"] == 1.15
+    assert settings.get_all()["vietnamese_speaking_rate_wps"] == 3.2
     assert settings.get_all()["tts_session_reuse_enabled"] is True
     assert settings.get_all()["tts_micro_batch_enabled"] is True
     assert settings.get_all()["exact_timing_max_safe_stretch"] == 1.25
+    assert settings.get_all()["short_tts_lengthen_min_gap_sec"] == 1.5
+    assert settings.get_all()["short_tts_lengthen_max_ratio"] == 1.6
+    assert settings.get_all()["tts_global_speed"] == 1.0
     assert settings.get_all()["vad_adaptive_enabled"] is False
     assert settings.get_all()["vad_neural_fallback_enabled"] is False
     assert settings.get_all()["gpu_model_idle_timeout_sec"] == 60
@@ -88,6 +98,12 @@ def test_pipeline_optimization_settings_are_validated(tmp_path: Path) -> None:
         "exact_timing_max_safe_stretch": 1.3,
         "vad_adaptive_enabled": True,
         "vad_neural_fallback_enabled": True,
+        "vad_engine": "silencedetect",
+        "silero_vad_threshold": 0.6,
+        "sparse_asr_merge_gap_sec": 0.4,
+        "short_tts_lengthen_min_gap_sec": 2.0,
+        "short_tts_lengthen_max_ratio": 1.4,
+        "tts_global_speed": 1.05,
     })
 
     assert updated["asr_alignment_mode"] == "balanced"
@@ -100,6 +116,15 @@ def test_pipeline_optimization_settings_are_validated(tmp_path: Path) -> None:
     assert updated["exact_timing_max_safe_stretch"] == 1.3
     assert updated["vad_adaptive_enabled"] is True
     assert updated["vad_neural_fallback_enabled"] is True
+    assert updated["vad_engine"] == "silencedetect"
+    assert updated["silero_vad_threshold"] == 0.6
+    assert updated["sparse_asr_merge_gap_sec"] == 0.4
+    assert updated["short_tts_lengthen_min_gap_sec"] == 2.0
+    assert updated["short_tts_lengthen_max_ratio"] == 1.4
+    assert updated["tts_global_speed"] == 1.05
+
+    with pytest.raises(ValueError, match="vad_engine"):
+        settings.update({"vad_engine": "webrtc"})
 
     with pytest.raises(ValueError, match="asr_alignment_mode"):
         settings.update({"asr_alignment_mode": "maximum"})

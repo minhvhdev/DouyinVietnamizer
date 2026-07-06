@@ -149,15 +149,21 @@ def _transcribe_anchor_for_voice(wav_path: Path) -> str:
 
 def _synthesize_voice_preview(
     *,
-    voice: str,
+    voice: str | None,
     text: str,
     settings: dict[str, Any],
     output_suffix: str,
     clone: bool = False,
     clone_mode: str | None = None,
     anchor_text: str | None = None,
+    backend: str | None = None,
 ) -> Path:
-    from .adapters.tts import VOXCPM_INSTRUCT_PREFIX, create_tts_adapter
+    from .adapters.tts import (
+        VOXCPM_INSTRUCT_PREFIX,
+        create_tts_adapter,
+        resolve_tts_voice,
+        tts_backend_from_settings,
+    )
 
     cleaned_text = (text or "").strip()
     if not cleaned_text:
@@ -170,12 +176,18 @@ def _synthesize_voice_preview(
             ),
         )
 
-    tts = create_tts_adapter(settings)
+    preview_settings = dict(settings)
+    if backend:
+        preview_settings["tts_backend"] = backend
+
+    resolved_backend = tts_backend_from_settings(preview_settings)
+    tts = create_tts_adapter(preview_settings)
     output_wav = Path(tempfile.gettempdir()) / f"voice_preview_{output_suffix}_{uuid4().hex}.wav"
-    preview_voice = voice
-    instruct = str(settings.get("voxcpm_instruct") or "").strip()
-    if instruct and not voice.lower().endswith(".wav"):
-        preview_voice = f"{VOXCPM_INSTRUCT_PREFIX}{instruct}"
+    preview_voice = (voice or "").strip() or resolve_tts_voice(preview_settings)
+    if resolved_backend == "voxcpm":
+        instruct = str(preview_settings.get("voxcpm_instruct") or "").strip()
+        if instruct and not (voice or "").strip().lower().endswith(".wav"):
+            preview_voice = f"{VOXCPM_INSTRUCT_PREFIX}{instruct}"
     try:
         synthesize_kwargs = {
             "text": cleaned_text,
@@ -192,14 +204,25 @@ def _synthesize_voice_preview(
     except AppError:
         raise
     except Exception as exc:
-        code = "VOXCPM_SYNTHESIZE_FAILED"
-        label = "VoxCPM2"
+        labels = {
+            "voxcpm": "VoxCPM2",
+            "edge_tts": "Edge TTS",
+            "google_tts": "Google TTS",
+            "gemini_tts": "Gemini TTS",
+        }
+        label = labels.get(resolved_backend, resolved_backend)
+        actions = {
+            "voxcpm": "Run 'python scripts/setup_voxcpm.py' for VoxCPM2.",
+            "edge_tts": "Check your internet connection and Edge TTS voice selection.",
+            "google_tts": "Check your Google Cloud TTS API key and voice selection.",
+            "gemini_tts": "Verify Gemini API keys in Settings and retry.",
+        }
         raise AppError(
             502,
             ErrorInfo(
-                code=code,
+                code=f"{resolved_backend.upper()}_SYNTHESIZE_FAILED",
                 message=f"Failed to synthesize preview audio using {label}.",
-                action="Run 'python scripts/setup_voxcpm.py' for VoxCPM2.",
+                action=actions.get(resolved_backend, "Retry with different settings."),
                 detail=str(exc),
             ),
         ) from exc
@@ -268,15 +291,16 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.get("/api/capabilities")
     def capabilities() -> dict:
-        from .adapters.tts import SUPPORTED_TTS_BACKENDS
+        from .adapters.tts import SUPPORTED_TTS_BACKENDS, tts_backend_from_settings
 
         runtime_status = runtime.latest()
+        raw_settings = settings.get_raw_all()
         return {
             "cpu_mode": False,
             "asr_backend": "qwen3_asr",
             "asr_model": "Qwen/Qwen3-ASR-1.7B",
             "implemented_steps": list(PIPELINE_STEPS),
-            "tts_backend": "voxcpm",
+            "tts_backend": tts_backend_from_settings(raw_settings),
             "tts_backends": list(SUPPORTED_TTS_BACKENDS),
             "runtime_status": runtime_status.status if runtime_status else "not_run",
         }
@@ -694,11 +718,49 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return [dict(row) for row in rows]
 
     class VoicePreviewPayload(BaseModel):
-        voice: str
+        voice: str | None = None
         text: str
+        backend: str | None = None
 
-    @app.get("/api/voices/presets")
-    def list_preset_voices() -> list[dict]:
+    class TtsPreviewPayload(BaseModel):
+        text: str
+        backend: str | None = None
+        voice: str | None = None
+        settings: dict[str, Any] | None = None
+
+    @app.get("/api/tts/voices")
+    def list_tts_voices(backend: str = "edge_tts") -> list[dict]:
+        from .adapters.tts import GEMINI_TTS_VOICES, SUPPORTED_TTS_BACKENDS
+
+        resolved = (backend or "").strip().lower()
+        if resolved not in SUPPORTED_TTS_BACKENDS:
+            raise AppError(
+                422,
+                ErrorInfo(
+                    code="INVALID_TTS_BACKEND",
+                    message="The requested TTS backend is not supported.",
+                    action="Choose one of: " + ", ".join(SUPPORTED_TTS_BACKENDS),
+                ),
+            )
+        if resolved == "edge_tts":
+            from .adapters.edge_tts import list_edge_tts_voices
+
+            return list_edge_tts_voices()
+        if resolved == "google_tts":
+            from .adapters.google_tts import GOOGLE_TTS_VOICES
+
+            return [
+                {
+                    "id": voice["id"],
+                    "name": voice["name"],
+                    "gender": voice.get("gender"),
+                    "tier": voice.get("tier"),
+                    "kind": "google_cloud",
+                }
+                for voice in GOOGLE_TTS_VOICES
+            ]
+        if resolved == "gemini_tts":
+            return [{"id": voice["id"], "name": voice["name"], "kind": "gemini"} for voice in GEMINI_TTS_VOICES]
         presets = [
             "Ngọc Lan",
             "Minh Anh",
@@ -713,10 +775,34 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         ]
         return [{"id": voice, "name": voice, "kind": "preset"} for voice in presets]
 
+    @app.post("/api/tts/preview")
+    def preview_tts(payload: TtsPreviewPayload) -> FileResponse:
+        raw_settings = settings.get_raw_all()
+        merged_settings = {**raw_settings, **(payload.settings or {})}
+        backend = (payload.backend or merged_settings.get("tts_backend") or "voxcpm").strip().lower()
+        merged_settings["tts_backend"] = backend
+        output_wav = _synthesize_voice_preview(
+            voice=payload.voice,
+            text=payload.text,
+            settings=merged_settings,
+            output_suffix=backend.replace("_", "-"),
+            backend=backend,
+        )
+        return FileResponse(
+            str(output_wav),
+            media_type="audio/wav",
+            filename=f"preview_{backend}.wav",
+        )
+
+    @app.get("/api/voices/presets")
+    def list_preset_voices() -> list[dict]:
+        return [item for item in list_tts_voices("voxcpm") if item.get("kind") == "preset"]
+
     @app.post("/api/voices/preview")
     def preview_voice(payload: VoicePreviewPayload) -> FileResponse:
         voice = (payload.voice or "").strip()
-        if voice not in {item["id"] for item in list_preset_voices()}:
+        presets = {item["id"] for item in list_preset_voices()}
+        if voice and voice not in presets:
             raise AppError(
                 422,
                 ErrorInfo(
@@ -727,10 +813,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             )
         raw_settings = settings.get_raw_all()
         output_wav = _synthesize_voice_preview(
-            voice=voice,
+            voice=voice or None,
             text=payload.text,
             settings=raw_settings,
             output_suffix="voxcpm",
+            backend=(payload.backend or "voxcpm").strip().lower(),
         )
         return FileResponse(str(output_wav), media_type="audio/wav", filename="preview_voxcpm.wav")
 

@@ -31,6 +31,13 @@ if [ -f "$REPO_ROOT/backend/uv.lock" ]; then
   cp "$REPO_ROOT/backend/uv.lock" "$DST/portable-runtime/backend/uv.lock"
 fi
 
+VENV_PY="$DST/portable-runtime/.venv/bin/python"
+if [ -x "$VENV_PY" ]; then
+  echo ">>> Re-syncing portable venv after backend copy..."
+  export UV_DEFAULT_INDEX="https://pypi.org/simple"
+  uv pip install --python "$VENV_PY" -e "$DST/portable-runtime/backend"
+fi
+
 cd "$REPO_ROOT/dist-portable"
 ditto -c -k --sequesterRsrc --keepParent "$DST_NAME" "${DST_NAME}-macos.zip"
 echo ">>> Built: dist-portable/${DST_NAME}-macos.zip"

@@ -7,7 +7,16 @@ import wave
 from ..errors import AppError
 from ..models import ErrorInfo
 
-SUPPORTED_TTS_BACKENDS = ("voxcpm",)
+SUPPORTED_TTS_BACKENDS = ("voxcpm", "edge_tts", "google_tts", "gemini_tts")
+CLOUD_TTS_BACKENDS = frozenset({"edge_tts", "google_tts", "gemini_tts"})
+GEMINI_TTS_VOICES = (
+    {"id": "Zephyr", "name": "Zephyr (Bright)"},
+    {"id": "Puck", "name": "Puck (Upbeat)"},
+    {"id": "Charon", "name": "Charon (Informative)"},
+    {"id": "Kore", "name": "Kore (Firm)"},
+    {"id": "Fenrir", "name": "Fenrir (Excitable)"},
+    {"id": "Aoede", "name": "Aoede (Breezy)"},
+)
 VOXCPM_DEFAULT_MODEL = "gguf-q8"
 VOXCPM_INSTRUCT_PREFIX = "instruct:"
 VOXCPM_MODE_DESIGN = "design"
@@ -99,6 +108,35 @@ def parse_voxcpm_voice(voice: str | None) -> tuple[str | None, str | None, str |
 def _is_voxcpm_voice_clone(voice: str | None) -> bool:
     prompt_wav_path, _, _ = parse_voxcpm_voice(voice)
     return prompt_wav_path is not None
+
+
+def tts_backend_from_settings(settings: dict) -> str:
+    backend = str(settings.get("tts_backend") or "voxcpm").strip().lower()
+    if backend in SUPPORTED_TTS_BACKENDS:
+        return backend
+    return "voxcpm"
+
+
+def is_cloud_tts_backend(backend: str | None = None, *, settings: dict | None = None) -> bool:
+    resolved = (backend or (tts_backend_from_settings(settings or {}) if settings else "") or "").strip().lower()
+    return resolved in CLOUD_TTS_BACKENDS
+
+
+def resolve_tts_voice(settings: dict) -> str:
+    backend = tts_backend_from_settings(settings)
+    if backend == "edge_tts":
+        return str(settings.get("edge_tts_voice") or "vi-VN-HoaiMyNeural").strip() or "vi-VN-HoaiMyNeural"
+    if backend == "google_tts":
+        return str(settings.get("google_tts_voice") or "vi-VN-Standard-A").strip() or "vi-VN-Standard-A"
+    if backend == "gemini_tts":
+        return str(settings.get("gemini_tts_voice") or "Zephyr").strip() or "Zephyr"
+    instruct = str(settings.get("voxcpm_instruct") or "").strip()
+    if instruct:
+        return f"{VOXCPM_INSTRUCT_PREFIX}{instruct}"
+    ref_audio = str(settings.get("voxcpm_ref_audio") or "").strip()
+    if ref_audio:
+        return ref_audio
+    return "auto"
 
 
 def resolve_voxcpm_model(model: str) -> str:
@@ -592,8 +630,9 @@ class TtsSession:
         self.runner = runner
         self._adapter_factory = adapter_factory or create_tts_adapter
         self._adapter = None
-        self.voice = self._default_voice()
-        self.clone = bool(str(self.settings.get("voxcpm_ref_audio") or "").strip())
+        self.backend = tts_backend_from_settings(self.settings)
+        self.voice = resolve_tts_voice(self.settings)
+        self.clone = self.backend == "voxcpm" and bool(str(self.settings.get("voxcpm_ref_audio") or "").strip())
         self.clone_mode = self._clone_mode() if self.clone else "reference"
         self.anchor_text = self._anchor_transcript() if self.clone else None
         if gpu_manager is None:
@@ -620,7 +659,11 @@ class TtsSession:
         if self._adapter is not None:
             return self._adapter
         device = str(self.settings.get("voxcpm_device", "cuda:0") or "cuda:0")
-        if self.gpu_manager is not None and not self._session_disabled():
+        if (
+            self.gpu_manager is not None
+            and not self._session_disabled()
+            and not is_cloud_tts_backend(self.backend)
+        ):
             self._lease = self.gpu_manager.acquire("tts", device, self._model_key, serialize=False)
             self._lease.__enter__()
         try:
@@ -634,15 +677,6 @@ class TtsSession:
 
     def _session_disabled(self) -> bool:
         return not bool(self.settings.get("tts_session_reuse_enabled", True))
-
-    def _default_voice(self) -> str:
-        instruct = str(self.settings.get("voxcpm_instruct") or "").strip()
-        if instruct:
-            return f"{VOXCPM_INSTRUCT_PREFIX}{instruct}"
-        ref_audio = str(self.settings.get("voxcpm_ref_audio") or "").strip()
-        if ref_audio:
-            return ref_audio
-        return "auto"
 
     def _anchor_transcript(self) -> str | None:
         ref_audio = str(self.settings.get("voxcpm_ref_audio") or "").strip()
@@ -808,6 +842,37 @@ class TtsSession:
 
 
 def create_tts_adapter(settings: dict, *, data_dir: Path | None = None, runner: object | None = None):
+    backend = tts_backend_from_settings(settings)
+    if backend == "edge_tts":
+        from .edge_tts import DEFAULT_EDGE_TTS_VOICE, EdgeTtsAdapter
+
+        voice = str(settings.get("edge_tts_voice") or DEFAULT_EDGE_TTS_VOICE).strip() or DEFAULT_EDGE_TTS_VOICE
+        return EdgeTtsAdapter(voice=voice)
+    if backend == "google_tts":
+        from .google_tts import DEFAULT_GOOGLE_TTS_SPEAKING_RATE, DEFAULT_GOOGLE_TTS_VOICE, GoogleTtsAdapter
+
+        voice = str(settings.get("google_tts_voice") or DEFAULT_GOOGLE_TTS_VOICE).strip() or DEFAULT_GOOGLE_TTS_VOICE
+        try:
+            speaking_rate = float(settings.get("google_tts_speaking_rate", DEFAULT_GOOGLE_TTS_SPEAKING_RATE) or 1.0)
+        except (TypeError, ValueError):
+            speaking_rate = DEFAULT_GOOGLE_TTS_SPEAKING_RATE
+        return GoogleTtsAdapter(
+            api_key=str(settings.get("google_tts_api_key") or "").strip(),
+            voice=voice,
+            speaking_rate=max(0.5, min(1.5, speaking_rate)),
+        )
+    if backend == "gemini_tts":
+        from .gemini import GeminiKeyPool, GeminiTtsAdapter
+
+        keys = [
+            item for item in settings.get("gemini_api_keys", [])
+            if isinstance(item, dict) and item.get("key")
+        ]
+        return GeminiTtsAdapter(
+            GeminiKeyPool(keys, cursor=int(settings.get("gemini_key_cursor", 0) or 0)),
+            model=str(settings.get("gemini_tts_model") or "gemini-2.5-flash-preview-tts"),
+        )
+
     try:
         batch_size = int(settings.get("voxcpm_batch_size", 4) or 4)
     except (TypeError, ValueError):

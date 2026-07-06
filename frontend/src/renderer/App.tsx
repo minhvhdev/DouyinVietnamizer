@@ -3,6 +3,7 @@ import {
   Activity,
   CircleAlert,
   Clock3,
+  Info,
   Plus,
   Radio,
   RefreshCw,
@@ -46,6 +47,101 @@ const PIPELINE_STEPS = [
 ] as const;
 
 const PRESET_VOICES = [] as const;
+
+const SETTINGS_TABS = [
+  { id: "download", label: "Tải video" },
+  { id: "translation", label: "Dịch thuật" },
+  { id: "audio", label: "Âm thanh" },
+  { id: "tts", label: "Lồng tiếng" },
+  { id: "subtitles", label: "Phụ đề" },
+] as const;
+
+type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
+
+function SettingHint({ text }: { text: string }) {
+  return (
+    <span className="setting-hint">
+      <button
+        type="button"
+        className="setting-hint__trigger"
+        aria-label={text}
+        title={text}
+      >
+        <Info size={14} aria-hidden="true" />
+      </button>
+      <span className="setting-hint__tooltip" role="tooltip">
+        {text}
+      </span>
+    </span>
+  );
+}
+
+function SettingsFieldLabel({ label, hint }: { label: string; hint: string }) {
+  return (
+    <span className="settings-label__title">
+      {label}
+      <SettingHint text={hint} />
+    </span>
+  );
+}
+
+function SettingsCheckboxField({
+  label,
+  hint,
+  checked,
+  onChange,
+}: {
+  label: string;
+  hint: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="settings-label settings-label--inline">
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <SettingsFieldLabel label={label} hint={hint} />
+    </label>
+  );
+}
+
+const TTS_BACKEND_OPTIONS = [
+  {
+    id: "voxcpm",
+    label: "VoxCPM2",
+    hint: "Clone giọng offline, cần GPU",
+  },
+  {
+    id: "edge_tts",
+    label: "Edge TTS",
+    hint: "Microsoft neural, miễn phí, cần mạng",
+  },
+  {
+    id: "google_tts",
+    label: "Google TTS",
+    hint: "Google Cloud Standard, 4 giọng vi-VN",
+  },
+  {
+    id: "gemini_tts",
+    label: "Gemini TTS",
+    hint: "Google AI Studio, cần khóa API",
+  },
+] as const;
+
+const GOOGLE_TTS_VOICES = [
+  { id: "vi-VN-Standard-A", name: "Standard A — Nữ" },
+  { id: "vi-VN-Standard-B", name: "Standard B — Nam" },
+  { id: "vi-VN-Standard-C", name: "Standard C — Nữ" },
+  { id: "vi-VN-Standard-D", name: "Standard D — Nam" },
+] as const;
+
+const GEMINI_TTS_VOICES = [
+  { id: "Zephyr", name: "Zephyr (Sáng)" },
+  { id: "Puck", name: "Puck (Vui)" },
+  { id: "Charon", name: "Charon (Trầm)" },
+  { id: "Kore", name: "Kore (Chắc)" },
+  { id: "Fenrir", name: "Fenrir (Sôi nổi)" },
+  { id: "Aoede", name: "Aoede (Nhẹ)" },
+] as const;
 
 const translateStatus = (status?: string) => {
   if (!status) return "đang kiểm tra";
@@ -234,10 +330,23 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     subtitle_position: "bottom",
     gemini_api_keys: [],
     gemini_translation_model: "gemini-2.5-flash",
+    gemini_tts_model: "gemini-2.5-flash-preview-tts",
+    gemini_tts_voice: "Zephyr",
+    tts_backend: "voxcpm",
+    edge_tts_voice: "vi-VN-HoaiMyNeural",
+    google_tts_voice: "vi-VN-Standard-A",
+    google_tts_speaking_rate: 1,
     voxcpm_clone_mode: "reference",
   });
   const [newGeminiKey, setNewGeminiKey] = useState("");
+  const [newGoogleTtsKey, setNewGoogleTtsKey] = useState("");
   const [settingsSuccess, setSettingsSuccess] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTabId>("tts");
+  const [ttsPreviewText, setTtsPreviewText] = useState("Xin chào, đây là bản nghe thử giọng đọc tiếng Việt.");
+  const [ttsPreviewLoading, setTtsPreviewLoading] = useState(false);
+  const [ttsPreviewUrl, setTtsPreviewUrl] = useState<string | null>(null);
+  const [edgeTtsVoices, setEdgeTtsVoices] = useState<Array<{ id: string; name: string }>>([]);
+  const ttsPreviewUrlRef = useRef<string | null>(null);
 
   // Cloned voices states
   const [clonedVoices, setClonedVoices] = useState<ClonedVoice[]>([]);
@@ -250,6 +359,33 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   const [testSynthesizing, setTestSynthesizing] = useState<Record<string, boolean>>({});
   const [testAudioUrls, setTestAudioUrls] = useState<Record<string, string>>({});
   const selectedClonedVoice = clonedVoices.find((voice) => voice.wav_path === settings.voxcpm_ref_audio);
+  const activeTtsBackend = settings.tts_backend ?? "voxcpm";
+
+  const loadEdgeTtsVoices = useCallback(async () => {
+    try {
+      const voices = await api.listTtsVoices("edge_tts");
+      setEdgeTtsVoices(voices);
+    } catch {
+      setEdgeTtsVoices([
+        { id: "vi-VN-HoaiMyNeural", name: "Hoài My (Nữ)" },
+        { id: "vi-VN-NamMinhNeural", name: "Nam Minh (Nam)" },
+      ]);
+    }
+  }, [api]);
+
+  useEffect(() => {
+    return () => {
+      if (ttsPreviewUrlRef.current) {
+        URL.revokeObjectURL(ttsPreviewUrlRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "settings" && settingsTab === "tts" && activeTtsBackend === "edge_tts") {
+      void loadEdgeTtsVoices();
+    }
+  }, [activeTab, settingsTab, activeTtsBackend, loadEdgeTtsVoices]);
 
   const recoverBackend = useCallback(async (reason: string) => {
     if (recoveringBackendRef.current) return;
@@ -799,15 +935,21 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
         gemini_api_key_update,
         ...savePayload
       } = settings;
-      savePayload.tts_backend = "voxcpm";
       const pendingGeminiKey = newGeminiKey.trim();
+      const pendingGoogleTtsKey = newGoogleTtsKey.trim();
       if (pendingGeminiKey) {
         savePayload.gemini_api_key_add = pendingGeminiKey;
+      }
+      if (pendingGoogleTtsKey) {
+        savePayload.google_tts_api_key = pendingGoogleTtsKey;
       }
       const updated = await api.updateSettings(savePayload);
       setSettings(updated);
       if (pendingGeminiKey) {
         setNewGeminiKey("");
+      }
+      if (pendingGoogleTtsKey) {
+        setNewGoogleTtsKey("");
       }
       setSettingsSuccess(true);
       setTimeout(() => setSettingsSuccess(false), 3000);
@@ -863,6 +1005,54 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
       setTimeout(() => setSettingsSuccess(false), 3000);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Không thể cập nhật nhãn khóa API Gemini");
+    }
+  }
+
+  async function handlePreviewTts() {
+    const text = ttsPreviewText.trim();
+    if (!text) {
+      setError("Nhập nội dung để nghe thử giọng đọc.");
+      return;
+    }
+    setTtsPreviewLoading(true);
+    setError(null);
+    try {
+      const backend = activeTtsBackend;
+      const voice =
+        backend === "edge_tts"
+          ? settings.edge_tts_voice
+          : backend === "google_tts"
+            ? settings.google_tts_voice
+          : backend === "gemini_tts"
+            ? settings.gemini_tts_voice
+            : undefined;
+      const blob = await api.previewTts(text, {
+        backend,
+        voice,
+        settings: {
+          tts_backend: backend,
+          edge_tts_voice: settings.edge_tts_voice,
+          google_tts_voice: settings.google_tts_voice,
+          google_tts_speaking_rate: settings.google_tts_speaking_rate,
+          google_tts_api_key: newGoogleTtsKey.trim() || undefined,
+          gemini_tts_model: settings.gemini_tts_model,
+          gemini_tts_voice: settings.gemini_tts_voice,
+          voxcpm_ref_audio: settings.voxcpm_ref_audio,
+          voxcpm_instruct: settings.voxcpm_instruct,
+          voxcpm_clone_mode: settings.voxcpm_clone_mode,
+          voxcpm_auto_voice: settings.voxcpm_auto_voice,
+        },
+      });
+      if (ttsPreviewUrlRef.current) {
+        URL.revokeObjectURL(ttsPreviewUrlRef.current);
+      }
+      const url = URL.createObjectURL(blob);
+      ttsPreviewUrlRef.current = url;
+      setTtsPreviewUrl(url);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Không thể nghe thử giọng đọc");
+    } finally {
+      setTtsPreviewLoading(false);
     }
   }
 
@@ -1444,343 +1634,890 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
 
         {activeTab === "settings" && (
           <>
-            <header className="settings-header">
+            <header className="settings-header settings-header-compact">
               <div>
                 <h1>Cài đặt ứng dụng</h1>
-                <p className="settings-subtitle">Cấu hình dịch thuật, VoxCPM2 và quản lý khóa API Gemini.</p>
+                <p className="settings-subtitle">
+                  Cấu hình theo từng nhóm: tải video, dịch thuật, xử lý âm thanh, lồng tiếng và phụ đề.
+                </p>
               </div>
             </header>
-            <form onSubmit={handleSaveSettings} className="settings-page-layout">
-              <div className="settings-column">
-                <section className="settings-card">
-                  <div className="card-header-accent">
-                    <span className="accent-bar"></span>
-                    <h3>Tải video (Douyin / Bilibili)</h3>
+            <form onSubmit={handleSaveSettings} className="settings-page-layout settings-page-layout--tabbed">
+              <div className="settings-shell">
+                <div className="settings-toolbar">
+                  <div className="settings-tabs settings-tabs--grow" role="tablist" aria-label="Nhóm cài đặt">
+                    {SETTINGS_TABS.map((tab) => (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        role="tab"
+                        aria-selected={settingsTab === tab.id}
+                        className={`settings-tab-btn${settingsTab === tab.id ? " active" : ""}`}
+                        onClick={() => setSettingsTab(tab.id)}
+                      >
+                        {tab.label}
+                      </button>
+                    ))}
                   </div>
-                  <p className="card-description">
-                    Tự lấy cookie từ Chrome, rồi lần lượt thử Edge → Firefox → Brave nếu cần.
-                    Đăng nhập Douyin/Bilibili trên Chrome trước khi tạo job từ liên kết.
-                  </p>
-                  <button
-                    type="button"
-                    className="gradient-button"
-                    disabled={ytDlpUpdating}
-                    onClick={() => void handleUpdateYtDlp()}
-                    style={{ justifyContent: "center" }}
-                  >
-                    <RefreshCw size={16} /> {ytDlpUpdating ? "Đang cập nhật yt-dlp..." : "Cập nhật yt-dlp"}
-                  </button>
-                  {ytDlpNotice && (
-                    <p className="import-file-count" style={{ marginTop: "10px", color: "#9be7a8" }}>{ytDlpNotice}</p>
-                  )}
-                </section>
-
-                <section className="settings-card">
-                  <div className="card-header-accent">
-                    <span className="accent-bar"></span>
-                    <h3>Dịch thuật</h3>
-                  </div>
-                  <p className="card-description">
-                    Chọn bộ dịch thuật dùng cho phụ đề và lồng tiếng.
-                  </p>
-                  <label className="settings-label">
-                    <span>Bộ dịch thuật</span>
-                    <select
-                      className="settings-input"
-                      value={settings.translation_backend ?? "google_free"}
-                      onChange={(e) => setSettings({ ...settings, translation_backend: e.target.value })}
-                    >
-                      <option value="google_free">Google Dịch Miễn Phí</option>
-                      <option value="gemini">Gemini</option>
-                    </select>
-                  </label>
-                </section>
-
-                {/* Google AI Studio / Khóa API Gemini */}
-                <section className="settings-card">
-                  <div className="card-header-accent">
-                    <span className="accent-bar"></span>
-                    <h3>Google AI Studio / Khóa API Gemini</h3>
-                  </div>
-                  <p className="card-description">
-                    Quản lý khóa API Gemini dùng cho dịch thuật.
-                  </p>
-                  <div className="add-key-container">
-                    <label className="settings-label" style={{ flex: 1 }}>
-                      <span>Khóa API Gemini mới</span>
-                      <input
-                        className="settings-input"
-                        type="password"
-                        placeholder="Dán khóa API Google AI Studio"
-                        value={newGeminiKey}
-                        onChange={(e) => setNewGeminiKey(e.target.value)}
-                      />
-                    </label>
-                    <button
-                      type="button"
-                      className="gradient-button"
-                      onClick={handleAddGeminiKey}
-                    >
-                      <Plus size={16} /> Thêm khóa Gemini
+                  <div className="settings-save-slot">
+                    <button type="submit" className="save-settings-button">
+                      <Save size={18} /> Lưu cài đặt
                     </button>
-                  </div>
-                  <div className="gemini-keys-list">
-                    {(settings.gemini_api_keys ?? []).length === 0 ? (
-                      <div className="empty-keys-placeholder">Chưa có khóa API Gemini nào.</div>
-                    ) : (
-                      (settings.gemini_api_keys ?? []).map((item: any) => (
-                        <div key={item.id} className="gemini-key-card">
-                          <div className="key-card-header">
-                            <div className="key-info">
-                              <span className="key-badge">API KEY</span>
-                              <code className="key-masked">{item.masked ?? item.label}</code>
-                            </div>
-                            <button
-                              type="button"
-                              aria-label={`Remove Gemini key ${item.masked ?? item.label}`}
-                              onClick={() => handleRemoveGeminiKey(item.id)}
-                              className="key-action-btn delete-btn"
-                            >
-                              <Trash2 size={13} /> Gỡ bỏ
-                            </button>
-                          </div>
-                          <div className="key-card-body">
-                            <div className="key-label-wrapper">
-                              <span className="input-label-small">Nhãn</span>
-                              <div className="input-with-button">
-                                <input
-                                  aria-label={`Edit label for Gemini key ${item.masked ?? item.label}`}
-                                  className="settings-input key-label-input"
-                                  placeholder="Ví dụ: Khóa dự phòng"
-                                  value={item.label ?? item.masked ?? ""}
-                                  onChange={(event) => updateGeminiKeyLabel(item.id, event.target.value)}
-                                />
-                                <button
-                                  type="button"
-                                  aria-label={`Save label for Gemini key ${item.masked ?? item.label}`}
-                                  onClick={() => handleSaveGeminiKeyLabel(item.id, item.label ?? "")}
-                                  className="key-action-btn save-btn"
-                                >
-                                  <Save size={13} /> Lưu nhãn
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      ))
+                    {settingsSuccess && (
+                      <span className="save-success-badge">
+                        <CheckCircle2 size={18} /> Đã lưu
+                      </span>
                     )}
                   </div>
-                </section>
-              </div>
+                </div>
 
-              <div className="settings-column">
-                {settings.translation_backend === "gemini" && (
-                  <section className="settings-card">
-                    <div className="card-header-accent">
-                      <span className="accent-bar"></span>
-                      <h3>Cấu hình mô hình Gemini</h3>
-                    </div>
-                    <p className="card-description">Chọn mô hình Gemini dùng cho bước dịch thuật.</p>
-                    <label className="settings-label">
-                      <span>Mô hình dịch thuật Gemini</span>
-                      <input
-                        className="settings-input"
-                        value={settings.gemini_translation_model ?? "gemini-2.5-flash"}
-                        onChange={(e) => setSettings({ ...settings, gemini_translation_model: e.target.value })}
-                      />
-                    </label>
-                  </section>
+                {settingsTab === "download" && (
+                  <div className="settings-tab-panel">
+                    <section className="settings-card settings-card--full">
+                      <div className="card-header-accent">
+                        <span className="accent-bar"></span>
+                        <h3>Tải video (Douyin / Bilibili)</h3>
+                      </div>
+                      <p className="card-description">
+                        Tự lấy cookie từ Chrome, rồi lần lượt thử Edge → Firefox → Brave nếu cần.
+                        Đăng nhập Douyin/Bilibili trên Chrome trước khi tạo job từ liên kết.
+                      </p>
+                      <button
+                        type="button"
+                        className="gradient-button"
+                        disabled={ytDlpUpdating}
+                        onClick={() => void handleUpdateYtDlp()}
+                        style={{ justifyContent: "center", maxWidth: "320px" }}
+                      >
+                        <RefreshCw size={16} /> {ytDlpUpdating ? "Đang cập nhật yt-dlp..." : "Cập nhật yt-dlp"}
+                      </button>
+                      {ytDlpNotice && (
+                        <p className="import-file-count" style={{ marginTop: "10px", color: "#9be7a8" }}>{ytDlpNotice}</p>
+                      )}
+                    </section>
+                  </div>
                 )}
 
-                <section className="settings-card">
-                  <div className="card-header-accent">
-                    <span className="accent-bar"></span>
-                    <h3>Lồng tiếng VoxCPM2</h3>
+                {settingsTab === "translation" && (
+                  <div className="settings-tab-panel">
+                    <section className="settings-card">
+                      <div className="card-header-accent">
+                        <span className="accent-bar"></span>
+                        <h3>Dịch thuật</h3>
+                      </div>
+                      <p className="card-description card-description--compact">
+                        Chọn bộ dịch cho phụ đề và nội dung lồng tiếng.
+                      </p>
+                      <label className="settings-label">
+                        <span>Bộ dịch thuật</span>
+                        <select
+                          className="settings-input"
+                          value={settings.translation_backend ?? "google_free"}
+                          onChange={(e) => setSettings({ ...settings, translation_backend: e.target.value })}
+                        >
+                          <option value="google_free">Google Dịch Miễn Phí</option>
+                          <option value="gemini">Gemini</option>
+                        </select>
+                      </label>
+                      {settings.translation_backend === "gemini" && (
+                        <label className="settings-label">
+                          <span>Mô hình dịch Gemini</span>
+                          <input
+                            className="settings-input"
+                            value={settings.gemini_translation_model ?? "gemini-2.5-flash"}
+                            onChange={(e) => setSettings({ ...settings, gemini_translation_model: e.target.value })}
+                          />
+                        </label>
+                      )}
+                    </section>
+
+                    <section className="settings-card">
+                      <div className="card-header-accent">
+                        <span className="accent-bar"></span>
+                        <h3>Google AI Studio / Khóa API Gemini</h3>
+                      </div>
+                      <p className="card-description card-description--compact">
+                        Dùng cho dịch Gemini và Gemini TTS. Thêm nhiều khóa để luân phiên khi hết quota.
+                      </p>
+                      <div className="add-key-container">
+                        <label className="settings-label" style={{ flex: 1 }}>
+                          <span>Khóa API Gemini mới</span>
+                          <input
+                            className="settings-input"
+                            type="password"
+                            placeholder="Dán khóa API Google AI Studio"
+                            value={newGeminiKey}
+                            onChange={(e) => setNewGeminiKey(e.target.value)}
+                          />
+                        </label>
+                        <button type="button" className="gradient-button" onClick={handleAddGeminiKey}>
+                          <Plus size={16} /> Thêm khóa
+                        </button>
+                      </div>
+                      <div className="gemini-keys-list">
+                        {(settings.gemini_api_keys ?? []).length === 0 ? (
+                          <div className="empty-keys-placeholder">Chưa có khóa API Gemini nào.</div>
+                        ) : (
+                          (settings.gemini_api_keys ?? []).map((item: any) => (
+                            <div key={item.id} className="gemini-key-card">
+                              <div className="key-card-header">
+                                <div className="key-info">
+                                  <span className="key-badge">API KEY</span>
+                                  <code className="key-masked">{item.masked ?? item.label}</code>
+                                </div>
+                                <button
+                                  type="button"
+                                  aria-label={`Remove Gemini key ${item.masked ?? item.label}`}
+                                  onClick={() => handleRemoveGeminiKey(item.id)}
+                                  className="key-action-btn delete-btn"
+                                >
+                                  <Trash2 size={13} /> Gỡ bỏ
+                                </button>
+                              </div>
+                              <div className="key-card-body">
+                                <div className="key-label-wrapper">
+                                  <span className="input-label-small">Nhãn</span>
+                                  <div className="input-with-button">
+                                    <input
+                                      aria-label={`Edit label for Gemini key ${item.masked ?? item.label}`}
+                                      className="settings-input key-label-input"
+                                      placeholder="Ví dụ: Khóa dự phòng"
+                                      value={item.label ?? item.masked ?? ""}
+                                      onChange={(event) => updateGeminiKeyLabel(item.id, event.target.value)}
+                                    />
+                                    <button
+                                      type="button"
+                                      aria-label={`Save label for Gemini key ${item.masked ?? item.label}`}
+                                      onClick={() => handleSaveGeminiKeyLabel(item.id, item.label ?? "")}
+                                      className="key-action-btn save-btn"
+                                    >
+                                      <Save size={13} /> Lưu nhãn
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </section>
                   </div>
-                  <p className="card-description">
-                    VoxCPM2 là engine TTS duy nhất. Chọn audio tham chiếu .wav, nhập voice design, hoặc để auto voice.
-                  </p>
-                  <div className="inputs-vertical-stack">
-                    <label className="settings-label">
-                      <span>Audio tham chiếu (.wav)</span>
-                      <select
-                        className="settings-input"
-                        value={settings.voxcpm_ref_audio ?? ""}
-                        onChange={(e) => setSettings({ ...settings, voxcpm_ref_audio: e.target.value })}
-                      >
-                        <option value="">Không dùng / Auto voice</option>
-                        {clonedVoices.map((voice) => (
-                          <option key={voice.id} value={voice.wav_path}>
-                            {voice.name}
-                          </option>
+                )}
+
+                {settingsTab === "audio" && (
+                  <div className="settings-tab-panel">
+                    <section className="settings-card settings-card--full">
+                      <div className="card-header-accent">
+                        <span className="accent-bar"></span>
+                        <h3>Nhận diện giọng nói (VAD)</h3>
+                      </div>
+                      <p className="card-description card-description--compact">
+                        Xác định vùng có lời nói trước khi nhận dạng tiếng Trung. Thay đổi có hiệu lực từ bước VAD trở đi — chạy lại job từ VAD hoặc ASR.
+                      </p>
+                      <div className="settings-field-grid settings-field-grid--2">
+                        <label className="settings-label settings-field-grid__span-2">
+                          <SettingsFieldLabel
+                            label="Engine VAD"
+                            hint="Silero dùng mô hình neural, chính xác hơn trên Windows/macOS. FFmpeg silencedetect là phương án cũ để rollback khi cần."
+                          />
+                          <select
+                            className="settings-input"
+                            value={settings.vad_engine ?? "silero"}
+                            onChange={(e) => setSettings({ ...settings, vad_engine: e.target.value })}
+                          >
+                            <option value="silero">Silero VAD (khuyến nghị)</option>
+                            <option value="silencedetect">FFmpeg silencedetect (legacy)</option>
+                          </select>
+                        </label>
+                        <SettingsCheckboxField
+                          label="Lọc ASR do VAD nhầm"
+                          hint="Loại bỏ đoạn ASR trùng lặp hoặc rỗng khi VAD nhầm nhạc nền là lời nói. Bật mặc định; tắt nếu thấy mất câu hợp lệ."
+                          checked={settings.vad_false_positive_filter_enabled ?? true}
+                          onChange={(checked) => setSettings({ ...settings, vad_false_positive_filter_enabled: checked })}
+                        />
+                        <SettingsCheckboxField
+                          label="Lọc theo năng lượng giọng/nhạc"
+                          hint="So sánh stem vocals và nhạc nền (Demucs) để loại vùng nghi ngờ chỉ có nhạc. Cần mix_mode background_only để có stem."
+                          checked={settings.vad_energy_filter_enabled ?? true}
+                          onChange={(checked) => setSettings({ ...settings, vad_energy_filter_enabled: checked })}
+                        />
+                        <label className="settings-label settings-field-grid__span-2">
+                          <SettingsFieldLabel
+                            label={`Tỷ lệ giọng/nhạc tối thiểu (${settings.vad_energy_min_vocal_ratio ?? 1.15})`}
+                            hint="Vùng có tỷ lệ năng lượng vocals so với nhạc nền thấp hơn ngưỡng này sẽ bị loại. Tăng nếu còn nhầm nhạc; giảm nếu mất câu hợp lệ."
+                          />
+                          <input
+                            className="settings-input"
+                            type="range"
+                            min={0.8}
+                            max={2.5}
+                            step={0.05}
+                            value={settings.vad_energy_min_vocal_ratio ?? 1.15}
+                            onChange={(e) => setSettings({ ...settings, vad_energy_min_vocal_ratio: Number(e.target.value) })}
+                            disabled={!(settings.vad_energy_filter_enabled ?? true)}
+                          />
+                        </label>
+                      </div>
+                    </section>
+
+                    {(settings.vad_engine ?? "silero") === "silero" && (
+                      <section className="settings-card">
+                        <div className="card-header-accent">
+                          <span className="accent-bar"></span>
+                          <h3>Silero VAD</h3>
+                        </div>
+                        <div className="settings-field-grid settings-field-grid--2">
+                          <label className="settings-label settings-field-grid__span-2">
+                            <SettingsFieldLabel
+                              label={`Ngưỡng phát hiện giọng (${settings.silero_vad_threshold ?? 0.5})`}
+                              hint="Xác suất tối thiểu để coi là có giọng (0–1). Cao hơn = ít đoạn giả từ nhạc nền, nhưng có thể bỏ sót lời nói nhỏ."
+                            />
+                            <input
+                              className="settings-input"
+                              type="range"
+                              min={0.1}
+                              max={0.9}
+                              step={0.05}
+                              value={settings.silero_vad_threshold ?? 0.5}
+                              onChange={(e) => setSettings({ ...settings, silero_vad_threshold: Number(e.target.value) })}
+                            />
+                          </label>
+                          <label className="settings-label">
+                            <SettingsFieldLabel
+                              label="Đoạn nói tối thiểu (ms)"
+                              hint="Đoạn ngắn hơn giá trị này sẽ bị bỏ qua. Tăng nếu còn nhiễu ngắn; giảm nếu mất tiếng lẩm nhẩm."
+                            />
+                            <input
+                              className="settings-input"
+                              type="number"
+                              min={0}
+                              max={5000}
+                              step={50}
+                              value={settings.silero_vad_min_speech_duration_ms ?? 250}
+                              onChange={(e) => setSettings({ ...settings, silero_vad_min_speech_duration_ms: Number(e.target.value) })}
+                            />
+                          </label>
+                          <label className="settings-label">
+                            <SettingsFieldLabel
+                              label="Im lặng tối thiểu (ms)"
+                              hint="Khoảng im lặng liên tiếp tối thiểu để tách hai đoạn nói. Tăng nếu một câu bị cắt thành nhiều mảnh."
+                            />
+                            <input
+                              className="settings-input"
+                              type="number"
+                              min={0}
+                              max={5000}
+                              step={50}
+                              value={settings.silero_vad_min_silence_duration_ms ?? 300}
+                              onChange={(e) => setSettings({ ...settings, silero_vad_min_silence_duration_ms: Number(e.target.value) })}
+                            />
+                          </label>
+                          <label className="settings-label settings-field-grid__span-2">
+                            <SettingsFieldLabel
+                              label="Đệm quanh đoạn nói (ms)"
+                              hint="Thêm mili giây trước và sau mỗi vùng nói để tránh cắt mất đầu/cuối âm tiết."
+                            />
+                            <input
+                              className="settings-input"
+                              type="number"
+                              min={0}
+                              max={2000}
+                              step={25}
+                              value={settings.silero_vad_speech_pad_ms ?? 150}
+                              onChange={(e) => setSettings({ ...settings, silero_vad_speech_pad_ms: Number(e.target.value) })}
+                            />
+                          </label>
+                        </div>
+                      </section>
+                    )}
+
+                    {(settings.vad_engine ?? "silero") === "silencedetect" && (
+                      <section className="settings-card">
+                        <div className="card-header-accent">
+                          <span className="accent-bar"></span>
+                          <h3>FFmpeg silencedetect</h3>
+                        </div>
+                        <div className="settings-field-grid settings-field-grid--2">
+                          <label className="settings-label">
+                            <SettingsFieldLabel
+                              label="Ngưỡng im lặng (dB)"
+                              hint="Mức âm lượng coi là im lặng (âm dB, ví dụ -30). Giá trị thấp hơn (gần 0) = nhạy hơn, dễ nhận nhạc nền là lời nói."
+                            />
+                            <input
+                              className="settings-input"
+                              type="number"
+                              min={-90}
+                              max={0}
+                              step={1}
+                              value={settings.silencedetect_noise_db ?? -30}
+                              onChange={(e) => setSettings({ ...settings, silencedetect_noise_db: Number(e.target.value) })}
+                            />
+                          </label>
+                          <label className="settings-label">
+                            <SettingsFieldLabel
+                              label="Im lặng tối thiểu (giây)"
+                              hint="Thời gian im lặng liên tiếp tối thiểu để FFmpeg tách hai đoạn nói."
+                            />
+                            <input
+                              className="settings-input"
+                              type="number"
+                              min={0.05}
+                              max={5}
+                              step={0.05}
+                              value={settings.silencedetect_min_silence_sec ?? 0.5}
+                              onChange={(e) => setSettings({ ...settings, silencedetect_min_silence_sec: Number(e.target.value) })}
+                            />
+                          </label>
+                        </div>
+                      </section>
+                    )}
+
+                    <section className="settings-card settings-card--full">
+                      <div className="card-header-accent">
+                        <span className="accent-bar"></span>
+                        <h3>ASR thưa (nâng cao)</h3>
+                      </div>
+                      <p className="card-description card-description--compact">
+                        Chỉ chạy nhận dạng trên vùng có giọng khi video có nhiều im lặng — tiết kiệm thời gian trên clip dài.
+                      </p>
+                      <SettingsCheckboxField
+                        label="Bật ASR thưa"
+                        hint="Khi bật, ASR chỉ xử lý các chunk có giọng thay vì toàn bộ audio. Hữu ích khi tỷ lệ im lặng cao."
+                        checked={settings.sparse_asr_enabled ?? false}
+                        onChange={(checked) => setSettings({ ...settings, sparse_asr_enabled: checked })}
+                      />
+                      <div className="settings-field-grid settings-field-grid--2">
+                        <label className="settings-label">
+                          <SettingsFieldLabel
+                            label={`Khoảng gộp VAD (giây)`}
+                            hint="Gộp các vùng VAD cách nhau không quá giá trị này thành một chunk ASR. Tăng nếu câu bị tách quá nhỏ."
+                          />
+                          <input
+                            className="settings-input"
+                            type="number"
+                            min={0}
+                            max={2}
+                            step={0.05}
+                            value={settings.sparse_asr_merge_gap_sec ?? 0.25}
+                            onChange={(e) => setSettings({ ...settings, sparse_asr_merge_gap_sec: Number(e.target.value) })}
+                            disabled={!settings.sparse_asr_enabled}
+                          />
+                        </label>
+                        <label className="settings-label">
+                          <SettingsFieldLabel
+                            label={`Tỷ lệ im lặng tối thiểu (${settings.sparse_asr_min_silence_ratio ?? 0.35})`}
+                            hint="Chỉ kích hoạt ASR thưa khi tỷ lệ im lặng trong audio ≥ giá trị này (0–0.95)."
+                          />
+                          <input
+                            className="settings-input"
+                            type="range"
+                            min={0}
+                            max={0.95}
+                            step={0.05}
+                            value={settings.sparse_asr_min_silence_ratio ?? 0.35}
+                            onChange={(e) => setSettings({ ...settings, sparse_asr_min_silence_ratio: Number(e.target.value) })}
+                            disabled={!settings.sparse_asr_enabled}
+                          />
+                        </label>
+                        <label className="settings-label">
+                          <SettingsFieldLabel
+                            label="Chunk tối đa (giây)"
+                            hint="Độ dài tối đa mỗi đoạn gửi ASR khi chạy chế độ thưa."
+                          />
+                          <input
+                            className="settings-input"
+                            type="number"
+                            min={5}
+                            max={120}
+                            step={1}
+                            value={settings.sparse_asr_chunk_sec ?? 25}
+                            onChange={(e) => setSettings({ ...settings, sparse_asr_chunk_sec: Number(e.target.value) })}
+                            disabled={!settings.sparse_asr_enabled}
+                          />
+                        </label>
+                        <label className="settings-label">
+                          <SettingsFieldLabel
+                            label="Đệm chunk (ms)"
+                            hint="Thêm mili giây trước/sau mỗi chunk ASR để không cắt mất biên âm tiết."
+                          />
+                          <input
+                            className="settings-input"
+                            type="number"
+                            min={0}
+                            max={1000}
+                            step={25}
+                            value={settings.sparse_asr_padding_ms ?? 200}
+                            onChange={(e) => setSettings({ ...settings, sparse_asr_padding_ms: Number(e.target.value) })}
+                            disabled={!settings.sparse_asr_enabled}
+                          />
+                        </label>
+                      </div>
+                    </section>
+                  </div>
+                )}
+
+                {settingsTab === "tts" && (
+                  <div className="settings-tab-panel">
+                    <section className="settings-card settings-card--full">
+                      <div className="card-header-accent">
+                        <span className="accent-bar"></span>
+                        <h3>Khớp thời lượng lồng tiếng</h3>
+                      </div>
+                      <p className="card-description card-description--compact">
+                        Điều chỉnh bước <strong>duration_repair</strong> khi giọng TTS ngắn hoặc dài hơn timeline gốc. Chạy lại job từ duration_repair hoặc TTS để áp dụng.
+                      </p>
+                      <SettingsCheckboxField
+                        label="Bật khớp thời lượng chính xác"
+                        hint="Khi bật, pipeline cố căn thời lượng từng đoạn TTS với slot gốc (kéo dài, rút ngắn hoặc thêm im lặng)."
+                        checked={settings.exact_timing_enabled ?? true}
+                        onChange={(checked) => setSettings({ ...settings, exact_timing_enabled: checked })}
+                      />
+                      <div className="settings-field-grid settings-field-grid--2">
+                        <label className="settings-label settings-field-grid__span-2">
+                          <SettingsFieldLabel
+                            label={`Tốc độ TTS toàn cục (${(settings.tts_global_speed ?? 1).toFixed(2)}×)`}
+                            hint="Nhân tốc độ phát audio TTS trước khi khớp timeline. Tăng nhẹ (vd. 1.05) nếu lồng tiếng vẫn dài hơn giọng gốc; giảm nếu quá nhanh."
+                          />
+                          <input
+                            className="settings-input"
+                            type="range"
+                            min={0.9}
+                            max={1.3}
+                            step={0.01}
+                            value={settings.tts_global_speed ?? 1}
+                            onChange={(e) => setSettings({ ...settings, tts_global_speed: Number(e.target.value) })}
+                            disabled={!settings.exact_timing_enabled}
+                          />
+                        </label>
+                        <label className="settings-label settings-field-grid__span-2">
+                          <SettingsFieldLabel
+                            label={`Tốc độ nói tiếng Việt ước lượng (${(settings.vietnamese_speaking_rate_wps ?? 3.2).toFixed(2)} từ/giây)`}
+                            hint="Dùng khi dịch để ước lượng độ dài câu. Tự hiệu chỉnh sau mỗi job TTS; chỉnh tay nếu giọng đọc nhanh/chậm hơn mặc định."
+                          />
+                          <input
+                            className="settings-input"
+                            type="range"
+                            min={2}
+                            max={5}
+                            step={0.05}
+                            value={settings.vietnamese_speaking_rate_wps ?? 3.2}
+                            onChange={(e) => setSettings({ ...settings, vietnamese_speaking_rate_wps: Number(e.target.value) })}
+                          />
+                        </label>
+                        <label className="settings-label">
+                          <SettingsFieldLabel
+                            label="Ngưỡng kéo dài TTS ngắn (giây)"
+                            hint="Chênh lệch tối thiểu giữa slot gốc và TTS hiện tại mới kích hoạt kéo dài/thêm từ. Tăng nếu repair làm audio dài hơn thực tế."
+                          />
+                          <input
+                            className="settings-input"
+                            type="number"
+                            min={0.2}
+                            max={5}
+                            step={0.1}
+                            value={settings.short_tts_lengthen_min_gap_sec ?? 1.5}
+                            onChange={(e) => setSettings({ ...settings, short_tts_lengthen_min_gap_sec: Number(e.target.value) })}
+                            disabled={!settings.exact_timing_enabled}
+                          />
+                        </label>
+                        <label className="settings-label">
+                          <SettingsFieldLabel
+                            label={`Tỷ lệ kéo dài tối đa (${settings.short_tts_lengthen_max_ratio ?? 1.6}×)`}
+                            hint="Giới hạn độ dài sau khi kéo dài TTS ngắn (vd. 1.6 = tối đa 160% độ dài hiện tại). Giảm nếu repair vẫn kéo dài quá mức."
+                          />
+                          <input
+                            className="settings-input"
+                            type="number"
+                            min={1.05}
+                            max={2}
+                            step={0.05}
+                            value={settings.short_tts_lengthen_max_ratio ?? 1.6}
+                            onChange={(e) => setSettings({ ...settings, short_tts_lengthen_max_ratio: Number(e.target.value) })}
+                            disabled={!settings.exact_timing_enabled}
+                          />
+                        </label>
+                      </div>
+                    </section>
+
+                    <section className="settings-card settings-card--full">
+                      <div className="card-header-accent">
+                        <span className="accent-bar"></span>
+                        <h3>Engine lồng tiếng</h3>
+                      </div>
+                      <p className="card-description card-description--compact">
+                        Chọn engine phù hợp: clone offline (VoxCPM2), neural miễn phí (Edge / Google TTS), hoặc AI Studio (Gemini TTS).
+                      </p>
+                      <div className="settings-field-grid settings-backend-grid">
+                        {TTS_BACKEND_OPTIONS.map((option) => (
+                          <button
+                            key={option.id}
+                            type="button"
+                            className={`settings-backend-card${activeTtsBackend === option.id ? " active" : ""}`}
+                            onClick={() => setSettings({ ...settings, tts_backend: option.id })}
+                          >
+                            <strong>{option.label}</strong>
+                            <span>{option.hint}</span>
+                          </button>
                         ))}
-                      </select>
-                    </label>
-                    <label className="settings-label">
-                      <span>Chế độ clone</span>
-                      <select
-                        className="settings-input"
-                        value={settings.voxcpm_clone_mode ?? "reference"}
-                        onChange={(e) => setSettings({ ...settings, voxcpm_clone_mode: e.target.value })}
-                      >
-                        <option value="reference">Reference clone (ổn định)</option>
-                        <option value="ultimate">Ultimate clone (dùng transcript anchor)</option>
-                      </select>
-                    </label>
-                    {settings.voxcpm_clone_mode === "ultimate" && !settings.voxcpm_ref_audio && (
-                      <div className="alert-info-box warning">
-                        <CircleAlert size={14} />
-                        <span>Ultimate clone cần chọn audio tham chiếu đã upload.</span>
                       </div>
+                    </section>
+
+                    {activeTtsBackend === "voxcpm" && (
+                      <section className="settings-card">
+                        <div className="card-header-accent">
+                          <span className="accent-bar"></span>
+                          <h3>VoxCPM2 — Clone giọng</h3>
+                        </div>
+                        <p className="card-description card-description--compact">
+                          Upload giọng mẫu ở tab <strong>Clone Giọng</strong>, hoặc dùng voice design / auto voice.
+                        </p>
+                        <div className="settings-field-grid settings-field-grid--2">
+                          <label className="settings-label">
+                            <span>Audio tham chiếu (.wav)</span>
+                            <select
+                              className="settings-input"
+                              value={settings.voxcpm_ref_audio ?? ""}
+                              onChange={(e) => setSettings({ ...settings, voxcpm_ref_audio: e.target.value })}
+                            >
+                              <option value="">Không dùng / Auto voice</option>
+                              {clonedVoices.map((voice) => (
+                                <option key={voice.id} value={voice.wav_path}>
+                                  {voice.name}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="settings-label">
+                            <span>Chế độ clone</span>
+                            <select
+                              className="settings-input"
+                              value={settings.voxcpm_clone_mode ?? "reference"}
+                              onChange={(e) => setSettings({ ...settings, voxcpm_clone_mode: e.target.value })}
+                            >
+                              <option value="reference">Reference clone (ổn định)</option>
+                              <option value="ultimate">Ultimate clone (dùng transcript)</option>
+                            </select>
+                          </label>
+                          <label className="settings-label settings-field-grid__span-2">
+                            <span>Voice design (tùy chọn)</span>
+                            <input
+                              className="settings-input"
+                              placeholder="female, low pitch"
+                              value={settings.voxcpm_instruct ?? ""}
+                              onChange={(e) => setSettings({ ...settings, voxcpm_instruct: e.target.value })}
+                            />
+                          </label>
+                          <label className="settings-label settings-label--inline settings-field-grid__span-2">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(settings.voxcpm_auto_voice ?? true)}
+                              onChange={(e) => setSettings({ ...settings, voxcpm_auto_voice: e.target.checked })}
+                            />
+                            <span>Auto voice khi không có audio tham chiếu</span>
+                          </label>
+                        </div>
+                        {settings.voxcpm_clone_mode === "ultimate" && !settings.voxcpm_ref_audio && (
+                          <div className="alert-info-box warning">
+                            <CircleAlert size={14} />
+                            <span>Ultimate clone cần chọn audio tham chiếu đã upload.</span>
+                          </div>
+                        )}
+                        {settings.voxcpm_clone_mode === "ultimate" && selectedClonedVoice && !selectedClonedVoice.transcribed && (
+                          <div className="alert-info-box warning">
+                            <CircleAlert size={14} />
+                            <span>Giọng đã chọn chưa có transcript .txt; hãy upload lại file rõ tiếng hơn.</span>
+                          </div>
+                        )}
+                      </section>
                     )}
-                    {settings.voxcpm_clone_mode === "ultimate" && selectedClonedVoice && !selectedClonedVoice.transcribed && (
-                      <div className="alert-info-box warning">
-                        <CircleAlert size={14} />
-                        <span>Giọng đã chọn chưa có transcript .txt; hãy upload lại file rõ tiếng hơn.</span>
+
+                    {activeTtsBackend === "edge_tts" && (
+                      <section className="settings-card">
+                        <div className="card-header-accent">
+                          <span className="accent-bar"></span>
+                          <h3>Edge TTS — Giọng Microsoft</h3>
+                        </div>
+                        <p className="card-description card-description--compact">
+                          Dùng giọng neural của Microsoft qua internet. Không cần GPU hay API key.
+                        </p>
+                        <label className="settings-label">
+                          <span>Giọng tiếng Việt</span>
+                          <select
+                            className="settings-input"
+                            value={settings.edge_tts_voice ?? "vi-VN-HoaiMyNeural"}
+                            onChange={(e) => setSettings({ ...settings, edge_tts_voice: e.target.value })}
+                          >
+                            {(edgeTtsVoices.length > 0 ? edgeTtsVoices : [
+                              { id: "vi-VN-HoaiMyNeural", name: "Hoài My (Nữ)" },
+                              { id: "vi-VN-NamMinhNeural", name: "Nam Minh (Nam)" },
+                            ]).map((voice) => (
+                              <option key={voice.id} value={voice.id}>
+                                {voice.name}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      </section>
+                    )}
+
+                    {activeTtsBackend === "google_tts" && (
+                      <section className="settings-card">
+                        <div className="card-header-accent">
+                          <span className="accent-bar"></span>
+                          <h3>Google TTS — Cloud Text-to-Speech</h3>
+                        </div>
+                        <p className="card-description card-description--compact">
+                          4 giọng Standard tiếng Việt (A/B/C/D). Cần API key từ Google Cloud Console — khác khóa Gemini AI Studio.
+                        </p>
+                        <div className="settings-field-grid settings-field-grid--2">
+                          <label className="settings-label settings-field-grid__span-2">
+                            <span>API key Google Cloud Text-to-Speech</span>
+                            <input
+                              className="settings-input"
+                              type="password"
+                              placeholder="AIza... (bật Cloud Text-to-Speech API)"
+                              value={newGoogleTtsKey}
+                              onChange={(e) => setNewGoogleTtsKey(e.target.value)}
+                            />
+                          </label>
+                          {settings.google_tts_api_key_configured && (
+                            <div className="alert-info-box info settings-field-grid__span-2">
+                              <CheckCircle2 size={14} />
+                              <span>Đã lưu khóa: {settings.google_tts_api_key_masked}</span>
+                            </div>
+                          )}
+                          <label className="settings-label settings-field-grid__span-2">
+                            <span>Giọng đọc tiếng Việt</span>
+                            <select
+                              className="settings-input"
+                              value={settings.google_tts_voice ?? "vi-VN-Standard-A"}
+                              onChange={(e) => setSettings({ ...settings, google_tts_voice: e.target.value })}
+                            >
+                              {GOOGLE_TTS_VOICES.map((voice) => (
+                                <option key={voice.id} value={voice.id}>
+                                  {voice.name}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="settings-label settings-field-grid__span-2">
+                            <span>Tốc độ đọc ({settings.google_tts_speaking_rate ?? 1}x)</span>
+                            <input
+                              className="settings-input"
+                              type="range"
+                              min={0.75}
+                              max={1.25}
+                              step={0.05}
+                              value={settings.google_tts_speaking_rate ?? 1}
+                              onChange={(e) => setSettings({ ...settings, google_tts_speaking_rate: Number(e.target.value) })}
+                            />
+                          </label>
+                        </div>
+                        {!settings.google_tts_api_key_configured && !newGoogleTtsKey.trim() && (
+                          <div className="alert-info-box warning">
+                            <CircleAlert size={14} />
+                            <span>Chưa có API key Cloud TTS. Lưu khóa trước khi chạy job hoặc nghe thử.</span>
+                          </div>
+                        )}
+                      </section>
+                    )}
+
+                    {activeTtsBackend === "gemini_tts" && (
+                      <section className="settings-card">
+                        <div className="card-header-accent">
+                          <span className="accent-bar"></span>
+                          <h3>Gemini TTS — Google AI</h3>
+                        </div>
+                        <p className="card-description card-description--compact">
+                          Tổng hợp giọng qua Google AI Studio. Cần ít nhất một khóa API ở tab Dịch thuật.
+                        </p>
+                        <div className="settings-field-grid settings-field-grid--2">
+                          <label className="settings-label">
+                            <span>Mô hình TTS</span>
+                            <input
+                              className="settings-input"
+                              value={settings.gemini_tts_model ?? "gemini-2.5-flash-preview-tts"}
+                              onChange={(e) => setSettings({ ...settings, gemini_tts_model: e.target.value })}
+                            />
+                          </label>
+                          <label className="settings-label">
+                            <span>Giọng đọc</span>
+                            <select
+                              className="settings-input"
+                              value={settings.gemini_tts_voice ?? "Zephyr"}
+                              onChange={(e) => setSettings({ ...settings, gemini_tts_voice: e.target.value })}
+                            >
+                              {GEMINI_TTS_VOICES.map((voice) => (
+                                <option key={voice.id} value={voice.id}>
+                                  {voice.name}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        </div>
+                        {(settings.gemini_api_keys ?? []).length === 0 && (
+                          <div className="alert-info-box warning">
+                            <CircleAlert size={14} />
+                            <span>Chưa có khóa Gemini. Thêm khóa ở tab Dịch thuật trước khi chạy job.</span>
+                          </div>
+                        )}
+                      </section>
+                    )}
+
+                    <section className="settings-card settings-card--full">
+                      <div className="card-header-accent">
+                        <span className="accent-bar"></span>
+                        <h3>Nghe thử giọng đọc</h3>
                       </div>
-                    )}
-                    <label className="settings-label">
-                      <span>Voice design (tùy chọn)</span>
-                      <input
-                        className="settings-input"
-                        placeholder="female, low pitch"
-                        value={settings.voxcpm_instruct ?? ""}
-                        onChange={(e) => setSettings({ ...settings, voxcpm_instruct: e.target.value })}
-                      />
-                    </label>
-                    <label className="settings-label" style={{ flexDirection: "row", alignItems: "center", gap: "10px" }}>
-                      <input
-                        type="checkbox"
-                        checked={Boolean(settings.voxcpm_auto_voice ?? true)}
-                        onChange={(e) => setSettings({ ...settings, voxcpm_auto_voice: e.target.checked })}
-                      />
-                      <span>Auto voice khi không có audio tham chiếu</span>
-                    </label>
+                      <p className="card-description card-description--compact">
+                        Tạo audio mẫu với cấu hình hiện tại (chưa cần lưu nếu chỉ đổi nội dung thử).
+                      </p>
+                      <div className="settings-field-grid settings-field-grid--2">
+                        <label className="settings-label settings-field-grid__span-2">
+                          <span>Nội dung nghe thử</span>
+                          <textarea
+                            className="settings-input"
+                            rows={3}
+                            value={ttsPreviewText}
+                            onChange={(e) => setTtsPreviewText(e.target.value)}
+                            placeholder="Nhập câu tiếng Việt để nghe thử..."
+                          />
+                        </label>
+                        <div className="settings-field-grid__span-2" style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" }}>
+                          <button
+                            type="button"
+                            className="gradient-button"
+                            disabled={ttsPreviewLoading}
+                            onClick={() => void handlePreviewTts()}
+                            style={{ justifyContent: "center" }}
+                          >
+                            <Volume2 size={16} />
+                            {ttsPreviewLoading ? "Đang tạo audio..." : "Nghe thử"}
+                          </button>
+                          {ttsPreviewUrl && (
+                            <audio controls autoPlay src={ttsPreviewUrl} style={{ height: "36px", flex: "1 1 240px" }} />
+                          )}
+                        </div>
+                      </div>
+                    </section>
                   </div>
-                </section>
+                )}
 
-                <section className="settings-card">
-                  <div className="card-header-accent">
-                    <span className="accent-bar"></span>
-                    <h3>Phụ đề trên video</h3>
+                {settingsTab === "subtitles" && (
+                  <div className="settings-tab-panel">
+                    <section className="settings-card settings-card--full">
+                      <div className="card-header-accent">
+                        <span className="accent-bar"></span>
+                        <h3>Phụ đề trên video</h3>
+                      </div>
+                      <p className="card-description card-description--compact">
+                        Chèn phụ đề tiếng Việt (bản dịch) trực tiếp vào video khi xuất thành phẩm.
+                      </p>
+                      <label className="settings-label settings-label--inline">
+                        <input
+                          type="checkbox"
+                          checked={settings.subtitles_enabled ?? true}
+                          onChange={(e) => setSettings({ ...settings, subtitles_enabled: e.target.checked })}
+                        />
+                        <span>Bật phụ đề trên video</span>
+                      </label>
+                      <div className="settings-field-grid settings-field-grid--2">
+                        <label className="settings-label">
+                          <span>Cỡ chữ</span>
+                          <input
+                            className="settings-input"
+                            type="number"
+                            min={16}
+                            max={120}
+                            value={settings.subtitle_font_size ?? 48}
+                            onChange={(e) => setSettings({ ...settings, subtitle_font_size: Number(e.target.value) })}
+                            disabled={!settings.subtitles_enabled}
+                          />
+                        </label>
+                        <label className="settings-label">
+                          <span>Vị trí phụ đề</span>
+                          <select
+                            className="settings-input"
+                            value={settings.subtitle_position ?? "bottom"}
+                            onChange={(e) => setSettings({ ...settings, subtitle_position: e.target.value })}
+                            disabled={!settings.subtitles_enabled}
+                          >
+                            <option value="bottom">Dưới cùng</option>
+                            <option value="center">Giữa màn hình</option>
+                            <option value="top">Trên cùng</option>
+                          </select>
+                        </label>
+                        <label className="settings-label">
+                          <span>Màu chữ</span>
+                          <input
+                            className="settings-input"
+                            type="color"
+                            value={settings.subtitle_font_color ?? "#FFFFFF"}
+                            onChange={(e) => setSettings({ ...settings, subtitle_font_color: e.target.value.toUpperCase() })}
+                            disabled={!settings.subtitles_enabled}
+                          />
+                        </label>
+                        <label className="settings-label">
+                          <span>Màu nền chữ</span>
+                          <input
+                            className="settings-input"
+                            type="color"
+                            value={settings.subtitle_background_color ?? "#000000"}
+                            onChange={(e) => setSettings({ ...settings, subtitle_background_color: e.target.value.toUpperCase() })}
+                            disabled={!settings.subtitles_enabled}
+                          />
+                        </label>
+                        <label className="settings-label settings-field-grid__span-2">
+                          <span>Độ đặc nền ({settings.subtitle_background_opacity ?? 95}%)</span>
+                          <input
+                            className="settings-input"
+                            type="range"
+                            min={40}
+                            max={100}
+                            value={settings.subtitle_background_opacity ?? 95}
+                            onChange={(e) => setSettings({ ...settings, subtitle_background_opacity: Number(e.target.value) })}
+                            disabled={!settings.subtitles_enabled}
+                          />
+                        </label>
+                        <label className="settings-label settings-field-grid__span-2">
+                          <span>Đệm nền quanh chữ ({settings.subtitle_background_padding ?? 12}px)</span>
+                          <input
+                            className="settings-input"
+                            type="range"
+                            min={4}
+                            max={40}
+                            value={settings.subtitle_background_padding ?? 12}
+                            onChange={(e) => setSettings({ ...settings, subtitle_background_padding: Number(e.target.value) })}
+                            disabled={!settings.subtitles_enabled}
+                          />
+                        </label>
+                        {(settings.subtitle_position === "bottom" || settings.subtitle_position === "top") && (
+                          <label className="settings-label settings-field-grid__span-2">
+                            <span>
+                              {settings.subtitle_position === "bottom"
+                                ? `Khoảng cách tới lề dưới (${settings.subtitle_edge_margin ?? 80}px)`
+                                : `Khoảng cách tới lề trên (${settings.subtitle_edge_margin ?? 80}px)`}
+                            </span>
+                            <input
+                              className="settings-input"
+                              type="range"
+                              min={0}
+                              max={300}
+                              value={settings.subtitle_edge_margin ?? 80}
+                              onChange={(e) => setSettings({ ...settings, subtitle_edge_margin: Number(e.target.value) })}
+                              disabled={!settings.subtitles_enabled}
+                            />
+                          </label>
+                        )}
+                      </div>
+                      <div className="alert-info-box info">
+                        <CircleAlert size={14} style={{ flexShrink: 0, marginTop: "2px" }} />
+                        <span>
+                          Phụ đề dùng bản dịch tiếng Việt theo từng phân đoạn. Chạy lại từ bước <strong>Xuất video thành phẩm</strong> để áp dụng thay đổi cho job đã hoàn thành.
+                        </span>
+                      </div>
+                    </section>
                   </div>
-                  <p className="card-description">
-                    Chèn phụ đề tiếng Việt (bản dịch) trực tiếp vào video khi xuất thành phẩm.
-                  </p>
-                  <label className="settings-label" style={{ flexDirection: "row", alignItems: "center", gap: "10px" }}>
-                    <input
-                      type="checkbox"
-                      checked={settings.subtitles_enabled ?? true}
-                      onChange={(e) => setSettings({ ...settings, subtitles_enabled: e.target.checked })}
-                    />
-                    <span>Bật phụ đề trên video</span>
-                  </label>
-                  <label className="settings-label">
-                    <span>Cỡ chữ</span>
-                    <input
-                      className="settings-input"
-                      type="number"
-                      min={16}
-                      max={120}
-                      value={settings.subtitle_font_size ?? 48}
-                      onChange={(e) => setSettings({ ...settings, subtitle_font_size: Number(e.target.value) })}
-                      disabled={!settings.subtitles_enabled}
-                    />
-                  </label>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
-                    <label className="settings-label">
-                      <span>Màu chữ</span>
-                      <input
-                        className="settings-input"
-                        type="color"
-                        value={settings.subtitle_font_color ?? "#FFFFFF"}
-                        onChange={(e) => setSettings({ ...settings, subtitle_font_color: e.target.value.toUpperCase() })}
-                        disabled={!settings.subtitles_enabled}
-                      />
-                    </label>
-                    <label className="settings-label">
-                      <span>Màu nền chữ (vùng bao quanh)</span>
-                      <input
-                        className="settings-input"
-                        type="color"
-                        value={settings.subtitle_background_color ?? "#000000"}
-                        onChange={(e) => setSettings({ ...settings, subtitle_background_color: e.target.value.toUpperCase() })}
-                        disabled={!settings.subtitles_enabled}
-                      />
-                    </label>
-                  </div>
-                  <label className="settings-label">
-                    <span>Độ đặc nền ({settings.subtitle_background_opacity ?? 95}%)</span>
-                    <input
-                      className="settings-input"
-                      type="range"
-                      min={40}
-                      max={100}
-                      value={settings.subtitle_background_opacity ?? 95}
-                      onChange={(e) => setSettings({ ...settings, subtitle_background_opacity: Number(e.target.value) })}
-                      disabled={!settings.subtitles_enabled}
-                    />
-                  </label>
-                  <label className="settings-label">
-                    <span>Đệm nền quanh chữ ({settings.subtitle_background_padding ?? 12}px)</span>
-                    <input
-                      className="settings-input"
-                      type="range"
-                      min={4}
-                      max={40}
-                      value={settings.subtitle_background_padding ?? 12}
-                      onChange={(e) => setSettings({ ...settings, subtitle_background_padding: Number(e.target.value) })}
-                      disabled={!settings.subtitles_enabled}
-                    />
-                  </label>
-                  <label className="settings-label">
-                    <span>Vị trí phụ đề</span>
-                    <select
-                      className="settings-input"
-                      value={settings.subtitle_position ?? "bottom"}
-                      onChange={(e) => setSettings({ ...settings, subtitle_position: e.target.value })}
-                      disabled={!settings.subtitles_enabled}
-                    >
-                      <option value="bottom">Dưới cùng</option>
-                      <option value="center">Giữa màn hình</option>
-                      <option value="top">Trên cùng</option>
-                    </select>
-                  </label>
-                  {(settings.subtitle_position === "bottom" || settings.subtitle_position === "top") && (
-                    <label className="settings-label">
-                      <span>
-                        {settings.subtitle_position === "bottom"
-                          ? `Khoảng cách tới lề dưới (${settings.subtitle_edge_margin ?? 80}px)`
-                          : `Khoảng cách tới lề trên (${settings.subtitle_edge_margin ?? 80}px)`}
-                      </span>
-                      <input
-                        className="settings-input"
-                        type="range"
-                        min={0}
-                        max={300}
-                        value={settings.subtitle_edge_margin ?? 80}
-                        onChange={(e) => setSettings({ ...settings, subtitle_edge_margin: Number(e.target.value) })}
-                        disabled={!settings.subtitles_enabled}
-                      />
-                    </label>
-                  )}
-                  <div className="alert-info-box info">
-                    <CircleAlert size={14} style={{ flexShrink: 0, marginTop: "2px" }} />
-                    <span>
-                      Phụ đề dùng bản dịch tiếng Việt theo từng phân đoạn. Chạy lại từ bước <strong>Xuất video thành phẩm</strong> để áp dụng thay đổi cho job đã hoàn thành.
-                    </span>
-                  </div>
-                </section>
-              </div>
-
-              <div className="settings-actions">
-                <button type="submit" className="save-settings-button">
-                  <Save size={18} /> Lưu Cài Đặt
-                </button>
-                {settingsSuccess && (
-                  <span className="save-success-badge">
-                    <CheckCircle2 size={18} /> Đã lưu cài đặt thành công!
-                  </span>
                 )}
               </div>
             </form>

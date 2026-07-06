@@ -61,6 +61,11 @@ const baseApi: JobsApi = {
   deleteClonedVoice: vi.fn().mockResolvedValue({ status: "deleted" }),
   testClonedVoice: vi.fn().mockResolvedValue(new Blob()),
   previewPresetVoice: vi.fn().mockResolvedValue(new Blob()),
+  listTtsVoices: vi.fn().mockResolvedValue([
+    { id: "vi-VN-HoaiMyNeural", name: "Hoài My (Nữ)" },
+    { id: "vi-VN-NamMinhNeural", name: "Nam Minh (Nam)" },
+  ]),
+  previewTts: vi.fn().mockResolvedValue(new Blob()),
   rerunJob: vi.fn().mockResolvedValue({ status: "queued", job }),
   redubJob: vi.fn().mockResolvedValue({ status: "queued", job }),
   getJobFiles: vi.fn().mockResolvedValue([]),
@@ -317,8 +322,8 @@ test("shows translation and VoxCPM2 settings", async () => {
 
   fireEvent.click(await screen.findByRole("button", { name: "Cài đặt" }));
 
-  expect(await screen.findByText("Dịch thuật")).toBeInTheDocument();
-  expect(await screen.findByText("Lồng tiếng VoxCPM2")).toBeInTheDocument();
+  expect(await screen.findByRole("tab", { name: "Dịch thuật" })).toBeInTheDocument();
+  expect(await screen.findByText("Engine lồng tiếng")).toBeInTheDocument();
 });
 
 test("manages Gemini API key pool from settings", async () => {
@@ -345,6 +350,7 @@ test("manages Gemini API key pool from settings", async () => {
   render(<App api={api} />);
 
   fireEvent.click(await screen.findByRole("button", { name: "Cài đặt" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "Dịch thuật" }));
   expect(await screen.findByText("Google AI Studio / Khóa API Gemini")).toBeInTheDocument();
   expect(screen.getByText("AIza...7890")).toBeInTheDocument();
   expect(screen.getByDisplayValue("Studio quota 1")).toBeInTheDocument();
@@ -352,7 +358,7 @@ test("manages Gemini API key pool from settings", async () => {
   fireEvent.change(screen.getByPlaceholderText(/Dán khóa API Google AI Studio/i), {
     target: { value: "AIzaSyNewSecret" }
   });
-  fireEvent.click(screen.getByRole("button", { name: "Thêm khóa Gemini" }));
+  fireEvent.click(screen.getByRole("button", { name: "Thêm khóa" }));
   await waitFor(() => expect(updateSettings).toHaveBeenCalledWith({ gemini_api_key_add: "AIzaSyNewSecret" }));
 
   fireEvent.change(screen.getByLabelText("Edit label for Gemini key AIza...7890"), {
@@ -385,10 +391,11 @@ test("saves a pending Gemini key when saving settings", async () => {
   render(<App api={api} />);
 
   fireEvent.click(await screen.findByRole("button", { name: "Cài đặt" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "Dịch thuật" }));
   fireEvent.change(screen.getByPlaceholderText(/Dán khóa API Google AI Studio/i), {
     target: { value: "AIzaSySecret1234567890" }
   });
-  fireEvent.click(screen.getByRole("button", { name: "Lưu Cài Đặt" }));
+  fireEvent.click(screen.getByRole("button", { name: "Lưu cài đặt" }));
 
   await waitFor(() =>
     expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
@@ -416,7 +423,7 @@ test("does not resend stale Gemini key command fields from settings", async () =
   render(<App api={api} />);
 
   fireEvent.click(await screen.findByRole("button", { name: "Cài đặt" }));
-  fireEvent.click(screen.getByRole("button", { name: "Lưu Cài Đặt" }));
+  fireEvent.click(screen.getByRole("button", { name: "Lưu cài đặt" }));
 
   await waitFor(() => expect(updateSettings).toHaveBeenCalled());
   expect(updateSettings.mock.calls[0][0]).not.toHaveProperty("gemini_api_key_add");

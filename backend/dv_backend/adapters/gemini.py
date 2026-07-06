@@ -249,7 +249,19 @@ class GeminiTtsAdapter:
         self.model = model
         self.request = request
 
-    def synthesize(self, text: str, output_path: Path, *, voice: str) -> None:
+    def synthesize(
+        self,
+        text: str,
+        output_path: Path,
+        *,
+        voice: str,
+        ref_text: str | None = None,
+        anchor_text: str | None = None,
+        clone: bool = False,
+        clone_mode: str | None = None,
+        **kwargs,
+    ) -> None:
+        del ref_text, anchor_text, clone, clone_mode, kwargs
         if not self.key_pool.keys:
             raise AppError(
                 400,

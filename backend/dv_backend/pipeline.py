@@ -23,11 +23,20 @@ from .vendor import VendorManifest, VendorResolver, prefer_macos_ffmpeg_full
 from .adapters.translation import GoogleFreeTranslator
 from .adapters.tts import VOXCPM_INSTRUCT_PREFIX, TtsSession, create_tts_adapter
 from .adapters.asr import configure_gpu_manager, reset_model_cache, transcribe_audio
+from .adapters.vad_feedback import filter_asr_false_positives
+from .adapters.vad_energy import filter_low_vocal_energy_segments
+from .adapters.vad_silencedetect import (
+    detect_speech_regions_silencedetect,
+    model_config_label as silencedetect_model_config_label,
+    silencedetect_filter,
+)
+from .adapters.vad_silero import model_config_label as silero_model_config_label
+from .adapters.vad_silero import vad_step_silero
 from .gpu_manager import global_gpu_manager
 from .hardware import resolve_inference_device
 from .audio_probe import get_audio_duration
 from .duration_safety import classify_stretch, tail_has_speech
-from .segmentation import split_long_segments_with_alignment
+from .segmentation import MAX_SEGMENT_SPLIT_SECONDS, merge_incomplete_sentence_segments, split_long_segments_with_alignment
 from .sparse_asr import (
     build_sparse_chunks,
     build_stitched_timeline,
@@ -37,6 +46,7 @@ from .sparse_asr import (
     should_use_sparse_asr,
     stitched_timeline_duration,
 )
+from .timing_placement import compute_placement_starts
 from .telemetry import TelemetrySink
 from .translation_duration import annotate_translation_duration, build_translation_timing_guidance, duration_prompt_suffix
 from .adapters.subtitles import (
@@ -72,6 +82,98 @@ ASR_ALIGNMENT_SCHEMA_VERSION = 2
 DEFAULT_EXACT_TIMING_TOLERANCE_MS = 40
 DEFAULT_EXACT_TIMING_ENABLED = True
 DEFAULT_EXACT_TIMING_MAX_STRETCH = 1.2
+SHORT_TTS_TAIL_PAD_MAX_GAP_SEC = 1.5
+
+
+def _speech_slot_duration(segment: dict) -> float:
+    """Duration of the detected speech window, excluding pause until the next segment."""
+    original = segment.get("original_duration")
+    if original is not None:
+        return max(float(original), 0.05)
+    start = float(segment.get("start", 0.0) or 0.0)
+    end = float(segment.get("end", start) or start)
+    return max(end - start, 0.05)
+
+
+def _repair_target_duration(segment: dict, budget: float, tolerance_sec: float) -> float:
+    """Cap exact-timing repair to the speech slot; do not pad across inter-segment silence."""
+    speech_slot = _speech_slot_duration(segment)
+    slack = max(tolerance_sec, SHORT_TTS_TAIL_PAD_MAX_GAP_SEC)
+    capped = speech_slot + slack
+    if budget <= 0:
+        return capped
+    return min(float(budget), capped)
+
+
+def _preferred_timing_budget(segment: dict, settings: dict) -> float:
+    budget = float(segment.get("duration_budget") or 0.0)
+    exact_enabled, tolerance_sec, _max_stretch = _normalize_exact_timing_settings(settings)
+    if not exact_enabled:
+        return budget
+    return _repair_target_duration(segment, budget, tolerance_sec)
+
+
+def _wav_has_usable_signal(path: Path, *, min_rms: float = 0.0035) -> bool:
+    try:
+        with wave.open(str(path), "rb") as handle:
+            frames = handle.readframes(handle.getnframes())
+            channels = handle.getnchannels()
+        samples = array.array("h")
+        samples.frombytes(frames)
+        if not samples:
+            return False
+        if channels > 1:
+            mono = [float(samples[index]) / 32768.0 for index in range(0, len(samples), channels)]
+        else:
+            mono = [float(sample) / 32768.0 for sample in samples]
+        if not mono:
+            return False
+        rms = (sum(sample * sample for sample in mono) / len(mono)) ** 0.5
+        return rms >= min_rms
+    except Exception:
+        return False
+
+
+def _preferred_recognition_audio(job_dir: Path, fallback_audio_16k: Path) -> tuple[Path, str]:
+    audio_cp = load_checkpoint(job_dir.parents[1], job_dir.name, "extract_audio") or {}
+    vocals_16k_path = Path(audio_cp["vocals_16k_path"]) if audio_cp.get("vocals_16k_path") else None
+    if vocals_16k_path and vocals_16k_path.is_file() and _wav_has_usable_signal(vocals_16k_path):
+        return vocals_16k_path, "vocals_16k"
+    return fallback_audio_16k, "mixed_audio_16k"
+
+
+def _speaking_rate_wps(settings: dict) -> float:
+    try:
+        rate = float(settings.get("vietnamese_speaking_rate_wps", 3.2) or 3.2)
+    except (TypeError, ValueError):
+        rate = 3.2
+    return max(2.0, min(5.0, rate))
+
+
+def _update_speaking_rate_calibration(database: Database, segments: list[dict]) -> float | None:
+    rates: list[float] = []
+    for segment in segments:
+        duration = float(segment.get("tts_duration") or 0.0)
+        words = _estimate_word_count(str(segment.get("translation") or ""))
+        if duration >= 0.25 and words >= 2:
+            rates.append(words / duration)
+    if not rates:
+        return None
+    measured = sum(rates) / len(rates)
+    settings = _load_settings(database)
+    prior = _speaking_rate_wps(settings)
+    blended = round((0.7 * prior) + (0.3 * measured), 2)
+    blended = max(2.0, min(5.0, blended))
+    save_setting(database, "vietnamese_speaking_rate_wps", blended)
+    return blended
+
+
+def _lengthen_min_gap_sec(settings: dict) -> float:
+    return max(0.2, float(settings.get("short_tts_lengthen_min_gap_sec", SHORT_TTS_TAIL_PAD_MAX_GAP_SEC) or SHORT_TTS_TAIL_PAD_MAX_GAP_SEC))
+
+
+def _lengthen_max_ratio(settings: dict) -> float:
+    return max(1.05, float(settings.get("short_tts_lengthen_max_ratio", 1.6) or 1.6))
 
 
 def save_setting(database: Database, key: str, value) -> None:
@@ -629,6 +731,8 @@ def extract_audio_step(job_id: str, config: AppConfig, database: Database, runne
     ffmpeg_path = resolve_tool_path(config, "ffmpeg")
     original_48k = artifacts_dir / "original_48k.wav"
     audio_16k = artifacts_dir / "audio_16k.wav"
+    vocals_16k = artifacts_dir / "vocals_16k.wav"
+    bgm_16k = artifacts_dir / "bgm_16k.wav"
     settings = _load_settings(database)
     requested_mix_mode = _normalize_mix_mode(settings.get("mix_mode"))
 
@@ -667,6 +771,8 @@ def extract_audio_step(job_id: str, config: AppConfig, database: Database, runne
 
     bgm_path: str | None = None
     vocals_path: str | None = None
+    vocals_16k_path: str | None = None
+    bgm_16k_path: str | None = None
     if requested_mix_mode != "duck":
         try:
             bgm_wav, vocals_wav = _separate_background_stems(
@@ -678,6 +784,26 @@ def extract_audio_step(job_id: str, config: AppConfig, database: Database, runne
             )
             bgm_path = str(bgm_wav)
             vocals_path = str(vocals_wav)
+            cmd_vocals_16k = [
+                str(ffmpeg_path), "-y",
+                "-i", str(vocals_wav),
+                "-acodec", "pcm_s16le",
+                "-ac", "1",
+                "-ar", "16000",
+                str(vocals_16k),
+            ]
+            run_subprocess_with_cancel(cmd_vocals_16k, job_id, runner)
+            vocals_16k_path = str(vocals_16k)
+            cmd_bgm_16k = [
+                str(ffmpeg_path), "-y",
+                "-i", str(bgm_wav),
+                "-acodec", "pcm_s16le",
+                "-ac", "1",
+                "-ar", "16000",
+                str(bgm_16k),
+            ]
+            run_subprocess_with_cancel(cmd_bgm_16k, job_id, runner)
+            bgm_16k_path = str(bgm_16k)
         except subprocess.CalledProcessError as e:
             raise AppError(
                 500,
@@ -690,7 +816,7 @@ def extract_audio_step(job_id: str, config: AppConfig, database: Database, runne
             )
 
     checkpoint_data = {
-        "schema_version": 2,
+        "schema_version": 3,
         "job_id": job_id,
         "step_name": "extract_audio",
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -698,6 +824,8 @@ def extract_audio_step(job_id: str, config: AppConfig, database: Database, runne
         "audio_16k_path": str(audio_16k),
         "bgm_path": bgm_path,
         "vocals_path": vocals_path,
+        "vocals_16k_path": vocals_16k_path,
+        "bgm_16k_path": bgm_16k_path,
         "requested_mix_mode": requested_mix_mode,
     }
     save_checkpoint(config.data_dir, job_id, "extract_audio", checkpoint_data)
@@ -720,7 +848,7 @@ def _release_asr_gpu_models(settings: dict | None = None) -> None:
 def vad_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
     job_dir = config.data_dir / "jobs" / job_id
     audio_16k = job_dir / "artifacts" / "audio_16k.wav"
-    
+
     if not audio_16k.is_file():
         raise AppError(
             400,
@@ -730,95 +858,116 @@ def vad_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
                 action="Resume extract_audio step."
             )
         )
-        
+
+    recognition_audio, recognition_audio_source = _preferred_recognition_audio(job_dir, audio_16k)
+    settings = _load_settings(database)
+    vad_engine = str(settings.get("vad_engine", "silero") or "silero").strip().lower()
+    if vad_engine not in {"silero", "silencedetect"}:
+        vad_engine = "silero"
+
     ffmpeg_path = resolve_tool_path(config, "ffmpeg")
     telemetry = TelemetrySink(config.data_dir, job_id)
     started = time.perf_counter()
-    total_duration = get_audio_duration(audio_16k, ffprobe_path=ffprobe_sibling_for(ffmpeg_path))
+    total_duration = get_audio_duration(recognition_audio, ffprobe_path=ffprobe_sibling_for(ffmpeg_path))
 
-    # Detect silence
-    cmd = [
-        str(ffmpeg_path),
-        "-i", str(audio_16k),
-        "-af", "silencedetect=n=-30dB:d=0.5",
-        "-f", "null",
-        "-"
-    ]
+    if vad_engine == "silencedetect":
+        noise_db = float(settings.get("silencedetect_noise_db", -30) or -30)
+        min_silence_sec = float(settings.get("silencedetect_min_silence_sec", 0.5) or 0.5)
+        cmd = [
+            str(ffmpeg_path),
+            "-i", str(recognition_audio),
+            "-af", silencedetect_filter(noise_db, min_silence_sec),
+            "-f", "null",
+            "-"
+        ]
 
-    try:
-        res = run_subprocess_with_cancel(cmd, job_id, runner)
-    except subprocess.CalledProcessError as e:
-        telemetry.record("vad", {
-            "status": "failed",
-            "wall_time_ms": round((time.perf_counter() - started) * 1000),
-            "audio_duration_sec": total_duration,
-            "model_config": "ffmpeg_silencedetect",
-            "retry_count": 0,
-        })
-        raise AppError(
-            500,
-            ErrorInfo(
-                code="VAD_DETECTION_FAILED",
-                message="Failed to run silence detection on audio.",
-                action="Verify FFmpeg is correctly installed.",
-                detail=e.stderr or e.stdout
+        try:
+            res = run_subprocess_with_cancel(cmd, job_id, runner)
+        except subprocess.CalledProcessError as e:
+            telemetry.record("vad", {
+                "status": "failed",
+                "wall_time_ms": round((time.perf_counter() - started) * 1000),
+                "audio_duration_sec": total_duration,
+                "model_config": "ffmpeg_silencedetect",
+                "vad_engine": vad_engine,
+                "retry_count": 0,
+            })
+            raise AppError(
+                500,
+                ErrorInfo(
+                    code="VAD_DETECTION_FAILED",
+                    message="Failed to run silence detection on audio.",
+                    action="Verify FFmpeg is correctly installed.",
+                    detail=e.stderr or e.stdout
+                )
+            ) from e
+
+        speech_regions = detect_speech_regions_silencedetect(
+            recognition_audio,
+            total_duration=total_duration,
+            stderr=res.stderr,
+        )
+        model_config = silencedetect_model_config_label(noise_db, min_silence_sec)
+    else:
+        try:
+            speech_regions = vad_step_silero(
+                recognition_audio,
+                threshold=float(settings.get("silero_vad_threshold", 0.5) or 0.5),
+                min_speech_duration_ms=int(settings.get("silero_vad_min_speech_duration_ms", 250) or 250),
+                min_silence_duration_ms=int(settings.get("silero_vad_min_silence_duration_ms", 300) or 300),
+                speech_pad_ms=int(settings.get("silero_vad_speech_pad_ms", 150) or 150),
             )
+        except Exception as e:
+            telemetry.record("vad", {
+                "status": "failed",
+                "wall_time_ms": round((time.perf_counter() - started) * 1000),
+                "audio_duration_sec": total_duration,
+                "model_config": "silero_vad",
+                "vad_engine": vad_engine,
+                "retry_count": 0,
+            })
+            raise AppError(
+                500,
+                ErrorInfo(
+                    code="VAD_DETECTION_FAILED",
+                    message="Failed to run Silero VAD on audio.",
+                    action="Verify silero-vad is installed or switch vad_engine to silencedetect.",
+                    detail=str(e),
+                )
+            ) from e
+        model_config = silero_model_config_label(
+            threshold=float(settings.get("silero_vad_threshold", 0.5) or 0.5),
+            min_speech_duration_ms=int(settings.get("silero_vad_min_speech_duration_ms", 250) or 250),
+            min_silence_duration_ms=int(settings.get("silero_vad_min_silence_duration_ms", 300) or 300),
+            speech_pad_ms=int(settings.get("silero_vad_speech_pad_ms", 150) or 150),
         )
 
-    stderr = res.stderr
-
-    # Parse silences
-    starts = [float(x) for x in re.findall(r"silence_start:\s*(\d+\.?\d*)", stderr)]
-    ends = [float(x) for x in re.findall(r"silence_end:\s*(\d+\.?\d*)", stderr)]
-    
-    silences = []
-    for i in range(min(len(starts), len(ends))):
-        silences.append((starts[i], ends[i]))
-    if len(starts) > len(ends):
-        silences.append((starts[-1], total_duration))
-        
-    silences.sort()
-    
-    # Invert silence to get speech regions
-    speech_regions = []
-    current_time = 0.0
-    
-    for sil_start, sil_end in silences:
-        if sil_start > current_time + 0.1:
-            speech_regions.append({
-                "start": round(current_time, 2),
-                "end": round(sil_start, 2)
-            })
-        current_time = sil_end
-        
-    if total_duration > current_time + 0.1:
-        speech_regions.append({
-            "start": round(current_time, 2),
-            "end": round(total_duration, 2)
-        })
-        
     speech_duration = sum(region["end"] - region["start"] for region in speech_regions)
     speech_ratio = round(speech_duration / total_duration, 4) if total_duration > 0 else 0.0
     telemetry.record("vad", {
         "status": "ok",
         "wall_time_ms": round((time.perf_counter() - started) * 1000),
         "audio_duration_sec": total_duration,
-        "model_config": "ffmpeg_silencedetect:n=-30dB:d=0.5",
+        "model_config": model_config,
+        "vad_engine": vad_engine,
         "retry_count": 0,
         "speech_region_count": len(speech_regions),
         "vad_speech_ratio": speech_ratio,
+        "recognition_audio_source": recognition_audio_source,
     })
 
     checkpoint_data = {
-        "schema_version": 1,
+        "schema_version": 2,
         "job_id": job_id,
         "step_name": "vad",
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "total_duration": round(total_duration, 2),
         "speech_regions": speech_regions,
         "vad_speech_ratio": speech_ratio,
+        "vad_engine": vad_engine,
+        "recognition_audio_source": recognition_audio_source,
     }
-    
+
     save_checkpoint(config.data_dir, job_id, "vad", checkpoint_data)
     return checkpoint_data
 
@@ -836,6 +985,8 @@ def asr_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
                 action="Resume extract_audio step."
             )
         )
+
+    recognition_audio, recognition_audio_source = _preferred_recognition_audio(job_dir, audio_16k)
 
     if runner and runner.is_cancelled(job_id):
         raise AppError(
@@ -869,7 +1020,7 @@ def asr_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
             long_regions = [
                 region
                 for region in speech_regions
-                if float(region.get("end", 0.0) or 0.0) - float(region.get("start", 0.0) or 0.0) > 20.0
+                if float(region.get("end", 0.0) or 0.0) - float(region.get("start", 0.0) or 0.0) > MAX_SEGMENT_SPLIT_SECONDS
             ]
             include_alignment = bool(long_regions)
             alignment_requested_reason = "balanced_long_vad_region" if long_regions else "balanced_skip_alignment"
@@ -902,7 +1053,7 @@ def asr_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
                 chunks = build_sparse_chunks(
                     speech_regions,
                     total_duration=float(vad_cp.get("total_duration") or 0.0),
-                    merge_gap_sec=0.25,
+                    merge_gap_sec=float(settings.get("sparse_asr_merge_gap_sec", 0.25) or 0.25),
                     padding_sec=float(settings.get("sparse_asr_padding_ms", 200) or 200) / 1000.0,
                     max_chunk_sec=float(settings.get("sparse_asr_chunk_sec", 25) or 25),
                 )
@@ -932,7 +1083,7 @@ def asr_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
 
                     cmd = [
                         str(ffmpeg_path), "-y",
-                        "-i", str(audio_16k),
+                        "-i", str(recognition_audio),
                         "-filter_complex", ";".join(filter_parts),
                         "-map", "[outa]",
                         "-acodec", "pcm_s16le",
@@ -973,7 +1124,7 @@ def asr_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
             if sparse_asr_fallback_reason is None:
                 sparse_asr_fallback_reason = sparse_decision.reason if sparse_decision else None
             stitched_duration_sec = float(vad_cp.get("total_duration") or 0.0)
-            asr_result = transcribe_audio(audio_16k, **asr_kwargs)
+            asr_result = transcribe_audio(recognition_audio, **asr_kwargs)
             if isinstance(asr_result, dict):
                 segments = asr_result.get("segments", [])
                 aligned_units = asr_result.get("aligned_units", [])
@@ -989,6 +1140,7 @@ def asr_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
                 "model_config": str(settings.get("qwen3_asr_model", "")),
                 "retry_count": 0,
                 "dense_or_sparse_mode": dense_or_sparse_mode,
+                "recognition_audio_source": recognition_audio_source,
             })
             raise AppError(
                 422,
@@ -1012,6 +1164,7 @@ def asr_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
             "dense_or_sparse_mode": dense_or_sparse_mode,
             "alignment_mode": alignment_mode,
             "alignment_status": alignment_status,
+            "recognition_audio_source": recognition_audio_source,
             "gpu_queue_wait_ms": int(last_lease.get("queue_wait_ms") or 0),
             "model_load_ms": int(last_lease.get("load_ms") or 0),
             "cold_start": bool(last_lease.get("cold_start")),
@@ -1035,6 +1188,7 @@ def asr_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
             "sparse_asr_fallback_reason": sparse_asr_fallback_reason,
             "sparse_chunk_count": sparse_chunk_count,
             "stitched_duration_sec": stitched_duration_sec,
+            "recognition_audio_source": recognition_audio_source,
         }
         save_checkpoint(config.data_dir, job_id, "asr", checkpoint_data)
         return checkpoint_data
@@ -1046,7 +1200,7 @@ def _split_long_asr_segments_with_vad(
     raw_segments: list[dict],
     speech_regions: list[dict],
     *,
-    max_segment_seconds: float = 20.0,
+    max_segment_seconds: float = MAX_SEGMENT_SPLIT_SECONDS,
 ) -> list[dict]:
     if not raw_segments or not speech_regions:
         return raw_segments
@@ -1074,16 +1228,13 @@ def _split_long_asr_segments_with_vad(
             split_segments.append(segment)
             continue
 
-        total_region_duration = sum(region["end"] - region["start"] for region in overlapping_regions)
-        cursor = 0
-        for index, region in enumerate(overlapping_regions):
-            if index == len(overlapping_regions) - 1:
-                chunk_text = text[cursor:].strip()
-            else:
-                ratio = (region["end"] - region["start"]) / total_region_duration
-                next_cursor = max(cursor + 1, min(len(text), round(cursor + len(text[cursor:]) * ratio)))
-                chunk_text = text[cursor:next_cursor].strip()
-                cursor = next_cursor
+        from .segmentation import allocate_text_across_regions
+
+        text_chunks = allocate_text_across_regions(text, overlapping_regions)
+        if len(text_chunks) != len(overlapping_regions):
+            split_segments.append(segment)
+            continue
+        for region, chunk_text in zip(overlapping_regions, text_chunks, strict=True):
             if not chunk_text:
                 continue
             split_segment = dict(segment)
@@ -1103,7 +1254,8 @@ def normalize_segments_step(job_id: str, config: AppConfig, database: Database, 
     asr_cp = load_checkpoint(config.data_dir, job_id, "asr")
 
     vad_cp = load_checkpoint(config.data_dir, job_id, "vad")
-    
+    settings = _load_settings(database)
+
     if not asr_cp or not vad_cp:
         raise AppError(
             400,
@@ -1113,7 +1265,7 @@ def normalize_segments_step(job_id: str, config: AppConfig, database: Database, 
                 action="Verify earlier steps are completed."
             )
         )
-        
+
     raw_segments = split_long_segments_with_alignment(
         asr_cp.get("segments", []),
         vad_cp.get("speech_regions", []),
@@ -1123,6 +1275,48 @@ def normalize_segments_step(job_id: str, config: AppConfig, database: Database, 
         raw_segments,
         vad_cp.get("speech_regions", []),
     )
+
+    filter_enabled = bool(settings.get("vad_false_positive_filter_enabled", True))
+    raw_segments, rejected_segments = filter_asr_false_positives(
+        raw_segments,
+        enabled=filter_enabled,
+    )
+
+    energy_filter_enabled = bool(settings.get("vad_energy_filter_enabled", True))
+    extract_cp = load_checkpoint(config.data_dir, job_id, "extract_audio") or {}
+    vocals_16k_path = extract_cp.get("vocals_16k_path")
+    bgm_16k_path = extract_cp.get("bgm_16k_path")
+    min_vocal_ratio = float(settings.get("vad_energy_min_vocal_ratio", 1.15) or 1.15)
+    raw_segments, energy_rejected = filter_low_vocal_energy_segments(
+        raw_segments,
+        vocals_path=vocals_16k_path,
+        bgm_path=bgm_16k_path,
+        enabled=energy_filter_enabled,
+        min_vocal_ratio=min_vocal_ratio,
+    )
+    rejected_segments.extend(energy_rejected)
+    if energy_rejected:
+        for rejected in energy_rejected:
+            logger.info(
+                "Filtered low vocal-energy segment for job %s: region=%.2f-%.2f text=%r",
+                job_id,
+                float(rejected.get("start", 0.0) or 0.0),
+                float(rejected.get("end", 0.0) or 0.0),
+                str(rejected.get("text") or "")[:80],
+            )
+    if rejected_segments:
+        for rejected in rejected_segments:
+            logger.info(
+                "Filtered likely VAD false positive for job %s: region=%.2f-%.2f reason=%s text=%r",
+                job_id,
+                float(rejected.get("start", 0.0) or 0.0),
+                float(rejected.get("end", 0.0) or 0.0),
+                rejected.get("vad_false_positive_reason"),
+                str(rejected.get("text") or "")[:80],
+            )
+
+    raw_segments = merge_incomplete_sentence_segments(raw_segments)
+
     total_duration = vad_cp.get("total_duration", 0.0)
     
     segments = []
@@ -1187,11 +1381,15 @@ def normalize_segments_step(job_id: str, config: AppConfig, database: Database, 
         })
         
     checkpoint_data = {
-        "schema_version": 1,
+        "schema_version": 2,
         "job_id": job_id,
         "step_name": "normalize_segments",
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "segments": normalized
+        "segments": normalized,
+        "vad_false_positive_rejected_count": len(rejected_segments),
+        "vad_false_positive_filter_enabled": filter_enabled,
+        "vad_energy_filter_enabled": energy_filter_enabled,
+        "vad_energy_rejected_count": len(energy_rejected),
     }
     save_checkpoint(config.data_dir, job_id, "normalize_segments", checkpoint_data)
     return checkpoint_data
@@ -1339,16 +1537,19 @@ def translate_step(job_id: str, config: AppConfig, database: Database, runner) -
         return checkpoint_data
 
     texts = [segment["text"] for segment in segments]
-    duration_budgets = [float(segment.get("duration_budget") or 0.0) for segment in segments]
+    duration_budgets = [_preferred_timing_budget(segment, settings) for segment in segments]
+    speaking_rate = _speaking_rate_wps(settings)
     aligned_units = asr_cp.get("aligned_units", []) or []
     timing_guidance = [
         build_translation_timing_guidance(
-            segment,
+            {**segment, "repair_target_duration": budget},
             aligned_units=_aligned_units_for_segment(segment, aligned_units),
+            speaking_rate_wps=speaking_rate,
         )
-        for segment in segments
+        for segment, budget in zip(segments, duration_budgets, strict=True)
     ]
-    for segment, guidance in zip(segments, timing_guidance, strict=True):
+    for segment, budget, guidance in zip(segments, duration_budgets, timing_guidance, strict=True):
+        segment["repair_target_duration"] = round(float(budget), 2) if budget > 0 else 0.0
         segment.update(guidance)
     translated = _translate_texts(
         settings,
@@ -1371,7 +1572,7 @@ def translate_step(job_id: str, config: AppConfig, database: Database, runner) -
         )
     for segment, translation in zip(segments, translated, strict=True):
         segment["translation"] = translation
-        segment.update(annotate_translation_duration(segment))
+        segment.update(annotate_translation_duration(segment, speaking_rate_wps=speaking_rate))
 
     checkpoint_data = {
         "schema_version": 1,
@@ -1553,14 +1754,10 @@ def _estimate_word_count(text: str) -> int:
     return len(re.findall(r"\S+", text))
 
 
-def _centered_silence_pad_filter(current_duration: float, target_dur: float) -> str:
-    gap = max(0.0, target_dur - current_duration)
-    lead_sec = gap / 2.0
-    tail_sec = max(0.0, gap - lead_sec)
-    lead_ms = max(0, round(lead_sec * 1000))
+def _tail_silence_pad_filter(current_duration: float, target_dur: float) -> str:
+    del current_duration
     return (
-        f"adelay={lead_ms}:all=1,"
-        f"apad=pad_dur={tail_sec + 0.2:.3f},"
+        f"apad=pad_dur={target_dur + 0.2:.3f},"
         f"atrim=0:{target_dur:.3f}"
     )
 
@@ -1618,6 +1815,98 @@ def _shorten_translation_with_gemini(
                 save_setting(database, "gemini_key_cursor", key_pool.cursor)
                 return shortened, target_words
             raise ValueError("Gemini returned an empty shortening result.")
+        except Exception as cause:
+            last_error = cause
+            code, _, _ = classify_gemini_failure(cause)
+            if code == "GEMINI_MODEL_UNAVAILABLE":
+                saw_model_unavailable = True
+            if code == "GEMINI_MODEL_NOT_FOUND":
+                saw_model_not_found = True
+
+    if saw_model_unavailable and not saw_model_not_found:
+        code, message, action = classify_gemini_failure(
+            last_error or RuntimeError("Gemini model unavailable")
+        )
+    elif saw_model_not_found:
+        code, message, action = classify_gemini_failure(
+            last_error or RuntimeError("Gemini model not found")
+        )
+    else:
+        code, message, action = classify_gemini_failure(
+            last_error or RuntimeError("Gemini request failed")
+        )
+
+    raise AppError(
+        502,
+        ErrorInfo(
+            code=code,
+            message=message,
+            action=action,
+            detail=str(last_error),
+            retryable=True,
+        ),
+    )
+
+
+def _lengthen_translation_with_gemini(
+    settings: dict,
+    database: Database,
+    *,
+    text: str,
+    budget: float,
+    current_duration: float,
+) -> tuple[str | None, int]:
+    cleaned = text.strip()
+    current_words = _estimate_word_count(cleaned)
+    if current_words < 1 or budget <= 0 or current_duration >= budget:
+        return None, current_words
+
+    gap = budget - current_duration
+    min_gap_sec = _lengthen_min_gap_sec(settings)
+    if gap <= min_gap_sec:
+        return None, current_words
+
+    key_pool = GeminiKeyPool(
+        settings.get("gemini_api_keys", []),
+        cursor=int(settings.get("gemini_key_cursor", 0)),
+    )
+    if not key_pool.keys:
+        return None, current_words
+
+    model = str(settings.get("gemini_translation_model", "gemini-2.5-flash") or "gemini-2.5-flash")
+    target_ratio = min(_lengthen_max_ratio(settings), float(budget) / max(0.05, float(current_duration)))
+    target_words = max(current_words + 1, min(current_words + 2, round(current_words * target_ratio)))
+    underrun_pct = max(0.0, ((budget / current_duration) - 1.0) * 100.0)
+    prompt = (
+        "Expand this Vietnamese dubbing line so it sounds natural when spoken aloud and better fills the target timing.\n"
+        f"Current line: {cleaned}\n"
+        f"Current duration: {current_duration:.2f}s\n"
+        f"Target duration budget: {budget:.2f}s\n"
+        f"Current word count: approximately {current_words}\n"
+        f"Target word count: approximately {target_words} (timing ratio {target_ratio:.3f})\n"
+        f"The line is about {underrun_pct:.1f}% shorter than the timing budget.\n"
+        "Add natural filler words, light discourse markers, or slightly fuller phrasing only when needed. "
+        "Do not change core meaning, facts, names, numbers, or causal relationships. "
+        "Return only the expanded Vietnamese line with no quotes, notes, or formatting."
+    )
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.2},
+    }
+
+    last_error: Exception | None = None
+    saw_model_unavailable = False
+    saw_model_not_found = False
+    for index, api_key in key_pool.ordered_keys():
+        try:
+            lengthened = response_text(default_request(api_key, model, payload)).strip().strip("\"'")
+            if lengthened and lengthened != cleaned:
+                key_pool.mark_success(index)
+                save_setting(database, "gemini_key_cursor", key_pool.cursor)
+                return lengthened, target_words
+            if lengthened:
+                return None, target_words
+            raise ValueError("Gemini returned an empty lengthening result.")
         except Exception as cause:
             last_error = cause
             code, _, _ = classify_gemini_failure(cause)
@@ -1794,6 +2083,8 @@ def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
 
         flush_pending()
 
+    calibrated_rate = _update_speaking_rate_calibration(database, segments)
+
     conversion_result = TtsConversionResult(
         strategy=strategy,
         fallback_reason=None,
@@ -1811,6 +2102,7 @@ def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
         "conversion_strategy": strategy,
         "tts_micro_batch_enabled": micro_batch_enabled,
         "tts_micro_batch_size": micro_batch_size,
+        "calibrated_speaking_rate_wps": calibrated_rate,
         **(describe_conversion(conversion_result) if conversion_result is not None else {"conversion_strategy": strategy, "conversion_input_count": 0, "conversion_wall_time_ms": 0, "conversion_process_count": 0, "conversion_fallback_reason": "no_batch_run"}),
     })
 
@@ -1846,6 +2138,7 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
     settings = {r["key"]: json.loads(r["value"]) for r in rows}
     exact_enabled, tolerance_sec, max_stretch = _normalize_exact_timing_settings(settings)
     max_safe_stretch = float(settings.get("exact_timing_max_safe_stretch", 1.25) or 1.25)
+    global_speed = max(0.9, float(settings.get("tts_global_speed", 1.0) or 1.0))
 
     ffmpeg_path = resolve_tool_path(config, "ffmpeg")
     telemetry = TelemetrySink(config.data_dir, job_id)
@@ -1864,6 +2157,7 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
             repair_attempts = 0
             re_synthesis_count = 0
             llm_shorten_ms = 0
+            llm_lengthen_ms = 0
             re_synthesis_ms = 0
             atempo_ms = 0
             trim_ms = 0
@@ -1886,14 +2180,32 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
 
             input_for_fit = orig_file
             current_duration = get_wav_duration(input_for_fit)
-            if budget > 0 and current_duration > budget + tolerance_sec:
+            if abs(global_speed - 1.0) > 0.001:
+                speed_file = tts_dir / f"tts_speed_{idx}.wav"
+                speed_file.unlink(missing_ok=True)
+                speed_started = time.perf_counter()
+                _run_ffmpeg_audio_filter(
+                    ffmpeg_path,
+                    input_for_fit,
+                    speed_file,
+                    filter_expr=_build_atempo_chain(global_speed),
+                    job_id=job_id,
+                    runner=runner,
+                )
+                atempo_ms += round((time.perf_counter() - speed_started) * 1000)
+                input_for_fit = speed_file
+                current_duration = get_wav_duration(speed_file)
+                fit_methods.append(f"global_speed_{round(global_speed, 2)}x")
+            repair_target = _repair_target_duration(s, budget, tolerance_sec)
+            s["repair_target_duration"] = round(repair_target, 2) if repair_target > 0 else 0.0
+            if repair_target > 0 and current_duration > repair_target + tolerance_sec:
                 try:
                     gemini_started = time.perf_counter()
                     new_translation, target_words = _shorten_translation_with_gemini(
                         settings,
                         database,
                         text=str(s.get("translation") or ""),
-                        budget=budget,
+                        budget=repair_target,
                         current_duration=current_duration,
                     )
                     llm_shorten_ms = round((time.perf_counter() - gemini_started) * 1000)
@@ -1924,10 +2236,10 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                 except Exception:
                     quality_warning = "gemini_shorten_failed"
 
-            if exact_enabled and budget > 0 and current_duration > budget + tolerance_sec:
-                raw_factor = current_duration / budget
+            if exact_enabled and repair_target > 0 and current_duration > repair_target + tolerance_sec:
+                raw_factor = current_duration / repair_target
                 speed_factor = min(max_stretch, max(1.0, raw_factor))
-                stretch_decision = classify_stretch(speed_factor, max_safe=max_safe_stretch, explicit_allow_danger=True)
+                stretch_decision = classify_stretch(raw_factor, max_safe=max_safe_stretch, explicit_allow_danger=True)
                 duration_repair_risk = stretch_decision.risk
                 if stretch_decision.warning:
                     quality_warning = stretch_decision.warning
@@ -1949,8 +2261,8 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                 fit_methods.append(f"time_stretch_{round(speed_factor, 2)}x")
                 repair_attempts += 1
 
-            if exact_enabled and budget > 0 and abs(current_duration - budget) > tolerance_sec:
-                target_dur = max(0.05, float(budget))
+            if exact_enabled and repair_target > 0 and abs(current_duration - repair_target) > tolerance_sec:
+                target_dur = max(0.05, float(repair_target))
                 if current_duration > target_dur:
                     tail_speech_detected = _wav_tail_has_speech(input_for_fit)
                     if tail_speech_detected:
@@ -1976,22 +2288,71 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                         fit_methods.append("exact_trim_pad")
                         repair_attempts += 1
                 else:
-                    exact_file = tts_dir / f"tts_exact_{idx}.wav"
-                    exact_file.unlink(missing_ok=True)
-                    trim_started = time.perf_counter()
-                    _run_ffmpeg_audio_filter(
-                        ffmpeg_path,
-                        input_for_fit,
-                        exact_file,
-                        filter_expr=_centered_silence_pad_filter(current_duration, target_dur),
-                        job_id=job_id,
-                        runner=runner,
-                    )
-                    trim_ms = round((time.perf_counter() - trim_started) * 1000)
-                    input_for_fit = exact_file
-                    current_duration = get_wav_duration(exact_file)
-                    fit_methods.append("centered_silence_pad")
-                    repair_attempts += 1
+                    target_dur = max(0.05, float(repair_target))
+                    lengthen_gap_threshold = _lengthen_min_gap_sec(settings)
+                    gap = target_dur - current_duration
+                    if gap > lengthen_gap_threshold:
+                        try:
+                            gemini_started = time.perf_counter()
+                            new_translation, target_words = _lengthen_translation_with_gemini(
+                                settings,
+                                database,
+                                text=str(s.get("translation") or ""),
+                                budget=target_dur,
+                                current_duration=current_duration,
+                            )
+                            llm_lengthen_ms = round((time.perf_counter() - gemini_started) * 1000)
+                            if new_translation and new_translation != s.get("translation"):
+                                raw_temp = tts_dir / f"tts_temp_raw_{idx}.wav"
+                                temp_wav = tts_dir / f"tts_temp_{idx}.wav"
+                                raw_temp.unlink(missing_ok=True)
+                                temp_wav.unlink(missing_ok=True)
+                                synth_started = time.perf_counter()
+                                session.synthesize(new_translation, raw_temp, segment=s)
+                                _convert_tts_to_final_wav(ffmpeg_path, raw_temp, temp_wav, job_id, runner)
+                                re_synthesis_ms += round((time.perf_counter() - synth_started) * 1000)
+                                raw_temp.unlink(missing_ok=True)
+                                new_dur = get_wav_duration(temp_wav)
+                                repair_attempts += 1
+                                re_synthesis_count += 1
+                                if new_dur > current_duration:
+                                    input_for_fit = temp_wav
+                                    current_duration = new_dur
+                                    s["translation"] = new_translation
+                                    fit_methods.append(
+                                        f"gemini_lengthen_to_{target_words}_words"
+                                        if target_words > 0
+                                        else "gemini_lengthen"
+                                    )
+                                else:
+                                    temp_wav.unlink(missing_ok=True)
+                        except AppError:
+                            raise
+                        except Exception:
+                            quality_warning = "gemini_lengthen_failed"
+
+                    if current_duration < target_dur - tolerance_sec:
+                        remaining_gap = target_dur - current_duration
+                        if remaining_gap > lengthen_gap_threshold and not any(
+                            method.startswith("gemini_lengthen") for method in fit_methods
+                        ):
+                            quality_warning = quality_warning or "short_tts_gap_exceeds_tail_pad_without_lengthen"
+                        exact_file = tts_dir / f"tts_exact_{idx}.wav"
+                        exact_file.unlink(missing_ok=True)
+                        trim_started = time.perf_counter()
+                        _run_ffmpeg_audio_filter(
+                            ffmpeg_path,
+                            input_for_fit,
+                            exact_file,
+                            filter_expr=_tail_silence_pad_filter(current_duration, target_dur),
+                            job_id=job_id,
+                            runner=runner,
+                        )
+                        trim_ms = round((time.perf_counter() - trim_started) * 1000)
+                        input_for_fit = exact_file
+                        current_duration = get_wav_duration(exact_file)
+                        fit_methods.append("tail_silence_pad")
+                        repair_attempts += 1
 
             repaired_file.unlink(missing_ok=True)
             shutil.copy(input_for_fit, repaired_file)
@@ -1999,7 +2360,7 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
             s["repaired_duration"] = repaired_duration
             s["repaired_method"] = "+".join(fit_methods) if fit_methods else "none"
             s["duration_repair_risk"] = duration_repair_risk
-            s["final_timing_error_ms"] = round((repaired_duration - budget) * 1000) if budget > 0 else 0
+            s["final_timing_error_ms"] = round((repaired_duration - repair_target) * 1000) if repair_target > 0 else 0
             s["tail_speech_detected"] = tail_speech_detected
             s["time_stretch_factor"] = time_stretch_factor
             s["repair_attempts"] = repair_attempts
@@ -2010,14 +2371,18 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                 "audio_duration_sec": repaired_duration,
                 "original_duration": tts_dur,
                 "budget": budget,
+                "repair_target": repair_target,
                 "method": s["repaired_method"],
                 "llm_shorten_ms": llm_shorten_ms,
+                "llm_lengthen_ms": llm_lengthen_ms,
                 "re_synthesis_ms": re_synthesis_ms,
                 "atempo_ms": atempo_ms,
                 "trim_ms": trim_ms,
                 "re_synthesis_count": re_synthesis_count,
                 "segment_index": idx,
             })
+
+    compute_placement_starts(segments)
 
     telemetry.record("duration_repair", {
         "wall_time_ms": round((time.perf_counter() - step_started) * 1000),
@@ -2075,7 +2440,8 @@ def mix_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
         if not seg_path.is_file() and seg.get("tts_raw_path"):
             seg_path = Path(seg["tts_raw_path"])
         if seg_path.is_file():
-            segment_inputs.append((seg_path, float(seg.get("start") or 0.0)))
+            placement_start = float(seg.get("placement_start") or seg.get("start") or 0.0)
+            segment_inputs.append((seg_path, placement_start))
 
     if segment_inputs:
         cmd_narration = [str(ffmpeg_path), "-y"]

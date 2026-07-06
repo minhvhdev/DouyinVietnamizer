@@ -326,6 +326,32 @@ def test_semantic_split_prefers_aligned_punctuation_near_vad_boundary() -> None:
     assert parts[1]["start"] >= parts[0]["end"]
 
 
+def test_merge_incomplete_sentence_segments_joins_short_gaps() -> None:
+    from dv_backend.segmentation import merge_incomplete_sentence_segments
+
+    merged = merge_incomplete_sentence_segments(
+        [
+            {"start": 0.0, "end": 2.0, "text": "今天天气"},
+            {"start": 2.1, "end": 4.0, "text": "很好。"},
+        ]
+    )
+    assert len(merged) == 1
+    assert merged[0]["text"] == "今天天气很好。"
+
+
+def test_allocate_text_across_regions_prefers_sentence_punctuation() -> None:
+    from dv_backend.segmentation import allocate_text_across_regions
+
+    chunks = allocate_text_across_regions(
+        "第一句。第二句也很长。",
+        [
+            {"start": 0.0, "end": 2.0},
+            {"start": 2.0, "end": 5.0},
+        ],
+    )
+    assert chunks == ["第一句。", "第二句也很长。"]
+
+
 def test_duration_safety_classifies_stretch_and_tail_energy() -> None:
     from dv_backend.duration_safety import classify_stretch, tail_has_speech
 
@@ -346,6 +372,21 @@ def test_translation_duration_estimate_and_metadata() -> None:
     assert annotated["estimated_translation_duration"] > 0
     assert annotated["duration_fit_prediction"] in {"fits", "risky", "over_budget"}
     assert annotated["translation_was_duration_constrained"] is True
+
+
+def test_translation_duration_prefers_repair_target_budget() -> None:
+    from dv_backend.translation_duration import annotate_translation_duration
+
+    annotated = annotate_translation_duration(
+        {
+            "duration_budget": 4.0,
+            "repair_target_duration": 1.5,
+            "translation": "Xin chào mọi người và chúc một ngày tốt lành.",
+        },
+        speaking_rate_wps=3.0,
+    )
+
+    assert annotated["duration_fit_prediction"] in {"risky", "over_budget"}
 
 
 def test_translation_timing_guidance_uses_alignment_and_budget() -> None:

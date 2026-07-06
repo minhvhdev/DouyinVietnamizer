@@ -27,7 +27,7 @@ def duration_fit_prediction(estimated_duration: float, budget: float) -> str:
 def annotate_translation_duration(segment: dict[str, Any], *, speaking_rate_wps: float = 3.2) -> dict[str, Any]:
     updated = dict(segment)
     estimate = estimate_vietnamese_spoken_duration(str(updated.get("translation") or ""), speaking_rate_wps=speaking_rate_wps)
-    budget = float(updated.get("duration_budget") or 0.0)
+    budget = float(updated.get("repair_target_duration") or updated.get("duration_budget") or 0.0)
     updated["estimated_translation_duration"] = estimate
     updated["duration_fit_prediction"] = duration_fit_prediction(estimate, budget)
     updated["translation_was_duration_constrained"] = budget > 0
@@ -86,7 +86,7 @@ def build_translation_timing_guidance(
     aligned_units: list[dict[str, Any]] | None = None,
     speaking_rate_wps: float = 3.2,
 ) -> dict[str, Any]:
-    duration_budget = float(segment.get("duration_budget") or 0.0)
+    duration_budget = float(segment.get("repair_target_duration") or segment.get("duration_budget") or 0.0)
     source_units = count_source_speech_units(
         str(segment.get("text") or ""),
         aligned_units=aligned_units,

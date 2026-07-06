@@ -33,6 +33,16 @@ def test_detect_espeak_false_on_non_windows():
     assert hardware.detect_espeak() is False
 
 
+def test_get_best_device_returns_cpu_when_no_accelerator(monkeypatch):
+    fake_torch = mock.MagicMock()
+    fake_torch.cuda.is_available.return_value = False
+    fake_torch.backends.mps.is_available.return_value = False
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    hardware = _import_hardware()
+    assert hardware.get_best_device() == "cpu"
+    assert hardware.default_inference_device() == "cpu"
+
+
 def test_detect_cuda_reports_mps_on_macos(monkeypatch):
     if sys.platform != "darwin":
         pytest.skip("macOS-specific test")

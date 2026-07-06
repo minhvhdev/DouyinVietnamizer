@@ -29,8 +29,8 @@ SPEAKER_CONFIDENCE_LOW = 0.12
 MIN_EMBEDDING_SECONDS = 0.35
 SAMPLE_RATE_16K = 16000
 SENTENCE_PUNCTUATION = set("。！？；.!?;")
-MAX_ASR_SEGMENT_SECONDS = 6.0
-MAX_ASR_SEGMENT_CHARS = 45
+MAX_ASR_SEGMENT_SECONDS = 12.0
+MAX_ASR_SEGMENT_CHARS = 72
 
 _model_lock = threading.Lock()
 _model_instance: Any = None
@@ -106,11 +106,36 @@ def resolve_model_reference(vendor_dir: Path, configured_path: str, default_hf_i
     return default_hf_id
 
 
+def _split_at_last_sentence_punctuation(text: str) -> tuple[str, str] | None:
+    for index in range(len(text) - 1, -1, -1):
+        if text[index] in SENTENCE_PUNCTUATION:
+            head = text[: index + 1].strip()
+            tail = text[index + 1 :].strip()
+            if head and tail:
+                return head, tail
+    return None
+
+
 def _group_time_stamps(time_stamps: list[Any]) -> list[dict[str, float | str]]:
     segments: list[dict[str, float | str]] = []
     current_text = ""
     current_start: float | None = None
     current_end: float | None = None
+
+    def flush_buffer() -> None:
+        nonlocal current_text, current_start, current_end
+        if not current_text.strip() or current_start is None or current_end is None:
+            return
+        segments.append(
+            {
+                "start": round(current_start, 2),
+                "end": round(current_end, 2),
+                "text": current_text.strip(),
+            }
+        )
+        current_text = ""
+        current_start = None
+        current_end = None
 
     for stamp in time_stamps:
         text = str(getattr(stamp, "text", "") or "").strip()
@@ -123,31 +148,33 @@ def _group_time_stamps(time_stamps: list[Any]) -> list[dict[str, float | str]]:
         current_end = end
         current_text += text
         duration = (current_end - current_start) if current_start is not None else 0.0
-        should_flush = (
-            any(character in text for character in SENTENCE_PUNCTUATION)
-            or duration >= MAX_ASR_SEGMENT_SECONDS
-            or len(current_text) >= MAX_ASR_SEGMENT_CHARS
-        )
-        if should_flush:
-            segments.append(
-                {
-                    "start": round(current_start, 2),
-                    "end": round(current_end, 2),
-                    "text": current_text.strip(),
-                }
-            )
-            current_text = ""
-            current_start = None
-            current_end = None
+        punct_in_token = any(character in text for character in SENTENCE_PUNCTUATION)
+        hit_limit = duration >= MAX_ASR_SEGMENT_SECONDS or len(current_text) >= MAX_ASR_SEGMENT_CHARS
+        should_flush = punct_in_token or hit_limit
+        if not should_flush:
+            continue
+
+        if hit_limit and not punct_in_token and current_start is not None and current_end is not None:
+            split = _split_at_last_sentence_punctuation(current_text)
+            if split is not None:
+                head, tail = split
+                total_len = max(1, len(current_text))
+                split_time = current_start + (current_end - current_start) * (len(head) / total_len)
+                segments.append(
+                    {
+                        "start": round(current_start, 2),
+                        "end": round(split_time, 2),
+                        "text": head,
+                    }
+                )
+                current_text = tail
+                current_start = split_time
+                continue
+
+        flush_buffer()
 
     if current_text.strip() and current_start is not None and current_end is not None:
-        segments.append(
-            {
-                "start": round(current_start, 2),
-                "end": round(current_end, 2),
-                "text": current_text.strip(),
-            }
-        )
+        flush_buffer()
     return segments
 
 
