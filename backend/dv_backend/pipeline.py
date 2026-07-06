@@ -19,11 +19,12 @@ from .database import Database
 from .errors import AppError
 from .models import ErrorInfo
 from .checkpoints import load_checkpoint, save_checkpoint
-from .vendor import VendorManifest, VendorResolver
+from .vendor import VendorManifest, VendorResolver, prefer_macos_ffmpeg_full
 from .adapters.translation import GoogleFreeTranslator
 from .adapters.tts import VOXCPM_INSTRUCT_PREFIX, TtsSession, create_tts_adapter
 from .adapters.asr import configure_gpu_manager, reset_model_cache, transcribe_audio
 from .gpu_manager import global_gpu_manager
+from .hardware import resolve_inference_device
 from .audio_probe import get_audio_duration
 from .duration_safety import classify_stretch, tail_has_speech
 from .segmentation import split_long_segments_with_alignment
@@ -38,7 +39,12 @@ from .sparse_asr import (
 )
 from .telemetry import TelemetrySink
 from .translation_duration import annotate_translation_duration, build_translation_timing_guidance, duration_prompt_suffix
-from .adapters.subtitles import ffmpeg_subtitles_filter, probe_video_dimensions, write_ass_file
+from .adapters.subtitles import (
+    ffmpeg_subtitles_filter,
+    probe_video_dimensions,
+    subtitles_filter_available,
+    write_ass_file,
+)
 from .adapters.gemini import (
     GeminiKeyPool,
     GeminiTranslator,
@@ -114,7 +120,8 @@ def resolve_tool_path(config: AppConfig, tool_id: str) -> Path:
                 action="Make sure the tool is bundled or available on PATH."
             )
         )
-    return resolved.path
+    preferred = prefer_macos_ffmpeg_full(tool, resolved)
+    return preferred.path if preferred.path is not None else resolved.path
 
 
 def original_video_path(config: AppConfig, job_id: str) -> Path:
@@ -704,7 +711,7 @@ def _release_asr_gpu_models(settings: dict | None = None) -> None:
     except Exception:
         logger.debug("ASR model cache reset failed", exc_info=True)
     try:
-        device = str((settings or {}).get("qwen3_device", "cuda:0") or "cuda:0")
+        device = resolve_inference_device(str((settings or {}).get("qwen3_device", "cuda:0") or "cuda:0"))
         global_gpu_manager().evict("asr", device, reason="asr_step_complete")
     except Exception:
         logger.debug("ASR GPU lease eviction failed", exc_info=True)
@@ -884,7 +891,7 @@ def asr_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
             "vendor_dir": vendor_dir,
             "asr_model": str(settings.get("qwen3_asr_model", "") or ""),
             "aligner_model": str(settings.get("qwen3_aligner_model", "") or ""),
-            "device": str(settings.get("qwen3_device", "cuda:0") or "cuda:0"),
+            "device": resolve_inference_device(str(settings.get("qwen3_device", "cuda:0") or "cuda:0")),
             "language": "Chinese",
             "speaker_diarization": False,
             "include_alignment": include_alignment,
@@ -2212,6 +2219,7 @@ def render_step(job_id: str, config: AppConfig, database: Database, runner) -> d
     settings = {r["key"]: json.loads(r["value"]) for r in rows}
 
     video_filters: list[str] = []
+    subtitle_burn_in = False
     if settings.get("subtitles_enabled", True) and repair_cp:
         segments = [
             segment
@@ -2227,7 +2235,16 @@ def render_step(job_id: str, config: AppConfig, database: Database, runner) -> d
                 play_res_x=width,
                 play_res_y=height,
             )
-            video_filters.append(ffmpeg_subtitles_filter(ass_path))
+            if subtitles_filter_available(ffmpeg_path):
+                video_filters.append(ffmpeg_subtitles_filter(ass_path))
+                subtitle_burn_in = True
+            else:
+                logger.warning(
+                    "ffmpeg at %s lacks libass subtitles filter; rendering without burned-in subtitles. "
+                    "Install ffmpeg with libass (e.g. brew install ffmpeg-full on macOS). ASS saved to %s",
+                    ffmpeg_path,
+                    ass_path,
+                )
     
     cmd_norm = [
         str(ffmpeg_path), "-y",
@@ -2267,7 +2284,10 @@ def render_step(job_id: str, config: AppConfig, database: Database, runner) -> d
             ErrorInfo(
                 code="RENDER_FAILED",
                 message="Failed to render final MP4 video file.",
-                action="Ensure original video format is compatible.",
+                action=(
+                    "Ensure original video format is compatible. On macOS, Homebrew ffmpeg may "
+                    "lack libass; install ffmpeg-full or disable burned-in subtitles."
+                ),
                 detail=e.stderr or e.stdout
             )
         )
@@ -2279,6 +2299,7 @@ def render_step(job_id: str, config: AppConfig, database: Database, runner) -> d
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "output_path": str(final_mp4),
         "subtitles_enabled": bool(settings.get("subtitles_enabled", True)),
+        "subtitle_burn_in": subtitle_burn_in,
         "subtitles_path": str(ass_path) if ass_path.is_file() else None,
     }
     save_checkpoint(config.data_dir, job_id, "render", checkpoint_data)

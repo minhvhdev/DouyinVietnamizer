@@ -174,13 +174,15 @@ def _clear_torch_cuda_state() -> None:
     try:
         import torch
 
-        if not torch.cuda.is_available():
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
+            if hasattr(torch.cuda, "reset_peak_memory_stats"):
+                torch.cuda.reset_peak_memory_stats()
             return
-        torch.cuda.empty_cache()
-        if hasattr(torch.cuda, "ipc_collect"):
-            torch.cuda.ipc_collect()
-        if hasattr(torch.cuda, "reset_peak_memory_stats"):
-            torch.cuda.reset_peak_memory_stats()
+        if sys.platform == "darwin" and torch.backends.mps.is_available() and hasattr(torch.mps, "empty_cache"):
+            torch.mps.empty_cache()
     except Exception:
         pass
 
@@ -206,6 +208,9 @@ def collect_runtime_gpu_status() -> RuntimeGpuStatus:
         import torch
 
         if not torch.cuda.is_available():
+            if sys.platform == "darwin" and torch.backends.mps.is_available():
+                status.cuda_supported = True
+                status.device_name = "Apple MPS"
             return status
         free_bytes, total_bytes = torch.cuda.mem_get_info()
         device_index = torch.cuda.current_device()
@@ -380,23 +385,38 @@ class RuntimeSmokeTestService:
 
     def _check_qwen3_asr(self) -> RuntimeCheck:
         try:
-            from .adapters.asr import cuda_available, DEFAULT_ASR_MODEL
+            from .adapters.asr import DEFAULT_ASR_MODEL
+            from .hardware import accelerator_available, resolve_inference_device
 
-            if not cuda_available():
+            if not accelerator_available():
                 return RuntimeCheck(
                     id="qwen3_asr",
                     display_name="Qwen3-ASR GPU",
                     status="blocked",
                     required=True,
-                    message="CUDA GPU is not available for Qwen3-ASR.",
-                    action="Install NVIDIA drivers and a CUDA-enabled PyTorch build, then rerun the smoke test.",
+                    message="No GPU accelerator is available for Qwen3-ASR (CUDA or Apple MPS).",
+                    action=(
+                        "Use an NVIDIA GPU with CUDA on Windows/Linux, or run on Apple Silicon "
+                        "with PyTorch MPS enabled, then rerun the smoke test."
+                    ),
                 )
+            resolved_device = resolve_inference_device("cuda:0")
+            backend_label = (
+                "CUDA"
+                if resolved_device.startswith("cuda")
+                else "Apple MPS"
+                if resolved_device == "mps"
+                else resolved_device
+            )
             return RuntimeCheck(
                 id="qwen3_asr",
                 display_name="Qwen3-ASR GPU",
                 status="ready",
                 required=True,
-                message=f"Qwen3-ASR is configured for GPU inference ({DEFAULT_ASR_MODEL}).",
+                message=(
+                    f"Qwen3-ASR is configured for GPU inference ({DEFAULT_ASR_MODEL}) "
+                    f"on {backend_label} ({resolved_device})."
+                ),
                 action="No action required.",
             )
         except Exception as error:

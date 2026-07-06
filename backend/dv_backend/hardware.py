@@ -46,18 +46,62 @@ def detect_espeak() -> bool:
         return False
     return False
 
-def detect_cuda() -> bool:
-    """Returns True if a GPU backend is available: NVIDIA CUDA (any OS) or Apple MPS (macOS)."""
+def mps_available() -> bool:
     try:
         import torch
 
-        if torch.cuda.is_available():
-            return True
-        if sys.platform == "darwin" and torch.backends.mps.is_available():
-            return True
-        return False
+        return sys.platform == "darwin" and bool(torch.backends.mps.is_available())
     except Exception:
         return False
+
+
+def cuda_available() -> bool:
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+def accelerator_available() -> bool:
+    """Returns True if a GPU backend is available: NVIDIA CUDA or Apple MPS."""
+    return cuda_available() or mps_available()
+
+
+def detect_cuda() -> bool:
+    """Backward-compatible alias for accelerator availability checks."""
+    return accelerator_available()
+
+
+def default_inference_device() -> str:
+    if cuda_available():
+        return "cuda:0"
+    if mps_available():
+        return "mps"
+    return "cpu"
+
+
+def resolve_inference_device(device: str | None = "") -> str:
+    """Map configured device strings to an available torch device."""
+    requested = (device or "").strip()
+    if requested.startswith("cuda"):
+        if cuda_available():
+            return requested if requested != "cuda" else "cuda:0"
+    elif requested == "mps":
+        if mps_available():
+            return "mps"
+    elif requested == "cpu":
+        return "cpu"
+    return default_inference_device()
+
+
+def inference_dtype_for_device(device: str):
+    import torch
+
+    if device == "mps":
+        return torch.float16
+    return torch.bfloat16
 
 
 def get_hardware_report() -> dict:
