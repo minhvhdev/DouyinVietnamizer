@@ -47,6 +47,11 @@ from .sparse_asr import (
     stitched_timeline_duration,
 )
 from .timing_placement import compute_placement_starts
+from .segment_mix import (
+    annotate_segment_mix_caps,
+    build_narration_amix_filter,
+    build_narration_segment_filter,
+)
 from .telemetry import TelemetrySink
 from .translation_duration import annotate_translation_duration, build_translation_timing_guidance, duration_prompt_suffix
 from .adapters.subtitles import (
@@ -58,10 +63,13 @@ from .adapters.subtitles import (
 from .adapters.gemini import (
     GeminiKeyPool,
     GeminiTranslator,
-    classify_gemini_failure,
-    default_request,
-    response_text,
 )
+from .translation_timing_rewrite import (
+    lengthen_translation_for_timing,
+    shorten_translation_for_timing,
+    translation_backend,
+)
+from .adapters.openai_compat import OpenAiCompatTranslator
 from .source_urls import (
     ensure_bilibili_part_url,
     fallback_playlist_video_url,
@@ -326,103 +334,6 @@ def get_wav_duration(path: Path) -> float:
         frames = w.getnframes()
         rate = w.getframerate()
         return frames / float(rate)
-
-
-# OpenAI API integration
-def call_openai_chat(api_base: str, api_key: str, model: str, messages: list, json_mode: bool = False) -> dict:
-    url = f"{api_base.rstrip('/')}/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}"
-    }
-    payload = {
-        "model": model,
-        "messages": messages,
-    }
-    if json_mode:
-        payload["response_format"] = {"type": "json_object"}
-        
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers=headers,
-        method="POST"
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=45) as response:
-            res_body = response.read().decode("utf-8")
-            return json.loads(res_body)
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8")
-        try:
-            err_data = json.loads(body)
-            err_msg = err_data.get("error", {}).get("message", body)
-        except Exception:
-            err_msg = body
-        raise AppError(
-            502,
-            ErrorInfo(
-                code="OPENAI_CHAT_ERROR",
-                message=f"Translation API error ({e.code}).",
-                action="Verify your API Key, base URL, and network connection.",
-                detail=err_msg
-            )
-        )
-    except Exception as e:
-        raise AppError(
-            502,
-            ErrorInfo(
-                code="OPENAI_CHAT_FAILED",
-                message="Failed to connect to Translation API.",
-                action="Check settings and try again.",
-                detail=str(e)
-            )
-        )
-
-
-def call_openai_tts(api_base: str, api_key: str, model: str, voice: str, text: str, output_path: Path) -> None:
-    url = f"{api_base.rstrip('/')}/audio/speech"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}"
-    }
-    payload = {
-        "model": model,
-        "input": text,
-        "voice": voice,
-    }
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers=headers,
-        method="POST"
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=45) as response:
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(output_path, "wb") as f:
-                f.write(response.read())
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8")
-        raise AppError(
-            502,
-            ErrorInfo(
-                code="OPENAI_TTS_ERROR",
-                message=f"TTS API error ({e.code}).",
-                action="Verify settings and billing status.",
-                detail=body
-            )
-        )
-    except Exception as e:
-        raise AppError(
-            502,
-            ErrorInfo(
-                code="OPENAI_TTS_FAILED",
-                message="Failed to connect to TTS API.",
-                action="Check your internet connection and API config.",
-                detail=str(e)
-            )
-        )
 
 
 def resolve_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
@@ -1428,6 +1339,20 @@ def _translate_texts(
         save_setting(database, "gemini_key_cursor", translator.key_pool.cursor)
         return translated
 
+    if translation_backend == "openai":
+        translator = OpenAiCompatTranslator(
+            api_base=str(settings.get("openai_api_base") or ""),
+            api_key=str(settings.get("openai_api_key") or ""),
+            model=str(settings.get("openai_translation_model") or ""),
+        )
+        return translator.translate(
+            texts,
+            source=source_lang,
+            target=target_lang,
+            duration_budgets=duration_budgets,
+            timing_guidance=timing_guidance,
+        )
+
     return GoogleFreeTranslator().translate(
         texts,
         source=source_lang,
@@ -1504,13 +1429,13 @@ def translate_step(job_id: str, config: AppConfig, database: Database, runner) -
     settings = {r["key"]: json.loads(r["value"]) for r in rows}
 
     translation_backend = settings.get("translation_backend", "google_free")
-    if translation_backend not in {"google_free", "gemini"}:
+    if translation_backend not in {"google_free", "gemini", "openai"}:
         raise AppError(
             400,
             ErrorInfo(
                 code="UNSUPPORTED_TRANSLATION_BACKEND",
                 message="The selected translation backend is not available.",
-                action="Choose Google Translate Free or Gemini in Settings."
+                action="Choose Google Translate Free, Gemini, or OpenAPI in Settings."
             )
         )
 
@@ -1755,189 +1680,18 @@ def _estimate_word_count(text: str) -> int:
 
 
 def _tail_silence_pad_filter(current_duration: float, target_dur: float) -> str:
-    del current_duration
+    duration = max(0.05, float(current_duration))
+    fade_out = min(0.03, max(0.01, duration * 0.05))
+    fade_start = max(0.0, duration - fade_out)
     return (
+        f"afade=t=out:st={fade_start:.3f}:d={fade_out:.3f},"
         f"apad=pad_dur={target_dur + 0.2:.3f},"
         f"atrim=0:{target_dur:.3f}"
     )
 
 
-def _shorten_translation_with_gemini(
-    settings: dict,
-    database: Database,
-    *,
-    text: str,
-    budget: float,
-    current_duration: float,
-) -> tuple[str | None, int]:
-    current_words = _estimate_word_count(text)
-    if current_words < 2 or budget <= 0 or current_duration <= budget:
-        return None, current_words
-
-    target_ratio = max(0.1, min(1.0, float(budget) / float(current_duration)))
-    target_words = max(1, round(current_words * target_ratio))
-    if target_words >= current_words:
-        return None, target_words
-
-    key_pool = GeminiKeyPool(
-        settings.get("gemini_api_keys", []),
-        cursor=int(settings.get("gemini_key_cursor", 0)),
-    )
-    if not key_pool.keys:
-        return None, target_words
-
-    model = str(settings.get("gemini_translation_model", "gemini-2.5-flash") or "gemini-2.5-flash")
-    overrun_pct = max(0.0, ((current_duration / budget) - 1.0) * 100.0)
-    prompt = (
-        "Rewrite this Vietnamese dubbing line so it stays natural but fits the target timing.\n"
-        f"Current line: {text}\n"
-        f"Current duration: {current_duration:.2f}s\n"
-        f"Target duration budget: {budget:.2f}s\n"
-        f"Current word count: approximately {current_words}\n"
-        f"Target word count: approximately {target_words} (timing ratio {target_ratio:.3f})\n"
-        f"Current line overruns the timing by {overrun_pct:.1f}%.\n"
-        "Remove filler words and redundant phrasing first. Preserve names, numbers, core meaning, and causal relationships. "
-        "Return only the rewritten Vietnamese line with no quotes, notes, or formatting."
-    )
-    payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.2},
-    }
-
-    last_error: Exception | None = None
-    saw_model_unavailable = False
-    saw_model_not_found = False
-    for index, api_key in key_pool.ordered_keys():
-        try:
-            shortened = response_text(default_request(api_key, model, payload)).strip().strip("\"'")
-            if shortened:
-                key_pool.mark_success(index)
-                save_setting(database, "gemini_key_cursor", key_pool.cursor)
-                return shortened, target_words
-            raise ValueError("Gemini returned an empty shortening result.")
-        except Exception as cause:
-            last_error = cause
-            code, _, _ = classify_gemini_failure(cause)
-            if code == "GEMINI_MODEL_UNAVAILABLE":
-                saw_model_unavailable = True
-            if code == "GEMINI_MODEL_NOT_FOUND":
-                saw_model_not_found = True
-
-    if saw_model_unavailable and not saw_model_not_found:
-        code, message, action = classify_gemini_failure(
-            last_error or RuntimeError("Gemini model unavailable")
-        )
-    elif saw_model_not_found:
-        code, message, action = classify_gemini_failure(
-            last_error or RuntimeError("Gemini model not found")
-        )
-    else:
-        code, message, action = classify_gemini_failure(
-            last_error or RuntimeError("Gemini request failed")
-        )
-
-    raise AppError(
-        502,
-        ErrorInfo(
-            code=code,
-            message=message,
-            action=action,
-            detail=str(last_error),
-            retryable=True,
-        ),
-    )
-
-
-def _lengthen_translation_with_gemini(
-    settings: dict,
-    database: Database,
-    *,
-    text: str,
-    budget: float,
-    current_duration: float,
-) -> tuple[str | None, int]:
-    cleaned = text.strip()
-    current_words = _estimate_word_count(cleaned)
-    if current_words < 1 or budget <= 0 or current_duration >= budget:
-        return None, current_words
-
-    gap = budget - current_duration
-    min_gap_sec = _lengthen_min_gap_sec(settings)
-    if gap <= min_gap_sec:
-        return None, current_words
-
-    key_pool = GeminiKeyPool(
-        settings.get("gemini_api_keys", []),
-        cursor=int(settings.get("gemini_key_cursor", 0)),
-    )
-    if not key_pool.keys:
-        return None, current_words
-
-    model = str(settings.get("gemini_translation_model", "gemini-2.5-flash") or "gemini-2.5-flash")
-    target_ratio = min(_lengthen_max_ratio(settings), float(budget) / max(0.05, float(current_duration)))
-    target_words = max(current_words + 1, min(current_words + 2, round(current_words * target_ratio)))
-    underrun_pct = max(0.0, ((budget / current_duration) - 1.0) * 100.0)
-    prompt = (
-        "Expand this Vietnamese dubbing line so it sounds natural when spoken aloud and better fills the target timing.\n"
-        f"Current line: {cleaned}\n"
-        f"Current duration: {current_duration:.2f}s\n"
-        f"Target duration budget: {budget:.2f}s\n"
-        f"Current word count: approximately {current_words}\n"
-        f"Target word count: approximately {target_words} (timing ratio {target_ratio:.3f})\n"
-        f"The line is about {underrun_pct:.1f}% shorter than the timing budget.\n"
-        "Add natural filler words, light discourse markers, or slightly fuller phrasing only when needed. "
-        "Do not change core meaning, facts, names, numbers, or causal relationships. "
-        "Return only the expanded Vietnamese line with no quotes, notes, or formatting."
-    )
-    payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.2},
-    }
-
-    last_error: Exception | None = None
-    saw_model_unavailable = False
-    saw_model_not_found = False
-    for index, api_key in key_pool.ordered_keys():
-        try:
-            lengthened = response_text(default_request(api_key, model, payload)).strip().strip("\"'")
-            if lengthened and lengthened != cleaned:
-                key_pool.mark_success(index)
-                save_setting(database, "gemini_key_cursor", key_pool.cursor)
-                return lengthened, target_words
-            if lengthened:
-                return None, target_words
-            raise ValueError("Gemini returned an empty lengthening result.")
-        except Exception as cause:
-            last_error = cause
-            code, _, _ = classify_gemini_failure(cause)
-            if code == "GEMINI_MODEL_UNAVAILABLE":
-                saw_model_unavailable = True
-            if code == "GEMINI_MODEL_NOT_FOUND":
-                saw_model_not_found = True
-
-    if saw_model_unavailable and not saw_model_not_found:
-        code, message, action = classify_gemini_failure(
-            last_error or RuntimeError("Gemini model unavailable")
-        )
-    elif saw_model_not_found:
-        code, message, action = classify_gemini_failure(
-            last_error or RuntimeError("Gemini model not found")
-        )
-    else:
-        code, message, action = classify_gemini_failure(
-            last_error or RuntimeError("Gemini request failed")
-        )
-
-    raise AppError(
-        502,
-        ErrorInfo(
-            code=code,
-            message=message,
-            action=action,
-            detail=str(last_error),
-            retryable=True,
-        ),
-    )
+def _timing_rewrite_method_prefix(settings: dict) -> str:
+    return translation_backend(settings)
 
 
 def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
@@ -2139,6 +1893,7 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
     exact_enabled, tolerance_sec, max_stretch = _normalize_exact_timing_settings(settings)
     max_safe_stretch = float(settings.get("exact_timing_max_safe_stretch", 1.25) or 1.25)
     global_speed = max(0.9, float(settings.get("tts_global_speed", 1.0) or 1.0))
+    rewrite_prefix = _timing_rewrite_method_prefix(settings)
 
     ffmpeg_path = resolve_tool_path(config, "ffmpeg")
     telemetry = TelemetrySink(config.data_dir, job_id)
@@ -2200,15 +1955,16 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
             s["repair_target_duration"] = round(repair_target, 2) if repair_target > 0 else 0.0
             if repair_target > 0 and current_duration > repair_target + tolerance_sec:
                 try:
-                    gemini_started = time.perf_counter()
-                    new_translation, target_words = _shorten_translation_with_gemini(
+                    llm_started = time.perf_counter()
+                    new_translation, target_words = shorten_translation_for_timing(
                         settings,
                         database,
                         text=str(s.get("translation") or ""),
                         budget=repair_target,
                         current_duration=current_duration,
+                        estimate_word_count=_estimate_word_count,
                     )
-                    llm_shorten_ms = round((time.perf_counter() - gemini_started) * 1000)
+                    llm_shorten_ms = round((time.perf_counter() - llm_started) * 1000)
                     if new_translation and new_translation != s.get("translation"):
                         raw_temp = tts_dir / f"tts_temp_raw_{idx}.wav"
                         temp_wav = tts_dir / f"tts_temp_{idx}.wav"
@@ -2227,14 +1983,14 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                             current_duration = new_dur
                             s["translation"] = new_translation
                             fit_methods.append(
-                                f"gemini_shorten_to_{target_words}_words"
+                                f"{rewrite_prefix}_shorten_to_{target_words}_words"
                                 if target_words > 0
-                                else "gemini_shorten"
+                                else f"{rewrite_prefix}_shorten"
                             )
                         else:
                             temp_wav.unlink(missing_ok=True)
                 except Exception:
-                    quality_warning = "gemini_shorten_failed"
+                    quality_warning = f"{rewrite_prefix}_shorten_failed"
 
             if exact_enabled and repair_target > 0 and current_duration > repair_target + tolerance_sec:
                 raw_factor = current_duration / repair_target
@@ -2293,15 +2049,18 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                     gap = target_dur - current_duration
                     if gap > lengthen_gap_threshold:
                         try:
-                            gemini_started = time.perf_counter()
-                            new_translation, target_words = _lengthen_translation_with_gemini(
+                            llm_started = time.perf_counter()
+                            new_translation, target_words = lengthen_translation_for_timing(
                                 settings,
                                 database,
                                 text=str(s.get("translation") or ""),
                                 budget=target_dur,
                                 current_duration=current_duration,
+                                min_gap_sec=lengthen_gap_threshold,
+                                max_ratio=_lengthen_max_ratio(settings),
+                                estimate_word_count=_estimate_word_count,
                             )
-                            llm_lengthen_ms = round((time.perf_counter() - gemini_started) * 1000)
+                            llm_lengthen_ms = round((time.perf_counter() - llm_started) * 1000)
                             if new_translation and new_translation != s.get("translation"):
                                 raw_temp = tts_dir / f"tts_temp_raw_{idx}.wav"
                                 temp_wav = tts_dir / f"tts_temp_{idx}.wav"
@@ -2320,21 +2079,21 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                                     current_duration = new_dur
                                     s["translation"] = new_translation
                                     fit_methods.append(
-                                        f"gemini_lengthen_to_{target_words}_words"
+                                        f"{rewrite_prefix}_lengthen_to_{target_words}_words"
                                         if target_words > 0
-                                        else "gemini_lengthen"
+                                        else f"{rewrite_prefix}_lengthen"
                                     )
                                 else:
                                     temp_wav.unlink(missing_ok=True)
                         except AppError:
                             raise
                         except Exception:
-                            quality_warning = "gemini_lengthen_failed"
+                            quality_warning = f"{rewrite_prefix}_lengthen_failed"
 
                     if current_duration < target_dur - tolerance_sec:
                         remaining_gap = target_dur - current_duration
                         if remaining_gap > lengthen_gap_threshold and not any(
-                            method.startswith("gemini_lengthen") for method in fit_methods
+                            method.endswith("_lengthen") or "_lengthen_to_" in method for method in fit_methods
                         ):
                             quality_warning = quality_warning or "short_tts_gap_exceeds_tail_pad_without_lengthen"
                         exact_file = tts_dir / f"tts_exact_{idx}.wav"
@@ -2430,7 +2189,7 @@ def mix_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
     settings = _load_settings(database)
     requested_mix_mode = _normalize_mix_mode(settings.get("mix_mode"))
 
-    segment_inputs: list[tuple[Path, float]] = []
+    segment_entries: list[dict] = []
     for seg in segments:
         idx = seg["index"]
         seg_path = tts_dir / f"tts_repaired_{idx}.wav"
@@ -2441,26 +2200,33 @@ def mix_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
             seg_path = Path(seg["tts_raw_path"])
         if seg_path.is_file():
             placement_start = float(seg.get("placement_start") or seg.get("start") or 0.0)
-            segment_inputs.append((seg_path, placement_start))
-
-    if segment_inputs:
-        cmd_narration = [str(ffmpeg_path), "-y"]
-        for path, _start in segment_inputs:
-            cmd_narration.extend(["-i", str(path)])
-        delayed_labels: list[str] = []
-        filters: list[str] = []
-        for input_index, (_path, start_time) in enumerate(segment_inputs):
-            delay_ms = max(0, round(start_time * 1000))
-            label = f"seg{input_index}"
-            filters.append(
-                f"[{input_index}:a]aresample=48000,aformat=sample_fmts=s16:channel_layouts=stereo,"
-                f"adelay={delay_ms}:all=1[{label}]"
+            clip_duration = float(seg.get("repaired_duration") or seg.get("tts_duration") or 0.0)
+            if clip_duration <= 0:
+                clip_duration = get_wav_duration(seg_path)
+            segment_entries.append(
+                {
+                    "path": seg_path,
+                    "placement_start": placement_start,
+                    "clip_duration": clip_duration,
+                }
             )
-            delayed_labels.append(f"[{label}]")
-        filters.append(
-            f"{''.join(delayed_labels)}amix=inputs={len(delayed_labels)}:"
-            f"duration=longest:dropout_transition=0:normalize=0[narration]"
-        )
+
+    annotate_segment_mix_caps(segment_entries)
+
+    if segment_entries:
+        cmd_narration = [str(ffmpeg_path), "-y"]
+        for entry in segment_entries:
+            cmd_narration.extend(["-i", str(entry["path"])])
+        filters = [
+            build_narration_segment_filter(
+                input_index,
+                placement_start=entry["placement_start"],
+                clip_duration=entry["clip_duration"],
+                max_duration=entry.get("max_duration"),
+            )
+            for input_index, entry in enumerate(segment_entries)
+        ]
+        filters.append(build_narration_amix_filter(len(segment_entries)))
         cmd_narration.extend(["-filter_complex", ";".join(filters), "-map", "[narration]", str(narration_wav)])
     else:
         cmd_narration = [
@@ -2545,7 +2311,7 @@ def mix_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
         "requested_mix_mode": requested_mix_mode,
         "mix_mode": mix_mode,
         "background_source_path": str(background_wav),
-        "narration_segment_input_count": len(segment_inputs),
+        "narration_segment_input_count": len(segment_entries),
         "narration_wav_path": str(narration_wav),
         "mixed_wav_path": str(mixed_wav),
         "vietnamese_narration_path": str(vietnamese_narration)

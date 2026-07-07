@@ -710,6 +710,30 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             )
         return updated
 
+    class OpenAiModelsPayload(BaseModel):
+        base_url: str | None = None
+        api_key: str | None = None
+
+    @app.post("/api/translation/openai-models")
+    def list_translation_openai_models(payload: OpenAiModelsPayload) -> list[dict[str, str]]:
+        from .adapters.openai_compat import list_openai_models, normalize_openai_api_base
+
+        raw_settings = settings.get_raw_all()
+        base_url = normalize_openai_api_base(
+            str(payload.base_url or raw_settings.get("openai_api_base") or "")
+        )
+        api_key = str(payload.api_key or raw_settings.get("openai_api_key") or "").strip()
+        if not api_key:
+            raise AppError(
+                400,
+                ErrorInfo(
+                    code="MISSING_OPENAI_API_KEY",
+                    message="No OpenAPI-compatible API key is configured.",
+                    action="Enter and save an API key in Settings → Dịch thuật.",
+                ),
+            )
+        return list_openai_models(base_url, api_key)
+
     @app.get("/api/events")
     def get_events() -> list[dict]:
         rows = database.connection.execute(

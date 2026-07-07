@@ -88,6 +88,14 @@ export const api: JobsApi = {
     return response.blob();
   },
   listTtsVoices: async (backend) => request(`/api/tts/voices?backend=${encodeURIComponent(backend)}`),
+  listOpenAiModels: async (options = {}) =>
+    request<Array<{ id: string; name: string }>>("/api/translation/openai-models", {
+      method: "POST",
+      body: JSON.stringify({
+        base_url: options.baseUrl,
+        api_key: options.apiKey,
+      }),
+    }),
   previewTts: async (text, options = {}) => {
     const response = await fetch(`${baseUrl}/api/tts/preview`, {
       method: "POST",

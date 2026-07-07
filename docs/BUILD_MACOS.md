@@ -103,7 +103,7 @@ Lệnh này (qua `scripts/build-portable-runtime-mac.sh --full-build`) tự:
 2. `pnpm install --frozen-lockfile`
 3. Build frontend
 4. `pnpm tauri build --target aarch64-apple-darwin --no-sign`
-5. Tải Python embedded 3.12, pip packages (PyTorch MPS/CPU, Silero VAD, Edge TTS, Demucs, …)
+5. Tải Python embedded 3.12, pip packages (PyTorch MPS/CPU, Silero VAD, Edge TTS, Demucs, funasr, …)
 6. Tải ffmpeg, yt-dlp
 7. Bundle `vendor/voxcpm2/` vào runtime
 8. Tải models Qwen3-ASR + VoxCPM2 GGUF (~3.3 GB cho TTS)
@@ -307,6 +307,10 @@ rustup default stable
 ### Tải model Hugging Face chậm / timeout
 
 Lần sau script bỏ qua file đã có trong `dist-portable/macos-staging/portable-runtime/models/`. Có thể set `HF_TOKEN` nếu rate-limit.
+
+### OpenAPI / Gemini dịch và khớp thời lượng
+
+Backend portable Mac dùng cùng mã Python với Windows (`segment_mix`, `translation_timing_rewrite`, `openai_compat`). Không cần pip package thêm cho OpenAPI-compatible translation — chỉ cần API key trong Settings. Bước `duration_repair` tự dùng backend dịch đã chọn.
 
 ### VAD / TTS mới không chạy sau khi pull code mới
 

@@ -4,6 +4,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
 STAGING="$REPO_ROOT/dist-portable/macos-staging"
 RUNTIME="$STAGING/portable-runtime"
 PY_VERSION="3.12.13"
@@ -116,7 +117,7 @@ deep-translator>=1.11,<2
 fastapi>=0.115,<1
 uvicorn>=0.34,<1
 qwen-asr>=0.0.6
-funasr==1.3.10
+funasr>=1.3.3
 librosa==0.11.0
 numba==0.65.1
 llvmlite==0.47.0

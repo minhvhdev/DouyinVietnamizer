@@ -3,6 +3,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
 DST_NAME="DouyinVietnamizer-0.1.0-portable"
 DST="$REPO_ROOT/dist-portable/$DST_NAME"
 STAGING_RUNTIME="$REPO_ROOT/dist-portable/macos-staging/portable-runtime"

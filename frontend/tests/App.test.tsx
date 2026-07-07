@@ -65,6 +65,10 @@ const baseApi: JobsApi = {
     { id: "vi-VN-HoaiMyNeural", name: "Hoài My (Nữ)" },
     { id: "vi-VN-NamMinhNeural", name: "Nam Minh (Nam)" },
   ]),
+  listOpenAiModels: vi.fn().mockResolvedValue([
+    { id: "gpt-4o", name: "gpt-4o" },
+    { id: "gpt-4o-mini", name: "gpt-4o-mini" },
+  ]),
   previewTts: vi.fn().mockResolvedValue(new Blob()),
   rerunJob: vi.fn().mockResolvedValue({ status: "queued", job }),
   redubJob: vi.fn().mockResolvedValue({ status: "queued", job }),

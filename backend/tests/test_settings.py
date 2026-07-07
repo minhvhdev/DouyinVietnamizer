@@ -271,3 +271,18 @@ def test_legacy_pending_gemini_key_setting_is_migrated(tmp_path: Path) -> None:
     raw = settings.get_raw_all()
     assert raw["gemini_api_keys"][0]["key"] == "AIzaSyLegacySecret1234567890"
     assert "gemini_api_key_add" not in raw
+
+
+def test_openai_api_key_is_masked_and_persisted(tmp_path: Path) -> None:
+    database = Database(tmp_path / "app.db")
+    database.migrate()
+    settings = SettingsService(database)
+
+    masked = settings.update({"openai_api_key": "  sk-secret1234567890  "})
+    assert masked["openai_api_key_configured"] is True
+    assert masked["openai_api_key_masked"] == "sk-s...7890"
+    assert "openai_api_key" not in masked
+
+    raw = settings.get_raw_all()
+    assert raw["openai_api_key"] == "sk-secret1234567890"
+    assert raw["openai_api_base"] == "https://api.openai.com/v1"

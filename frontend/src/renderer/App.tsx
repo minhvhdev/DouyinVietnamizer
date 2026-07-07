@@ -330,6 +330,8 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     subtitle_position: "bottom",
     gemini_api_keys: [],
     gemini_translation_model: "gemini-2.5-flash",
+    openai_api_base: "https://api.openai.com/v1",
+    openai_translation_model: "",
     gemini_tts_model: "gemini-2.5-flash-preview-tts",
     gemini_tts_voice: "Zephyr",
     tts_backend: "voxcpm",
@@ -340,12 +342,15 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   });
   const [newGeminiKey, setNewGeminiKey] = useState("");
   const [newGoogleTtsKey, setNewGoogleTtsKey] = useState("");
+  const [newOpenAiKey, setNewOpenAiKey] = useState("");
   const [settingsSuccess, setSettingsSuccess] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTabId>("tts");
   const [ttsPreviewText, setTtsPreviewText] = useState("Xin chào, đây là bản nghe thử giọng đọc tiếng Việt.");
   const [ttsPreviewLoading, setTtsPreviewLoading] = useState(false);
   const [ttsPreviewUrl, setTtsPreviewUrl] = useState<string | null>(null);
   const [edgeTtsVoices, setEdgeTtsVoices] = useState<Array<{ id: string; name: string }>>([]);
+  const [openAiModels, setOpenAiModels] = useState<Array<{ id: string; name: string }>>([]);
+  const [openAiModelsLoading, setOpenAiModelsLoading] = useState(false);
   const ttsPreviewUrlRef = useRef<string | null>(null);
 
   // Cloned voices states
@@ -373,6 +378,38 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     }
   }, [api]);
 
+  const loadOpenAiModels = useCallback(async () => {
+    const baseUrl = String(settings.openai_api_base ?? "").trim();
+    const pendingKey = newOpenAiKey.trim();
+    const hasSavedKey = Boolean(settings.openai_api_key_configured);
+    if (!baseUrl || (!pendingKey && !hasSavedKey)) {
+      setOpenAiModels([]);
+      return;
+    }
+    setOpenAiModelsLoading(true);
+    try {
+      const models = await api.listOpenAiModels({
+        baseUrl,
+        apiKey: pendingKey || undefined,
+      });
+      setOpenAiModels(models);
+      setSettings((current) => {
+        if (
+          current.openai_translation_model &&
+          models.some((model) => model.id === current.openai_translation_model)
+        ) {
+          return current;
+        }
+        return { ...current, openai_translation_model: models[0]?.id ?? "" };
+      });
+    } catch (cause) {
+      setOpenAiModels([]);
+      setError(cause instanceof Error ? cause.message : "Không thể tải danh sách model");
+    } finally {
+      setOpenAiModelsLoading(false);
+    }
+  }, [api, newOpenAiKey, settings.openai_api_base, settings.openai_api_key_configured]);
+
   useEffect(() => {
     return () => {
       if (ttsPreviewUrlRef.current) {
@@ -386,6 +423,12 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
       void loadEdgeTtsVoices();
     }
   }, [activeTab, settingsTab, activeTtsBackend, loadEdgeTtsVoices]);
+
+  useEffect(() => {
+    if (activeTab === "settings" && settingsTab === "translation" && settings.translation_backend === "openai") {
+      void loadOpenAiModels();
+    }
+  }, [activeTab, settingsTab, settings.translation_backend, loadOpenAiModels]);
 
   const recoverBackend = useCallback(async (reason: string) => {
     if (recoveringBackendRef.current) return;
@@ -937,11 +980,15 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
       } = settings;
       const pendingGeminiKey = newGeminiKey.trim();
       const pendingGoogleTtsKey = newGoogleTtsKey.trim();
+      const pendingOpenAiKey = newOpenAiKey.trim();
       if (pendingGeminiKey) {
         savePayload.gemini_api_key_add = pendingGeminiKey;
       }
       if (pendingGoogleTtsKey) {
         savePayload.google_tts_api_key = pendingGoogleTtsKey;
+      }
+      if (pendingOpenAiKey) {
+        savePayload.openai_api_key = pendingOpenAiKey;
       }
       const updated = await api.updateSettings(savePayload);
       setSettings(updated);
@@ -950,6 +997,9 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
       }
       if (pendingGoogleTtsKey) {
         setNewGoogleTtsKey("");
+      }
+      if (pendingOpenAiKey) {
+        setNewOpenAiKey("");
       }
       setSettingsSuccess(true);
       setTimeout(() => setSettingsSuccess(false), 3000);
@@ -1717,6 +1767,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                         >
                           <option value="google_free">Google Dịch Miễn Phí</option>
                           <option value="gemini">Gemini</option>
+                          <option value="openai">OpenAPI (tương thích OpenAI)</option>
                         </select>
                       </label>
                       {settings.translation_backend === "gemini" && (
@@ -1728,6 +1779,72 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                             onChange={(e) => setSettings({ ...settings, gemini_translation_model: e.target.value })}
                           />
                         </label>
+                      )}
+                      {settings.translation_backend === "openai" && (
+                        <div className="settings-field-grid settings-field-grid--2">
+                          <label className="settings-label settings-field-grid__span-2">
+                            <span>Base URL</span>
+                            <input
+                              className="settings-input"
+                              placeholder="https://api.openai.com/v1"
+                              value={settings.openai_api_base ?? "https://api.openai.com/v1"}
+                              onChange={(e) => setSettings({ ...settings, openai_api_base: e.target.value })}
+                            />
+                          </label>
+                          <label className="settings-label settings-field-grid__span-2">
+                            <span>API key</span>
+                            <input
+                              className="settings-input"
+                              type="password"
+                              placeholder="sk-..."
+                              value={newOpenAiKey}
+                              onChange={(e) => setNewOpenAiKey(e.target.value)}
+                            />
+                          </label>
+                          {settings.openai_api_key_configured && (
+                            <div className="alert-info-box info settings-field-grid__span-2">
+                              <CheckCircle2 size={14} />
+                              <span>Đã lưu khóa: {settings.openai_api_key_masked}</span>
+                            </div>
+                          )}
+                          <label className="settings-label settings-field-grid__span-2">
+                            <span>Model dịch</span>
+                            <div className="input-with-button">
+                              <select
+                                className="settings-input"
+                                value={settings.openai_translation_model ?? ""}
+                                onChange={(e) => setSettings({ ...settings, openai_translation_model: e.target.value })}
+                                disabled={openAiModelsLoading || openAiModels.length === 0}
+                              >
+                                {openAiModels.length === 0 ? (
+                                  <option value="">
+                                    {openAiModelsLoading ? "Đang tải model..." : "Chưa có model — nhập API key và tải lại"}
+                                  </option>
+                                ) : (
+                                  openAiModels.map((model) => (
+                                    <option key={model.id} value={model.id}>
+                                      {model.name}
+                                    </option>
+                                  ))
+                                )}
+                              </select>
+                              <button
+                                type="button"
+                                className="key-action-btn save-btn"
+                                disabled={openAiModelsLoading}
+                                onClick={() => void loadOpenAiModels()}
+                              >
+                                <RefreshCw size={13} /> {openAiModelsLoading ? "Đang tải..." : "Tải model"}
+                              </button>
+                            </div>
+                          </label>
+                          {!settings.openai_api_key_configured && !newOpenAiKey.trim() && (
+                            <div className="alert-info-box warning settings-field-grid__span-2">
+                              <CircleAlert size={14} />
+                              <span>Nhập API key và lưu cài đặt trước khi chạy job dịch OpenAPI.</span>
+                            </div>
+                          )}
+                        </div>
                       )}
                     </section>
 
@@ -2064,7 +2181,9 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                         <h3>Khớp thời lượng lồng tiếng</h3>
                       </div>
                       <p className="card-description card-description--compact">
-                        Điều chỉnh bước <strong>duration_repair</strong> khi giọng TTS ngắn hoặc dài hơn timeline gốc. Chạy lại job từ duration_repair hoặc TTS để áp dụng.
+                        Điều chỉnh bước <strong>duration_repair</strong> khi giọng TTS ngắn hoặc dài hơn timeline gốc.
+                        Khi cần rút ngắn/kéo dài câu, pipeline dùng cùng backend dịch đã chọn ở tab Dịch thuật (OpenAPI hoặc Gemini).
+                        Chạy lại job từ duration_repair hoặc TTS để áp dụng.
                       </p>
                       <SettingsCheckboxField
                         label="Bật khớp thời lượng chính xác"

@@ -872,7 +872,7 @@ def test_duration_repair_pads_short_segments_to_budget(mock_dur, mock_run, mock_
 
 
 @patch("dv_backend.pipeline.TtsSession")
-@patch("dv_backend.pipeline._lengthen_translation_with_gemini")
+@patch("dv_backend.pipeline.lengthen_translation_for_timing")
 @patch("dv_backend.pipeline.get_wav_duration")
 @patch("dv_backend.pipeline.run_subprocess_with_cancel")
 @patch("dv_backend.pipeline.resolve_tool_path")
@@ -912,81 +912,15 @@ def test_duration_repair_lengthens_when_gap_exceeds_one_second(
 
     mock_lengthen.assert_called_once()
     session.synthesize.assert_called_once()
-    assert "gemini_lengthen" in result["segments"][0]["repaired_method"]
+    assert "_lengthen" in result["segments"][0]["repaired_method"]
     assert "tail_silence_pad" in result["segments"][0]["repaired_method"]
     assert result["segments"][0]["translation"] == "Ngắn hơn một chút nhé."
-
-
-@patch("dv_backend.pipeline.default_request")
-def test_gemini_shortening_targets_mathematical_word_ratio(mock_request, test_env):
-    _config, database, _job_service, _runner = test_env
-    settings = {
-        "gemini_api_keys": [{"id": "a", "key": "key-a"}, {"id": "b", "key": "key-b"}],
-        "gemini_key_cursor": 0,
-        "gemini_translation_model": "gemini-2.5-flash",
-    }
-    captured: dict[str, str] = {}
-
-    def request(api_key, model, payload):
-        captured["api_key"] = api_key
-        captured["model"] = model
-        captured["prompt"] = payload["contents"][0]["parts"][0]["text"]
-        return {"candidates": [{"content": {"parts": [{"text": "một hai ba bốn năm sáu bảy tám"}]}}]}
-
-    mock_request.side_effect = request
-
-    shortened, target_words = pipeline._shorten_translation_with_gemini(
-        settings,
-        database,
-        text="một hai ba bốn năm sáu bảy tám chín mười",
-        budget=7.5,
-        current_duration=10.0,
-    )
-
-    assert shortened == "một hai ba bốn năm sáu bảy tám"
-    assert target_words == 8
-    assert captured["api_key"] == "key-a"
-    assert captured["model"] == "gemini-2.5-flash"
-    assert "Current word count: approximately 10" in captured["prompt"]
-    assert "Target word count: approximately 8 (timing ratio 0.750)" in captured["prompt"]
-    assert json.loads(database.connection.execute(
-        "SELECT value FROM settings WHERE key = 'gemini_key_cursor'"
-    ).fetchone()["value"]) == 1
-
-
-@patch("dv_backend.pipeline.default_request")
-def test_gemini_lengthening_targets_mathematical_word_ratio(mock_request, test_env):
-    _config, database, _job_service, _runner = test_env
-    settings = {
-        "gemini_api_keys": [{"id": "a", "key": "key-a"}],
-        "gemini_key_cursor": 0,
-        "gemini_translation_model": "gemini-2.5-flash",
-    }
-    captured: dict[str, str] = {}
-
-    def request(api_key, model, payload):
-        captured["prompt"] = payload["contents"][0]["parts"][0]["text"]
-        return {"candidates": [{"content": {"parts": [{"text": "Xin chào mọi người nhé."}]}}]}
-
-    mock_request.side_effect = request
-
-    lengthened, target_words = pipeline._lengthen_translation_with_gemini(
-        settings,
-        database,
-        text="Xin chào.",
-        budget=4.0,
-        current_duration=1.0,
-    )
-
-    assert lengthened == "Xin chào mọi người nhé."
-    assert target_words == 3
-    assert "Target word count: approximately 3 (timing ratio 1.600)" in captured["prompt"]
-    assert "shorter than the timing budget" in captured["prompt"]
 
 
 def test_tail_silence_pad_filter_only_appends_silence_at_end() -> None:
     expr = pipeline._tail_silence_pad_filter(1.0, 2.0)
     assert "adelay=" not in expr
+    assert "afade=t=out" in expr
     assert "apad=" in expr
     assert "atrim=0:2.000" in expr
 
@@ -1155,7 +1089,10 @@ def test_mix_lazy_mix_resamples_raw_tts_in_filtergraph(
 
     cmd = mock_run.call_args_list[0].args[0]
     assert str(raw) in cmd
-    assert "aresample=48000" in cmd[cmd.index("-filter_complex") + 1]
+    filter_graph = cmd[cmd.index("-filter_complex") + 1]
+    assert "aresample=48000" in filter_graph
+    assert "afade=t=in" in filter_graph
+    assert "afade=t=out" in filter_graph
     assert result["narration_segment_input_count"] == 1
 
 

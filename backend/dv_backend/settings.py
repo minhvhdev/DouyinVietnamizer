@@ -19,9 +19,12 @@ from .adapters.subtitles import (
     normalize_hex_color,
     normalize_position,
 )
+from .adapters.openai_compat import DEFAULT_OPENAI_API_BASE, normalize_openai_api_base
 from .adapters.tts import SUPPORTED_TTS_BACKENDS, VOXCPM_DEFAULT_MODEL
 from .database import Database
 
+
+SUPPORTED_TRANSLATION_BACKENDS = {"google_free", "gemini", "openai"}
 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
@@ -49,6 +52,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "gemini_api_keys": [],
     "gemini_key_cursor": 0,
     "gemini_translation_model": "gemini-2.5-flash",
+    "openai_api_base": DEFAULT_OPENAI_API_BASE,
+    "openai_api_key": "",
+    "openai_translation_model": "",
     "asr_backend": "qwen3_asr",
     "qwen3_asr_model": "Qwen/Qwen3-ASR-1.7B",
     "qwen3_aligner_model": "Qwen/Qwen3-ForcedAligner-0.6B",
@@ -183,10 +189,28 @@ class SettingsService:
         values["google_tts_api_key_configured"] = bool(raw_google_tts_key)
         values["google_tts_api_key_masked"] = mask_api_key(raw_google_tts_key) if raw_google_tts_key else ""
         values.pop("google_tts_api_key", None)
+        raw_openai_key = str(values.get("openai_api_key") or "").strip()
+        values["openai_api_key_configured"] = bool(raw_openai_key)
+        values["openai_api_key_masked"] = mask_api_key(raw_openai_key) if raw_openai_key else ""
+        values.pop("openai_api_key", None)
+        values["openai_api_base"] = normalize_openai_api_base(str(values.get("openai_api_base") or DEFAULT_OPENAI_API_BASE))
         return values
 
     def update(self, values: dict[str, Any]) -> dict[str, Any]:
         values.pop("cookies_browser", None)
+
+        translation_backend = values.get("translation_backend")
+        if translation_backend is not None:
+            backend = str(translation_backend).strip().lower()
+            if backend not in SUPPORTED_TRANSLATION_BACKENDS:
+                raise ValueError(
+                    "translation_backend must be one of: "
+                    + ", ".join(sorted(SUPPORTED_TRANSLATION_BACKENDS))
+                )
+            values["translation_backend"] = backend
+
+        if values.get("openai_api_base") is not None:
+            values["openai_api_base"] = normalize_openai_api_base(str(values["openai_api_base"]))
 
         mix_mode = values.get("mix_mode")
         if mix_mode is not None:
@@ -460,6 +484,9 @@ class SettingsService:
         google_tts_api_key = values.pop("google_tts_api_key", None)
         values.pop("google_tts_api_key_masked", None)
         values.pop("google_tts_api_key_configured", None)
+        openai_api_key = values.pop("openai_api_key", None)
+        values.pop("openai_api_key_masked", None)
+        values.pop("openai_api_key_configured", None)
 
         now = datetime.now(timezone.utc).isoformat()
         with self.database.connection:
@@ -502,6 +529,11 @@ class SettingsService:
                 key = str(google_tts_api_key).strip()
                 if key:
                     values["google_tts_api_key"] = key
+
+            if openai_api_key is not None:
+                key = str(openai_api_key).strip()
+                if key:
+                    values["openai_api_key"] = key
 
             for key, value in values.items():
                 self.database.connection.execute(
