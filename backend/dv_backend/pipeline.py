@@ -21,7 +21,7 @@ from .models import ErrorInfo
 from .checkpoints import load_checkpoint, save_checkpoint
 from .vendor import VendorManifest, VendorResolver, prefer_macos_ffmpeg_full
 from .adapters.translation import GoogleFreeTranslator
-from .adapters.tts import VOXCPM_INSTRUCT_PREFIX, TtsSession, create_tts_adapter
+from .adapters.tts import TTS_VOICE_INSTRUCT_PREFIX, TtsSession, create_tts_adapter
 from .adapters.asr import configure_gpu_manager, reset_model_cache, transcribe_audio
 from .adapters.vad_feedback import filter_asr_false_positives
 from .adapters.vad_energy import filter_low_vocal_energy_segments
@@ -53,6 +53,7 @@ from .segment_mix import (
     build_narration_segment_filter,
 )
 from .telemetry import TelemetrySink
+from .dubbing_languages import default_speaking_rate_wps, dub_language_from_settings, dub_language_label
 from .translation_duration import annotate_translation_duration, build_translation_timing_guidance, duration_prompt_suffix
 from .adapters.subtitles import (
     ffmpeg_subtitles_filter,
@@ -82,6 +83,7 @@ from .ytdlp_tools import (
     COOKIE_BROWSER_FALLBACK_ORDER,
     classify_yt_dlp_failure,
     yt_dlp_cookie_args_for_browser,
+    yt_dlp_cookie_args_for_file,
 )
 
 logger = logging.getLogger(__name__)
@@ -151,10 +153,11 @@ def _preferred_recognition_audio(job_dir: Path, fallback_audio_16k: Path) -> tup
 
 
 def _speaking_rate_wps(settings: dict) -> float:
+    fallback = default_speaking_rate_wps(dub_language_from_settings(settings))
     try:
-        rate = float(settings.get("vietnamese_speaking_rate_wps", 3.2) or 3.2)
+        rate = float(settings.get("vietnamese_speaking_rate_wps", fallback) or fallback)
     except (TypeError, ValueError):
-        rate = 3.2
+        rate = fallback
     return max(2.0, min(5.0, rate))
 
 
@@ -304,10 +307,23 @@ def run_yt_dlp_with_browser_fallback(
     runner,
     *,
     timeout: float | None = None,
+    cookies_file: str | Path | None = None,
 ) -> tuple[subprocess.CompletedProcess, str, list[str]]:
-    """Run yt-dlp using browser cookies, falling back Chrome → Edge → Firefox → Brave."""
+    """Run yt-dlp with cookies.txt first (if set), then browser cookies Firefox → Chrome → Edge → Brave."""
     last_exc: subprocess.CalledProcessError | None = None
     browsers_tried: list[str] = []
+
+    cookies_path = Path(str(cookies_file).strip()) if cookies_file else None
+    if cookies_path and cookies_path.is_file():
+        source = f"file:{cookies_path}"
+        browsers_tried.append(source)
+        cmd = [str(yt_dlp_path), *yt_dlp_cookie_args_for_file(cookies_path), *args]
+        try:
+            result = run_subprocess_with_cancel(cmd, job_id, runner, timeout=timeout)
+            return result, source, browsers_tried
+        except subprocess.CalledProcessError as exc:
+            last_exc = exc
+
     for browser in COOKIE_BROWSER_FALLBACK_ORDER:
         browsers_tried.append(browser)
         cmd = [str(yt_dlp_path), *yt_dlp_cookie_args_for_browser(browser), *args]
@@ -355,6 +371,8 @@ def resolve_step(job_id: str, config: AppConfig, database: Database, runner) -> 
         )
 
     yt_dlp_path = resolve_tool_path(config, "yt_dlp")
+    settings = _load_settings(database)
+    cookies_file = str(settings.get("cookies_file") or "").strip() or None
     yt_args = [
         "--dump-single-json",
         "--flat-playlist",
@@ -371,6 +389,7 @@ def resolve_step(job_id: str, config: AppConfig, database: Database, runner) -> 
             job_id,
             runner,
             timeout=60,
+            cookies_file=cookies_file,
         )
         data = json.loads(res.stdout)
     except subprocess.CalledProcessError as exc:
@@ -499,6 +518,8 @@ def download_step(job_id: str, config: AppConfig, database: Database, runner) ->
     yt_dlp_path = resolve_tool_path(config, "yt_dlp")
     ffmpeg_path = resolve_tool_path(config, "ffmpeg")
     ffmpeg_dir = ffmpeg_path.parent
+    settings = _load_settings(database)
+    cookies_file = str(settings.get("cookies_file") or "").strip() or None
 
     job_dir = config.data_dir / "jobs" / job_id
     artifacts_dir = job_dir / "artifacts"
@@ -525,6 +546,7 @@ def download_step(job_id: str, config: AppConfig, database: Database, runner) ->
             job_id,
             runner,
             timeout=900,
+            cookies_file=cookies_file,
         )
     except subprocess.CalledProcessError as exc:
         raise AppError(
@@ -1512,17 +1534,20 @@ def translate_step(job_id: str, config: AppConfig, database: Database, runner) -
 
 
 def _default_tts_voice(settings: dict) -> str:
-    instruct = str(settings.get("voxcpm_instruct") or "").strip()
+    instruct = str(settings.get("omnivoice_instruct") or "").strip()
     if instruct:
-        return f"{VOXCPM_INSTRUCT_PREFIX}{instruct}"
-    ref_audio = str(settings.get("voxcpm_ref_audio") or "").strip()
+        return f"{TTS_VOICE_INSTRUCT_PREFIX}{instruct}"
+    ref_audio = str(settings.get("omnivoice_ref_audio") or "").strip()
     if ref_audio:
         return ref_audio
     return "auto"
 
 
 def _anchor_transcript_for(settings: dict) -> str | None:
-    ref_audio = str(settings.get("voxcpm_ref_audio") or "").strip()
+    manual = str(settings.get("omnivoice_ref_text") or "").strip()
+    if manual:
+        return manual
+    ref_audio = str(settings.get("omnivoice_ref_audio") or "").strip()
     if not ref_audio:
         return None
     sidecar = Path(ref_audio).with_suffix(".txt")
@@ -1533,14 +1558,6 @@ def _anchor_transcript_for(settings: dict) -> str | None:
     except OSError:
         return None
     return transcript or None
-
-
-def _resolve_clone_mode(settings: dict) -> str:
-    raw = settings.get("voxcpm_clone_mode")
-    candidate = str(raw).strip().lower() if raw else "reference"
-    if candidate in ("reference", "ultimate"):
-        return candidate
-    return "reference"
 
 
 def _synthesize_segment_tts(
@@ -1554,9 +1571,9 @@ def _synthesize_segment_tts(
 ) -> None:
     voice = _default_tts_voice(settings)
     ref_text = str(segment.get("text") or "").strip() or None
-    ref_audio = str(settings.get("voxcpm_ref_audio") or "").strip()
+    ref_audio = str(settings.get("omnivoice_ref_audio") or "").strip()
     clone = bool(ref_audio)
-    clone_mode = _resolve_clone_mode(settings) if clone else "reference"
+    clone_mode = "reference"
     anchor_text = _anchor_transcript_for(settings) if clone else None
     last_error: AppError | None = None
     for attempt in range(2):
@@ -1726,11 +1743,7 @@ def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
     conversion_input_count = 0
     conversion_wall_time_ms = 0
     micro_batch_enabled = str(settings.get("tts_micro_batch_enabled", True)).lower() not in {"0", "false", "no"}
-    try:
-        micro_batch_size = int(settings.get("voxcpm_batch_size", 4) or 4)
-    except (TypeError, ValueError):
-        micro_batch_size = 4
-    micro_batch_size = max(1, micro_batch_size)
+    micro_batch_size = 4
 
     with TtsSession(settings, data_dir=config.data_dir, runner=runner, adapter_factory=create_tts_adapter) as session:
         session_create_ms = round((time.perf_counter() - session_started) * 1000)
@@ -1769,7 +1782,7 @@ def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
                 "retry_count": 0,
                 "cache_hit": None,
                 "cache_miss": None,
-                "model_config": str(settings.get("voxcpm_model", "")),
+                "model_config": str(settings.get("omnivoice_model", "")),
                 "raw_tts_format": "wav_pcm16le_native",
                 "tts_micro_batch_enabled": micro_batch_enabled,
                 "tts_micro_batch_size": batch_size,
@@ -1852,7 +1865,7 @@ def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
         "segment_count": len(segments),
         "tts_session_create_ms": 0,
         "retry_count": 0,
-        "model_config": str(settings.get("voxcpm_model", "")),
+        "model_config": str(settings.get("omnivoice_model", "")),
         "conversion_strategy": strategy,
         "tts_micro_batch_enabled": micro_batch_enabled,
         "tts_micro_batch_size": micro_batch_size,
@@ -1894,6 +1907,7 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
     max_safe_stretch = float(settings.get("exact_timing_max_safe_stretch", 1.25) or 1.25)
     global_speed = max(0.9, float(settings.get("tts_global_speed", 1.0) or 1.0))
     rewrite_prefix = _timing_rewrite_method_prefix(settings)
+    dub_lang_label = dub_language_label(dub_language_from_settings(settings), english=True)
 
     ffmpeg_path = resolve_tool_path(config, "ffmpeg")
     telemetry = TelemetrySink(config.data_dir, job_id)
@@ -1963,6 +1977,7 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                         budget=repair_target,
                         current_duration=current_duration,
                         estimate_word_count=_estimate_word_count,
+                        language_label=dub_lang_label,
                     )
                     llm_shorten_ms = round((time.perf_counter() - llm_started) * 1000)
                     if new_translation and new_translation != s.get("translation"):
@@ -2059,6 +2074,7 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                                 min_gap_sec=lengthen_gap_threshold,
                                 max_ratio=_lengthen_max_ratio(settings),
                                 estimate_word_count=_estimate_word_count,
+                                language_label=dub_lang_label,
                             )
                             llm_lengthen_ms = round((time.perf_counter() - llm_started) * 1000)
                             if new_translation and new_translation != s.get("translation"):

@@ -49,10 +49,12 @@ CREATE TABLE IF NOT EXISTS runtime_reports (
 );
 CREATE TABLE IF NOT EXISTS cloned_voices (
     id TEXT PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
+    backend TEXT NOT NULL DEFAULT 'omnivoice',
+    name TEXT NOT NULL,
     wav_filename TEXT NOT NULL,
     transcript TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    UNIQUE(backend, name)
 );
 """
 
@@ -85,4 +87,31 @@ class Database:
         }
         if "transcript" not in voice_columns:
             self.connection.execute("ALTER TABLE cloned_voices ADD COLUMN transcript TEXT")
+        self._migrate_cloned_voices_backend_schema()
         self.connection.commit()
+
+    def _migrate_cloned_voices_backend_schema(self) -> None:
+        voice_columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(cloned_voices)").fetchall()
+        }
+        if "backend" in voice_columns:
+            return
+        self.connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS cloned_voices_new (
+                id TEXT PRIMARY KEY,
+                backend TEXT NOT NULL DEFAULT 'omnivoice',
+                name TEXT NOT NULL,
+                wav_filename TEXT NOT NULL,
+                transcript TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(backend, name)
+            );
+            INSERT INTO cloned_voices_new (id, backend, name, wav_filename, transcript, created_at)
+            SELECT id, 'omnivoice', name, wav_filename, transcript, created_at
+            FROM cloned_voices;
+            DROP TABLE cloned_voices;
+            ALTER TABLE cloned_voices_new RENAME TO cloned_voices;
+            """
+        )

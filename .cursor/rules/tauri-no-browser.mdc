@@ -1,0 +1,11 @@
+---
+description: Không mở app Tauri bằng trình duyệt
+alwaysApply: true
+---
+
+# Tauri Desktop Only
+
+- Với ứng dụng Tauri, không mở giao diện bằng trình duyệt để test hoặc demo.
+- Khi cần chạy app, ưu tiên luồng desktop (`pnpm tauri:dev` hoặc tương đương).
+- Không gửi hướng dẫn kiểu "mở http://localhost:..." cho phần UI chính của app Tauri, trừ khi user yêu cầu rõ ràng.
+- Khi chạy lại app/cửa sổ, luôn đóng instance cũ trước rồi mới mở instance mới.

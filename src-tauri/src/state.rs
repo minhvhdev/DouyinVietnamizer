@@ -10,6 +10,8 @@ pub struct BackendState {
     pub backend_dir: PathBuf,
     pub dev_profile: bool,
     pub shutdown_requested: AtomicBool,
+    /// Suppress false crash events while `restart_backend` is in flight.
+    pub recovering: AtomicBool,
 }
 
 impl BackendState {
@@ -20,6 +22,7 @@ impl BackendState {
             backend_dir,
             dev_profile,
             shutdown_requested: AtomicBool::new(false),
+            recovering: AtomicBool::new(false),
         }
     }
 }

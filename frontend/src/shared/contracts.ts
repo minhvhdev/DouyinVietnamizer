@@ -24,10 +24,12 @@ export type Job = {
 
 export type ClonedVoice = {
   id: string;
+  backend?: "omnivoice";
   name: string;
   wav_filename: string;
   wav_path: string;
   transcript: string | null;
+  transcript_error?: string | null;
   transcribed: boolean;
   created_at: string;
 };
@@ -63,12 +65,12 @@ export type JobsApi = {
   updateSettings(payload: Record<string, any>): Promise<Record<string, any>>;
   getEvents(): Promise<any[]>;
   listOutputs(): Promise<OutputItem[]>;
-  listClonedVoices(): Promise<ClonedVoice[]>;
-  createClonedVoice(name: string, file: File): Promise<ClonedVoice>;
-  deleteClonedVoice(voiceId: string): Promise<{ status: string }>;
-  testClonedVoice(voiceId: string, text: string, mode?: "reference" | "ultimate"): Promise<Blob>;
+  listClonedVoices(backend?: "omnivoice"): Promise<ClonedVoice[]>;
+  createClonedVoice(name: string, file: File, backend?: "omnivoice", refText?: string): Promise<ClonedVoice>;
+  deleteClonedVoice(voiceId: string, backend?: "omnivoice"): Promise<{ status: string }>;
+  testClonedVoice(voiceId: string, text: string, mode?: "reference" | "ultimate", backend?: "omnivoice"): Promise<Blob>;
   previewPresetVoice(voice: string, text: string): Promise<Blob>;
-  listTtsVoices(backend: string): Promise<Array<{ id: string; name: string; gender?: string; kind?: string }>>;
+  listTtsVoices(backend: string, locale?: string): Promise<Array<{ id: string; name: string; gender?: string; kind?: string }>>;
   listOpenAiModels(options?: { baseUrl?: string; apiKey?: string }): Promise<Array<{ id: string; name: string }>>;
   previewTts(text: string, options?: { backend?: string; voice?: string; settings?: Record<string, unknown> }): Promise<Blob>;
   rerunJob(jobId: string, keepSteps: string[]): Promise<{ status: string; job: Job }>;
@@ -77,7 +79,6 @@ export type JobsApi = {
   getJobFolder(jobId: string): Promise<JobFolder>;
   detectHardware(): Promise<{ cuda_supported: boolean; vulkan_supported: boolean; avx2_supported: boolean; espeak_installed: boolean; recommendation: string }>;
   bootstrapVendor(profile: string): Promise<{ status: string }>;
-  bootstrapPyannote(): Promise<{ status: string }>;
   bootstrapProgress(): Promise<{
     status: string;
     current_task: string;
@@ -100,7 +101,7 @@ export type RuntimeGpuStatus = {
   torch_allocated_mb?: number | null;
   torch_reserved_mb?: number | null;
   torch_peak_mb?: number | null;
-  active_voxcpm_clients: number;
+  active_omnivoice_clients: number;
   resident_models: string[];
   helper_processes: string[];
 };

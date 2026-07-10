@@ -53,25 +53,6 @@ class BootstrapManager:
                     cls._status[k] = v
 
     @classmethod
-    def start_pyannote_bootstrap(cls, vendor_dir: Path) -> bool:
-        with cls._lock:
-            if cls._status["status"] in ("downloading", "extracting"):
-                cls.add_log("Bootstrap is already running.")
-                return False
-            cls._status = {
-                "status": "completed",
-                "current_task": "Pyannote bootstrap was removed; single-voice VoxCPM2 does not need it.",
-                "download_percent": 100.0,
-                "download_speed_kb": 0.0,
-                "downloaded_bytes": 0,
-                "total_bytes": 0,
-                "error_message": "",
-                "logs": [],
-            }
-            cls.add_log("Pyannote bootstrap skipped; speaker diarization was removed.")
-            return True
-
-    @classmethod
     def start_bootstrap(cls, profile: str, vendor_dir: Path, default_manifest_path: Path | None = None):
         with cls._lock:
             if cls._status["status"] in ("downloading", "extracting"):

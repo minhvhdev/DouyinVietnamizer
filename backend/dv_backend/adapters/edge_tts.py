@@ -15,7 +15,17 @@ EDGE_TTS_VI_VOICES = (
     {"id": "vi-VN-NamMinhNeural", "name": "Nam Minh (Nam)", "gender": "Male"},
 )
 
-_voice_cache: list[dict] | None = None
+EDGE_TTS_TH_VOICES = (
+    {"id": "th-TH-PremwadeeNeural", "name": "Premwadee (Nữ)", "gender": "Female"},
+    {"id": "th-TH-NiwatNeural", "name": "Niwat (Nam)", "gender": "Male"},
+)
+
+EDGE_TTS_FALLBACK_VOICES: dict[str, tuple[dict, ...]] = {
+    "vi": EDGE_TTS_VI_VOICES,
+    "th": EDGE_TTS_TH_VOICES,
+}
+
+_voice_cache: dict[str, list[dict]] = {}
 
 
 def _run_async(coro):
@@ -51,17 +61,25 @@ async def _fetch_edge_voices(locale_prefix: str = "vi") -> list[dict]:
     return results
 
 
+def _fallback_edge_voices(locale_prefix: str) -> list[dict]:
+    prefix = (locale_prefix or "vi").strip().lower()
+    if prefix.startswith("th"):
+        return list(EDGE_TTS_TH_VOICES)
+    return list(EDGE_TTS_VI_VOICES)
+
+
 def list_edge_tts_voices(*, locale_prefix: str = "vi", refresh: bool = False) -> list[dict]:
     global _voice_cache
-    if _voice_cache is not None and not refresh:
-        return list(_voice_cache)
+    cache_key = (locale_prefix or "vi").strip().lower()
+    if cache_key in _voice_cache and not refresh:
+        return list(_voice_cache[cache_key])
     try:
         voices = _run_async(_fetch_edge_voices(locale_prefix))
     except Exception:
-        voices = list(EDGE_TTS_VI_VOICES)
+        voices = _fallback_edge_voices(locale_prefix)
     if voices:
-        _voice_cache = voices
-    return list(voices or EDGE_TTS_VI_VOICES)
+        _voice_cache[cache_key] = voices
+    return list(voices or _fallback_edge_voices(locale_prefix))
 
 
 def _mp3_to_wav(mp3_path: Path, wav_path: Path) -> None:
@@ -72,7 +90,7 @@ def _mp3_to_wav(mp3_path: Path, wav_path: Path) -> None:
             ErrorInfo(
                 code="FFMPEG_UNAVAILABLE",
                 message="ffmpeg is required to convert Edge TTS output to WAV.",
-                action="Install ffmpeg or use the bundled portable runtime.",
+                action="Install ffmpeg or add it under vendor/.",
             ),
         )
     completed = subprocess.run(

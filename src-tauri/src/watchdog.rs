@@ -24,6 +24,10 @@ pub async fn run(app: AppHandle) {
         let Some(state) = app.try_state::<BackendState>() else {
             continue;
         };
+        if state.recovering.load(std::sync::atomic::Ordering::SeqCst) {
+            continue;
+        }
+        let base_url = state.base_url.clone();
         let exit = {
             let mut guard = state.child.lock().await;
             let Some(child) = guard.as_mut() else {
@@ -46,6 +50,13 @@ pub async fn run(app: AppHandle) {
             }
         };
         if let Some(payload) = exit {
+            if crate::backend::is_health_ok(&base_url).await {
+                log::warn!(
+                    "managed backend child exited (code={:?}) but /api/health is still OK; skipping crash event",
+                    payload.code
+                );
+                continue;
+            }
             log::error!(
                 "backend process exited unexpectedly (code={:?})",
                 payload.code

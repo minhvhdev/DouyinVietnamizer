@@ -10,6 +10,8 @@ dist_portable/
 # Python
 .venv/
 .venv.broken/
+backend/venvs/
+backend/_kuwacom_clone/
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -46,15 +48,16 @@ graphify-out/
 .superpowers/
 .cache/
 
-# Local VoxCPM2 build tree (see scripts/build-voxcpm2-mac.sh)
+# Local model weights and benchmark artifacts
 backend/models/
 backend/data/
 backend/out*.wav
 backend/benchmark_report*.json
 
-# Local generated samples and portable builds
+# Local generated samples and legacy portable artifacts
 sample/
 dist-portable/
+vendor/portable-runtime/
 
 # Package managers
 package-lock.json

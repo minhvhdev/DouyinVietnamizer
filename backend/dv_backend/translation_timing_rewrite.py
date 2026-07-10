@@ -59,10 +59,11 @@ def _build_shorten_prompt(
     current_words: int,
     target_words: int,
     target_ratio: float,
+    language_label: str = "Vietnamese",
 ) -> str:
     overrun_pct = max(0.0, ((current_duration / budget) - 1.0) * 100.0)
     return (
-        "Rewrite this Vietnamese dubbing line so it stays natural but fits the target timing.\n"
+        f"Rewrite this {language_label} dubbing line so it stays natural but fits the target timing.\n"
         f"Current line: {text}\n"
         f"Current duration: {current_duration:.2f}s\n"
         f"Target duration budget: {budget:.2f}s\n"
@@ -70,7 +71,7 @@ def _build_shorten_prompt(
         f"Target word count: approximately {target_words} (timing ratio {target_ratio:.3f})\n"
         f"Current line overruns the timing by {overrun_pct:.1f}%.\n"
         "Remove filler words and redundant phrasing first. Preserve names, numbers, core meaning, and causal relationships. "
-        "Return only the rewritten Vietnamese line with no quotes, notes, or formatting."
+        f"Return only the rewritten {language_label} line with no quotes, notes, or formatting."
     )
 
 
@@ -82,10 +83,11 @@ def _build_lengthen_prompt(
     current_words: int,
     target_words: int,
     target_ratio: float,
+    language_label: str = "Vietnamese",
 ) -> str:
     underrun_pct = max(0.0, ((budget / current_duration) - 1.0) * 100.0)
     return (
-        "Expand this Vietnamese dubbing line so it sounds natural when spoken aloud and better fills the target timing.\n"
+        f"Expand this {language_label} dubbing line so it sounds natural when spoken aloud and better fills the target timing.\n"
         f"Current line: {text}\n"
         f"Current duration: {current_duration:.2f}s\n"
         f"Target duration budget: {budget:.2f}s\n"
@@ -94,7 +96,7 @@ def _build_lengthen_prompt(
         f"The line is about {underrun_pct:.1f}% shorter than the timing budget.\n"
         "Add natural filler words, light discourse markers, or slightly fuller phrasing only when needed. "
         "Do not change core meaning, facts, names, numbers, or causal relationships. "
-        "Return only the expanded Vietnamese line with no quotes, notes, or formatting."
+        f"Return only the expanded {language_label} line with no quotes, notes, or formatting."
     )
 
 
@@ -237,6 +239,7 @@ def shorten_translation_for_timing(
     budget: float,
     current_duration: float,
     estimate_word_count,
+    language_label: str = "Vietnamese",
 ) -> tuple[str | None, int]:
     current_words = estimate_word_count(text)
     if current_words < 2 or budget <= 0 or current_duration <= budget:
@@ -256,6 +259,7 @@ def shorten_translation_for_timing(
         current_words=current_words,
         target_words=target_words,
         target_ratio=target_ratio,
+        language_label=language_label,
     )
     shortened = invoke_timing_rewrite(settings, database, prompt)
     return shortened, target_words
@@ -271,6 +275,7 @@ def lengthen_translation_for_timing(
     min_gap_sec: float,
     max_ratio: float,
     estimate_word_count,
+    language_label: str = "Vietnamese",
 ) -> tuple[str | None, int]:
     cleaned = text.strip()
     current_words = estimate_word_count(cleaned)
@@ -292,6 +297,7 @@ def lengthen_translation_for_timing(
         current_words=current_words,
         target_words=target_words,
         target_ratio=target_ratio,
+        language_label=language_label,
     )
     lengthened = invoke_timing_rewrite(settings, database, prompt)
     if lengthened == cleaned:

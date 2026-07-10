@@ -11,6 +11,7 @@
     "core:app:default",
     "shell:allow-open",
     "dialog:default",
-    "clipboard-manager:default"
+    "clipboard-manager:default",
+    "mcp-bridge:default"
   ]
 }

@@ -20,8 +20,10 @@ from .adapters.subtitles import (
     normalize_position,
 )
 from .adapters.openai_compat import DEFAULT_OPENAI_API_BASE, normalize_openai_api_base
-from .adapters.tts import SUPPORTED_TTS_BACKENDS, VOXCPM_DEFAULT_MODEL
+from .adapters.tts import SUPPORTED_TTS_BACKENDS, TTS_VOICE_INSTRUCT_PREFIX
+from .omnivoice_env import OMNIVOICE_DEFAULT_MODEL
 from .database import Database
+from .dubbing_languages import SUPPORTED_DUB_LANGUAGES, default_speaking_rate_wps, dub_language_config, dub_language_from_settings, normalize_dub_language, voice_defaults_for_language
 
 
 SUPPORTED_TRANSLATION_BACKENDS = {"google_free", "gemini", "openai"}
@@ -31,23 +33,24 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "translation_backend": "google_free",
     "translation_source_language": "zh-CN",
     "translation_target_language": "vi",
-    "tts_backend": "voxcpm",
+    "tts_backend": "omnivoice",
     "edge_tts_voice": "vi-VN-HoaiMyNeural",
     "google_tts_voice": "vi-VN-Standard-A",
     "google_tts_api_key": "",
     "google_tts_speaking_rate": 1.0,
     "gemini_tts_model": "gemini-2.5-flash-preview-tts",
     "gemini_tts_voice": "Zephyr",
-    "voxcpm_model": VOXCPM_DEFAULT_MODEL,
-    "voxcpm_device": "cuda:0",
-    "voxcpm_ref_audio": "",
-    "voxcpm_instruct": "",
-    "voxcpm_auto_voice": True,
-    "voxcpm_num_steps": 8,
-    "voxcpm_batch_size": 4,
-    "voxcpm_batch_flush_ms": 150,
-    "voxcpm_cache_enabled": True,
-    "voxcpm_clone_mode": "reference",
+    "omnivoice_model": OMNIVOICE_DEFAULT_MODEL,
+    "omnivoice_device": "cuda:0",
+    "omnivoice_ref_audio": "",
+    "omnivoice_ref_text": "",
+    "omnivoice_instruct": "",
+    "omnivoice_auto_voice": True,
+    "omnivoice_num_steps": 32,
+    "omnivoice_speed": 1.0,
+    "omnivoice_language_id": "",
+    "omnivoice_audio_chunk_threshold": 30.0,
+    "omnivoice_audio_chunk_duration": 15.0,
     "mix_mode": "background_only",
     "gemini_api_keys": [],
     "gemini_key_cursor": 0,
@@ -100,10 +103,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "subtitle_background_padding": DEFAULT_SUBTITLE_BACKGROUND_PADDING,
     "subtitle_edge_margin": DEFAULT_SUBTITLE_EDGE_MARGIN,
     "subtitle_position": DEFAULT_SUBTITLE_POSITION,
+    "cookies_file": "",
 }
 
 SUPPORTED_MIX_MODES = {"background_only", "duck"}
-SUPPORTED_VOXCPM_CLONE_MODES = {"reference", "ultimate"}
 SUPPORTED_ASR_ALIGNMENT_MODES = {"fast", "balanced", "accurate"}
 SUPPORTED_VAD_ENGINES = {"silero", "silencedetect"}
 
@@ -209,6 +212,28 @@ class SettingsService:
                 )
             values["translation_backend"] = backend
 
+        target_language = values.get("translation_target_language")
+        if target_language is not None:
+            normalized = normalize_dub_language(str(target_language))
+            if normalized not in SUPPORTED_DUB_LANGUAGES:
+                raise ValueError(
+                    "translation_target_language must be one of: "
+                    + ", ".join(sorted(SUPPORTED_DUB_LANGUAGES))
+                )
+            values["translation_target_language"] = normalized
+            defaults = voice_defaults_for_language(normalized)
+            merged_settings = {**self.get_raw_all(), **values}
+            google_voice = str(merged_settings.get("google_tts_voice") or "").strip()
+            google_locale = str(dub_language_config(normalized)["google_locale"]).lower()
+            if not google_voice or not google_voice.lower().startswith(google_locale):
+                values["google_tts_voice"] = defaults["google_tts_voice"]
+            edge_voice = str(merged_settings.get("edge_tts_voice") or "").strip()
+            edge_locale = str(dub_language_config(normalized)["edge_locale"]).lower()
+            if not edge_voice or not edge_voice.lower().startswith(edge_locale):
+                values["edge_tts_voice"] = defaults["edge_tts_voice"]
+            if "omnivoice_language_id" not in values:
+                values["omnivoice_language_id"] = defaults["omnivoice_language_id"]
+
         if values.get("openai_api_base") is not None:
             values["openai_api_base"] = normalize_openai_api_base(str(values["openai_api_base"]))
 
@@ -223,12 +248,6 @@ class SettingsService:
                 )
             values["mix_mode"] = mix_mode
 
-        clone_mode = values.get("voxcpm_clone_mode")
-        if clone_mode is not None and str(clone_mode).strip().lower() not in SUPPORTED_VOXCPM_CLONE_MODES:
-            raise ValueError(
-                "voxcpm_clone_mode must be one of: "
-                + ", ".join(sorted(SUPPORTED_VOXCPM_CLONE_MODES))
-            )
         alignment_mode = values.get("asr_alignment_mode")
         if alignment_mode is not None:
             mode = str(alignment_mode).strip().lower()
@@ -460,8 +479,15 @@ class SettingsService:
 
             voice = str(values["google_tts_voice"]).strip()
             if voice and voice not in GOOGLE_TTS_VOICE_IDS:
-                raise ValueError("google_tts_voice is not a supported Google Cloud TTS voice.")
+                merged_settings = {**self.get_raw_all(), **values}
+                voice = voice_defaults_for_language(
+                    dub_language_from_settings(merged_settings)
+                )["google_tts_voice"]
             values["google_tts_voice"] = voice or DEFAULT_GOOGLE_TTS_VOICE
+
+        if values.get("cookies_file") is not None:
+            cookies_file = str(values.get("cookies_file") or "").strip()
+            values["cookies_file"] = cookies_file
 
         tts_backend = values.get("tts_backend")
         if tts_backend is not None and tts_backend not in SUPPORTED_TTS_BACKENDS:
@@ -469,12 +495,33 @@ class SettingsService:
                 "tts_backend must be one of: " + ", ".join(SUPPORTED_TTS_BACKENDS)
             )
 
-        if values.get("voxcpm_num_steps") is not None:
+        if values.get("omnivoice_num_steps") is not None:
             try:
-                steps = int(values["voxcpm_num_steps"])
+                steps = int(values["omnivoice_num_steps"])
             except (TypeError, ValueError) as error:
-                raise ValueError("voxcpm_num_steps must be an integer.") from error
-            values["voxcpm_num_steps"] = max(4, min(64, steps))
+                raise ValueError("omnivoice_num_steps must be an integer.") from error
+            values["omnivoice_num_steps"] = max(4, min(64, steps))
+
+        if values.get("omnivoice_speed") is not None:
+            try:
+                speed = float(values["omnivoice_speed"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("omnivoice_speed must be a number.") from error
+            values["omnivoice_speed"] = max(0.5, min(2.0, speed))
+
+        if values.get("omnivoice_language_id") is not None:
+            values["omnivoice_language_id"] = str(values.get("omnivoice_language_id") or "").strip()
+
+        for chunk_key, minimum, maximum in (
+            ("omnivoice_audio_chunk_threshold", 4.0, 60.0),
+            ("omnivoice_audio_chunk_duration", 4.0, 30.0),
+        ):
+            if values.get(chunk_key) is not None:
+                try:
+                    chunk_value = float(values[chunk_key])
+                except (TypeError, ValueError) as error:
+                    raise ValueError(f"{chunk_key} must be a number.") from error
+                values[chunk_key] = max(minimum, min(maximum, chunk_value))
 
         values = dict(values)
         add_gemini_key = values.pop("gemini_api_key_add", None)

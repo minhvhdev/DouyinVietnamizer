@@ -1,0 +1,15 @@
+---
+description: stop old app processes before dev test runs
+alwaysApply: true
+---
+
+# Dev Test Process Cleanup
+
+Before enabling/running tests in dev mode, always terminate all existing app processes first, then start a fresh new process.
+
+Required sequence:
+1. Stop/kill all currently running DouyinVietnamizer/Book Translate app processes.
+2. Verify no old process remains active.
+3. Start the new dev test process.
+
+Do not run a new dev test instance on top of old running processes.

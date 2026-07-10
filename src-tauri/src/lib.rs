@@ -1,6 +1,6 @@
 pub mod backend;
 pub mod commands;
-pub mod portable;
+pub mod runtime;
 pub mod setup;
 pub mod state;
 pub mod watchdog;
@@ -21,8 +21,7 @@ pub fn run() {
     } else {
         PathBuf::from("backend")
     };
-
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -66,7 +65,13 @@ pub fn run() {
                 watchdog::run(handle).await;
             });
             Ok(())
-        })
-        .run(tauri::generate_context!())
+        });
+
+    #[cfg(debug_assertions)]
+    {
+        builder = builder.plugin(tauri_plugin_mcp_bridge::init());
+    }
+
+    builder.run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -15,14 +15,33 @@ GOOGLE_CLOUD_TTS_API = "https://texttospeech.googleapis.com/v1/text:synthesize"
 DEFAULT_GOOGLE_TTS_VOICE = "vi-VN-Standard-A"
 DEFAULT_GOOGLE_TTS_SPEAKING_RATE = 1.0
 
-GOOGLE_TTS_VOICES = (
+GOOGLE_TTS_VI_VOICES = (
     {"id": "vi-VN-Standard-A", "name": "Standard A — Nữ", "gender": "Female", "tier": "Standard"},
     {"id": "vi-VN-Standard-B", "name": "Standard B — Nam", "gender": "Male", "tier": "Standard"},
     {"id": "vi-VN-Standard-C", "name": "Standard C — Nữ", "gender": "Female", "tier": "Standard"},
     {"id": "vi-VN-Standard-D", "name": "Standard D — Nam", "gender": "Male", "tier": "Standard"},
 )
 
+GOOGLE_TTS_TH_VOICES = (
+    {"id": "th-TH-Standard-A", "name": "Standard A — Nữ", "gender": "Female", "tier": "Standard"},
+    {"id": "th-TH-Neural2-C", "name": "Neural2 C — Nữ", "gender": "Female", "tier": "Neural2"},
+    {"id": "th-TH-Neural2-D", "name": "Neural2 D — Nam", "gender": "Male", "tier": "Neural2"},
+)
+
+GOOGLE_TTS_VOICES = GOOGLE_TTS_VI_VOICES + GOOGLE_TTS_TH_VOICES
+
 GOOGLE_TTS_VOICE_IDS = frozenset(voice["id"] for voice in GOOGLE_TTS_VOICES)
+
+
+def list_google_tts_voices(*, locale: str | None = None) -> list[dict]:
+    if not locale:
+        return list(GOOGLE_TTS_VOICES)
+    prefix = str(locale).strip().lower()
+    return [
+        voice
+        for voice in GOOGLE_TTS_VOICES
+        if str(voice["id"]).lower().startswith(prefix)
+    ]
 
 
 def _language_code_for_voice(voice: str) -> str:

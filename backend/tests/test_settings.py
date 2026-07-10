@@ -13,14 +13,14 @@ def service(tmp_path: Path) -> SettingsService:
     return SettingsService(database)
 
 
-def test_defaults_use_free_portable_pipeline(tmp_path: Path) -> None:
+def test_defaults_use_free_pipeline(tmp_path: Path) -> None:
     settings = service(tmp_path)
 
     assert settings.get_all()["translation_backend"] == "google_free"
-    assert settings.get_all()["voxcpm_model"] == "gguf-q8"
-    assert settings.get_all()["voxcpm_device"] == "cuda:0"
-    assert settings.get_all()["voxcpm_num_steps"] == 8
-    assert settings.get_all()["voxcpm_clone_mode"] == "reference"
+    assert settings.get_all()["tts_backend"] == "omnivoice"
+    assert settings.get_all()["omnivoice_model"]
+    assert settings.get_all()["omnivoice_device"] == "cuda:0"
+    assert settings.get_all()["omnivoice_num_steps"] == 32
     assert settings.get_all()["mix_mode"] == "background_only"
     assert settings.get_all()["exact_timing_enabled"] is True
     assert settings.get_all()["exact_timing_tolerance_ms"] == 40
@@ -72,16 +72,6 @@ def test_mix_mode_accepts_background_only_and_duck(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="mix_mode"):
         settings.update({"mix_mode": "invalid"})
-
-
-def test_voxcpm_clone_mode_accepts_supported_values(tmp_path: Path) -> None:
-    settings = service(tmp_path)
-
-    settings.update({"voxcpm_clone_mode": "ultimate"})
-    assert settings.get_all()["voxcpm_clone_mode"] == "ultimate"
-
-    with pytest.raises(ValueError, match="voxcpm_clone_mode"):
-        settings.update({"voxcpm_clone_mode": "design"})
 
 
 def test_pipeline_optimization_settings_are_validated(tmp_path: Path) -> None:
@@ -194,15 +184,15 @@ def test_subtitle_settings_accepts_supported_values(tmp_path: Path) -> None:
 
 def test_update_does_not_replace_unrelated_settings(tmp_path: Path) -> None:
     settings = service(tmp_path)
-    settings.update({"voxcpm_ref_audio": "C:/voice.wav"})
+    settings.update({"omnivoice_ref_audio": "C:/voice.wav"})
 
     rows = settings.database.connection.execute(
-        "SELECT key, value FROM settings WHERE key IN ('voxcpm_ref_audio', 'translation_backend')"
+        "SELECT key, value FROM settings WHERE key IN ('omnivoice_ref_audio', 'translation_backend')"
     ).fetchall()
     values = {row["key"]: json.loads(row["value"]) for row in rows}
 
     assert values == {
-        "voxcpm_ref_audio": "C:/voice.wav",
+        "omnivoice_ref_audio": "C:/voice.wav",
         "translation_backend": "google_free",
     }
 
@@ -286,3 +276,35 @@ def test_openai_api_key_is_masked_and_persisted(tmp_path: Path) -> None:
     raw = settings.get_raw_all()
     assert raw["openai_api_key"] == "sk-secret1234567890"
     assert raw["openai_api_base"] == "https://api.openai.com/v1"
+
+
+def test_switching_to_thai_accepts_thai_google_voice(tmp_path: Path) -> None:
+    settings = service(tmp_path)
+
+    updated = settings.update(
+        {
+            "translation_target_language": "th",
+            "google_tts_voice": "th-TH-Standard-A",
+            "edge_tts_voice": "th-TH-PremwadeeNeural",
+        }
+    )
+
+    assert updated["translation_target_language"] == "th"
+    assert updated["google_tts_voice"] == "th-TH-Standard-A"
+    assert updated["edge_tts_voice"] == "th-TH-PremwadeeNeural"
+
+
+def test_switching_to_thai_migrates_vietnamese_google_voice(tmp_path: Path) -> None:
+    settings = service(tmp_path)
+
+    updated = settings.update(
+        {
+            "translation_target_language": "th",
+            "google_tts_voice": "vi-VN-Standard-A",
+            "edge_tts_voice": "vi-VN-HoaiMyNeural",
+        }
+    )
+
+    assert updated["translation_target_language"] == "th"
+    assert updated["google_tts_voice"] == "th-TH-Standard-A"
+    assert updated["edge_tts_voice"] == "th-TH-PremwadeeNeural"

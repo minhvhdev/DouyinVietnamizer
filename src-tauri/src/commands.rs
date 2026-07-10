@@ -1,10 +1,11 @@
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use serde::Serialize;
 use tauri::{State, WebviewWindow};
 
 use crate::backend::{self, BackendStartError, BackendStatusKind};
-use crate::portable::{self, PortableRuntime, PortableRuntimeStatus};
+use crate::runtime::{self, AppRuntime, AppRuntimeStatus};
 use crate::setup::SetupError;
 use crate::state::BackendState;
 
@@ -13,7 +14,7 @@ const BACKEND_START_TIMEOUT: Duration = Duration::from_secs(20);
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendStatusDto {
-    PortableMissing { root: String, missing_items: Vec<String> },
+    EnvironmentMissing { root: String, missing_items: Vec<String> },
     Starting,
     Ready { base_url: String },
     Crashed { stderr: String },
@@ -38,25 +39,27 @@ fn repo_root_from_backend_dir(backend_dir: &PathBuf) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn resolve_runtime_for_status(backend_dir: &PathBuf, dev_profile: bool) -> Result<PortableRuntime, BackendStatusDto> {
-    match portable::resolve_portable_runtime(&repo_root_from_backend_dir(backend_dir), dev_profile) {
-        Ok(runtime) => Ok(runtime),
-        Err(PortableRuntimeStatus::Missing { root, missing_items }) => Err(BackendStatusDto::PortableMissing {
-            root: root.display().to_string(),
-            missing_items,
-        }),
-        Err(PortableRuntimeStatus::Ready { .. }) => unreachable!(),
+fn resolve_runtime_for_status(backend_dir: &PathBuf) -> Result<AppRuntime, BackendStatusDto> {
+    match runtime::resolve_app_runtime(&repo_root_from_backend_dir(backend_dir)) {
+        Ok(app_runtime) => Ok(app_runtime),
+        Err(AppRuntimeStatus::Missing { root, missing_items }) => {
+            Err(BackendStatusDto::EnvironmentMissing {
+                root: root.display().to_string(),
+                missing_items,
+            })
+        }
+        Err(AppRuntimeStatus::Ready { .. }) => unreachable!(),
     }
 }
 
-fn resolve_runtime_for_start(backend_dir: &PathBuf, dev_profile: bool) -> Result<PortableRuntime, BackendStartError> {
-    resolve_runtime_for_status(backend_dir, dev_profile).map_err(|status| match status {
-        BackendStatusDto::PortableMissing { root, missing_items } => BackendStartError::Spawn(format!(
-            "portable runtime missing at {}: {}",
+fn resolve_runtime_for_start(backend_dir: &PathBuf) -> Result<AppRuntime, BackendStartError> {
+    resolve_runtime_for_status(backend_dir).map_err(|status| match status {
+        BackendStatusDto::EnvironmentMissing { root, missing_items } => BackendStartError::Spawn(format!(
+            "development environment incomplete at {}: {}",
             root,
             missing_items.join(", ")
         )),
-        _ => BackendStartError::Spawn("portable runtime unavailable".into()),
+        _ => BackendStartError::Spawn("development environment unavailable".into()),
     })
 }
 
@@ -64,29 +67,33 @@ fn resolve_runtime_for_start(backend_dir: &PathBuf, dev_profile: bool) -> Result
 pub async fn get_backend_status(
     state: State<'_, BackendState>,
 ) -> Result<BackendStatusDto, String> {
-    let runtime = match resolve_runtime_for_status(&state.backend_dir, state.dev_profile) {
-        Ok(runtime) => runtime,
+    let app_runtime = match resolve_runtime_for_status(&state.backend_dir) {
+        Ok(app_runtime) => app_runtime,
         Err(status) => return Ok(status),
     };
+    let base_url = state.base_url.clone();
     let mut guard = state.child.lock().await;
     if let Some(child) = guard.as_mut() {
         match child.process.try_wait() {
             Ok(Some(_status)) => {
                 let stderr = backend::parse_uvicorn_stderr(&backend::buffered_stderr(child));
                 *guard = None;
+                if backend::is_health_ok(&base_url).await {
+                    return Ok(BackendStatusDto::Ready { base_url });
+                }
                 return Ok(BackendStatusDto::Crashed { stderr });
             }
             Ok(None) => {
-                return Ok(BackendStatusDto::Ready {
-                    base_url: state.base_url.clone(),
-                });
+                return Ok(BackendStatusDto::Ready { base_url });
             }
             Err(e) => return Err(e.to_string()),
         }
     }
-    let mut child = backend::spawn_uvicorn(&runtime, &state.backend_dir, state.dev_profile)
+    if backend::is_health_ok(&base_url).await {
+        return Ok(BackendStatusDto::Ready { base_url });
+    }
+    let mut child = backend::spawn_backend(&app_runtime, state.dev_profile, true)
         .map_err(|e| e.to_string())?;
-    let base_url = state.base_url.clone();
     match backend::wait_for_ready(&base_url, &mut child, BACKEND_START_TIMEOUT).await {
         Ok(()) => {
             *guard = Some(child);
@@ -97,7 +104,7 @@ pub async fn get_backend_status(
             let stderr = match &e {
                 BackendStartError::Crashed { stderr, .. } => stderr.clone(),
                 BackendStartError::Timeout(_) => format!(
-                    "backend did not respond within {}s; startup may still be warming up portable runtime",
+                    "backend did not respond within {}s; check backend/.venv and vendor tools",
                     BACKEND_START_TIMEOUT.as_secs()
                 ),
                 BackendStartError::Spawn(s) => s.clone(),
@@ -108,31 +115,34 @@ pub async fn get_backend_status(
 }
 
 #[tauri::command]
-pub async fn run_first_time_setup_cmd() -> Result<(), SetupError> {
-    Err(SetupError::SyncFailed("portable builds do not run first-time setup; rebuild the portable-runtime folder".into()))
+pub async fn run_first_time_setup_cmd(state: State<'_, BackendState>) -> Result<(), SetupError> {
+    crate::setup::run_first_time_setup(&state.backend_dir, |_| {}).await
 }
 
 #[tauri::command]
 pub async fn restart_backend(
     state: State<'_, BackendState>,
 ) -> Result<(), BackendStartError> {
-    let runtime = resolve_runtime_for_start(&state.backend_dir, state.dev_profile)?;
-    {
-        let mut guard = state.child.lock().await;
-        if let Some(mut c) = guard.take() {
-            let _ = c.process.start_kill();
+    state.recovering.store(true, Ordering::SeqCst);
+    let result = async {
+        let app_runtime = resolve_runtime_for_start(&state.backend_dir)?;
+        {
+            let mut guard = state.child.lock().await;
+            if let Some(mut c) = guard.take() {
+                let _ = c.process.start_kill();
+            }
         }
+        let mut child = backend::spawn_backend(&app_runtime, state.dev_profile, true)?;
+        backend::wait_for_ready(&state.base_url, &mut child, BACKEND_START_TIMEOUT).await?;
+        let mut guard = state.child.lock().await;
+        *guard = Some(child);
+        Ok(())
     }
-    let mut child = backend::spawn_uvicorn(&runtime, &state.backend_dir, state.dev_profile)?;
-    backend::wait_for_ready(&state.base_url, &mut child, BACKEND_START_TIMEOUT).await?;
-    let mut guard = state.child.lock().await;
-    *guard = Some(child);
-    Ok(())
+    .await;
+    state.recovering.store(false, Ordering::SeqCst);
+    result
 }
 
-// Devtools are opened via the F12 key in the WebView.
-// Tauri's high-level API removed the toggle; keep the command as a stub
-// so the frontend button still resolves.
 #[tauri::command]
 pub fn open_devtools(_window: WebviewWindow) {
 }
@@ -146,18 +156,4 @@ pub fn open_folder(path: String) -> Result<(), String> {
     open::that(&folder).map_err(|e| e.to_string())
 }
 
-// BackendStatus is re-exported for any caller that needs the raw type.
 pub use backend::BackendStatus as _BackendStatus;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn repo_root_comes_from_backend_dir() {
-        assert_eq!(
-            repo_root_from_backend_dir(&PathBuf::from("C:/repo/backend")),
-            PathBuf::from("C:/repo"),
-        );
-    }
-}

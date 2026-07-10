@@ -34,11 +34,11 @@ def annotate_translation_duration(segment: dict[str, Any], *, speaking_rate_wps:
     return updated
 
 
-def duration_prompt_suffix(duration_budget: float) -> str:
+def duration_prompt_suffix(duration_budget: float, *, language_label: str = "Vietnamese") -> str:
     if duration_budget <= 0:
         return ""
     return (
-        f" Keep the Vietnamese line natural and concise enough for about {duration_budget:.2f} seconds of speech."
+        f" Keep the {language_label} line natural and concise enough for about {duration_budget:.2f} seconds of speech."
         " Preserve names, numbers, core meaning, and causal relationships."
     )
 

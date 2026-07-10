@@ -1,14 +1,15 @@
-# macOS Build (Apple Silicon)
+---
+description: macOS dev setup for Apple Silicon
+alwaysApply: false
+globs:
+  - "**/*"
+---
 
-When the user asks to build, set up, or package DouyinVietnamizer on macOS (M1/M2/M3/M4):
+# macOS Development (Apple Silicon)
 
-1. Read and follow `docs/BUILD_MACOS.md` end-to-end.
-2. Run steps in order; verify each step before continuing.
-3. **Always** build VoxCPM2 CLI before the portable app:
-   - `pnpm run voxcpm:build:mac` (or `bash scripts/build-voxcpm2-mac.sh`)
-   - Requires Xcode Command Line Tools and `cmake` (`brew install cmake`).
-4. Full portable release: `pnpm run tauri:build:mac:m4`
-5. Do **not** commit `backend/models/`, `dist-portable/`, `.cache/`, or test WAV artifacts.
-6. This platform uses Metal/CPU — not CUDA. Do not apply Windows-only CUDA build steps on macOS.
+When building or running DouyinVietnamizer on macOS (M1–M4):
 
-For dev mode (`tauri:dev`), symlink or set `DV_PORTABLE_RUNTIME_DIR` to `dist-portable/macos-staging/portable-runtime` per the doc.
+1. Read `docs/BUILD_MACOS.md` for tool setup.
+2. Use dev workflows: `pnpm run setup`, `pnpm run dev`, or `pnpm tauri:dev`
+3. Do **not** commit `backend/models/`, `backend/data/`, `.cache/`, or test WAV artifacts.
+4. This platform uses Metal/CPU — not CUDA. Do not apply Windows-only CUDA build steps on macOS.

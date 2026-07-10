@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -37,6 +38,8 @@ VOICE_UPLOAD_MIME_SUFFIXES = {
     "video/mp2t": ".mp3",
 }
 VOICE_UPLOAD_SUFFIXES = frozenset({".wav", ".mp3"})
+VOICE_CLONE_BACKENDS = frozenset({"omnivoice"})
+logger = logging.getLogger(__name__)
 
 
 def _voice_upload_suffix(file: UploadFile) -> str:
@@ -61,6 +64,61 @@ def _read_transcript_sidecar(wav_path: Path) -> str:
         return wav_path.with_suffix(".txt").read_text(encoding="utf-8").strip()
     except OSError:
         return ""
+
+
+def _resolve_omnivoice_preview_clone(
+    *,
+    preview_voice: str,
+    settings: dict[str, Any],
+    explicit_anchor: str | None,
+    clone: bool,
+) -> tuple[str | None, str | None]:
+    """Return ``(ref_audio_path, anchor_text)`` when preview should use voice clone."""
+    ref_audio = str(settings.get("omnivoice_ref_audio") or "").strip() or None
+    voice_value = (preview_voice or "").strip()
+    if clone:
+        candidate = voice_value if Path(voice_value).is_file() else ref_audio
+        if not candidate:
+            return None, None
+        anchor = (explicit_anchor or "").strip() or _read_transcript_sidecar(Path(candidate))
+        if not anchor:
+            anchor = str(settings.get("omnivoice_ref_text") or "").strip() or None
+        return candidate, anchor
+
+    if ref_audio:
+        anchor = (explicit_anchor or "").strip() or str(settings.get("omnivoice_ref_text") or "").strip()
+        if not anchor:
+            anchor = _read_transcript_sidecar(Path(ref_audio))
+        return ref_audio, anchor or None
+
+    if voice_value.lower().endswith(".wav") and Path(voice_value).is_file():
+        anchor = (explicit_anchor or "").strip() or _read_transcript_sidecar(Path(voice_value))
+        if not anchor:
+            anchor = str(settings.get("omnivoice_ref_text") or "").strip() or None
+        return voice_value, anchor
+
+    return None, None
+
+
+def _normalize_voice_backend(value: str | None) -> str:
+    candidate = (value or "omnivoice").strip().lower() or "omnivoice"
+    if candidate not in VOICE_CLONE_BACKENDS:
+        raise AppError(
+            422,
+            ErrorInfo(
+                code="INVALID_VOICE_BACKEND",
+                message="Voice backend must be omnivoice.",
+                action="Use omnivoice for cloned voice operations.",
+            ),
+        )
+    return candidate
+
+
+def _cloned_voice_dir(data_dir: Path, backend: str) -> Path:
+    _normalize_voice_backend(backend)
+    target = data_dir / "cloned_voices_omnivoice"
+    target.mkdir(exist_ok=True)
+    return target
 
 
 def _convert_audio_to_wav(input_path: Path, output_path: Path) -> Path:
@@ -116,35 +174,112 @@ def _convert_audio_to_wav(input_path: Path, output_path: Path) -> Path:
     return output_path
 
 
-def _transcribe_anchor_for_voice(wav_path: Path) -> str:
+def _transcribe_anchor_for_voice(wav_path: Path) -> tuple[str, str | None]:
     try:
         with wave.open(str(wav_path), "rb"):
             pass
     except Exception:
-        return ""
+        return "", "Invalid WAV container or unreadable audio file."
+    last_error: str | None = None
     try:
         from .adapters.asr import reset_model_cache, transcribe_audio
 
         project_root = Path(__file__).resolve().parents[2]
         vendor_dir = Path(os.environ.get("DV_VENDOR_DIR", project_root / "vendor"))
-        result = transcribe_audio(
-            wav_path,
-            vendor_dir=vendor_dir,
-            language="Vietnamese",
-        )
-        segments = result.get("segments", []) if isinstance(result, dict) else result
-        return " ".join(
-            str(segment.get("text", "")).strip()
-            for segment in segments
-            if str(segment.get("text", "")).strip()
-        ).strip()
-    except Exception:
-        return ""
+        for language in ("Vietnamese", "Chinese", "English"):
+            try:
+                result = transcribe_audio(
+                    wav_path,
+                    vendor_dir=vendor_dir,
+                    language=language,
+                )
+                segments = result.get("segments", []) if isinstance(result, dict) else result
+                transcript = " ".join(
+                    str(segment.get("text", "")).strip()
+                    for segment in segments
+                    if str(segment.get("text", "")).strip()
+                ).strip()
+                if transcript:
+                    return transcript, None
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                logger.warning(
+                    "Voice transcript attempt failed for %s (language=%s): %s",
+                    wav_path,
+                    language,
+                    exc,
+                )
+        fallback_transcript, fallback_error = _transcribe_anchor_with_backend_venv(wav_path)
+        if fallback_transcript:
+            return fallback_transcript, None
+        if fallback_error:
+            last_error = fallback_error
+        return "", last_error
+    except Exception as exc:
+        logger.warning("Voice transcript failed for %s: %s", wav_path, exc)
+        return "", f"{type(exc).__name__}: {exc}"
     finally:
         try:
             reset_model_cache()
         except Exception:
             pass
+
+
+def _transcribe_anchor_with_backend_venv(wav_path: Path) -> tuple[str, str | None]:
+    project_root = Path(__file__).resolve().parents[2]
+    backend_dir = project_root / "backend"
+    backend_python = backend_dir / ".venv" / "Scripts" / "python.exe"
+    if not backend_python.is_file():
+        return "", "Backend .venv Python not found for ASR fallback."
+    vendor_dir = Path(os.environ.get("DV_VENDOR_DIR", project_root / "vendor"))
+    script = (
+        "import json\n"
+        "from pathlib import Path\n"
+        "from dv_backend.adapters.asr import transcribe_audio\n"
+        f"wav = Path(r'''{str(wav_path)}''')\n"
+        f"vendor = Path(r'''{str(vendor_dir)}''')\n"
+        "last_error = None\n"
+        "for language in ('Vietnamese','Chinese','English'):\n"
+        "    try:\n"
+        "        result = transcribe_audio(wav, vendor_dir=vendor, language=language, device='cuda:0')\n"
+        "        segments = result.get('segments', []) if isinstance(result, dict) else result\n"
+        "        transcript = ' '.join(str(s.get('text','')).strip() for s in segments if str(s.get('text','')).strip()).strip()\n"
+        "        if transcript:\n"
+        "            print(json.dumps({'ok': True, 'transcript': transcript}, ensure_ascii=False))\n"
+        "            raise SystemExit(0)\n"
+        "    except Exception as exc:\n"
+        "        last_error = f'{type(exc).__name__}: {exc}'\n"
+        "print(json.dumps({'ok': False, 'error': last_error}, ensure_ascii=False))\n"
+    )
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    try:
+        completed = subprocess.run(
+            [str(backend_python), "-c", script],
+            cwd=str(backend_dir),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            env=env,
+        )
+    except Exception as exc:
+        return "", f"ASR fallback subprocess failed: {exc}"
+    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    if not lines:
+        detail = completed.stderr.strip()[-1200:]
+        return "", (detail or f"ASR fallback exited with code {completed.returncode}")
+    try:
+        payload = json.loads(lines[-1])
+    except Exception:
+        detail = (completed.stderr or completed.stdout).strip()[-1200:]
+        return "", (detail or "ASR fallback returned invalid payload.")
+    if payload.get("ok") and str(payload.get("transcript") or "").strip():
+        return str(payload.get("transcript") or "").strip(), None
+    return "", str(payload.get("error") or "ASR fallback returned empty transcript.")
 
 
 def _synthesize_voice_preview(
@@ -159,7 +294,7 @@ def _synthesize_voice_preview(
     backend: str | None = None,
 ) -> Path:
     from .adapters.tts import (
-        VOXCPM_INSTRUCT_PREFIX,
+        TTS_VOICE_INSTRUCT_PREFIX,
         create_tts_adapter,
         resolve_tts_voice,
         tts_backend_from_settings,
@@ -184,10 +319,10 @@ def _synthesize_voice_preview(
     tts = create_tts_adapter(preview_settings)
     output_wav = Path(tempfile.gettempdir()) / f"voice_preview_{output_suffix}_{uuid4().hex}.wav"
     preview_voice = (voice or "").strip() or resolve_tts_voice(preview_settings)
-    if resolved_backend == "voxcpm":
-        instruct = str(preview_settings.get("voxcpm_instruct") or "").strip()
+    if resolved_backend == "omnivoice":
+        instruct = str(preview_settings.get("omnivoice_instruct") or "").strip()
         if instruct and not (voice or "").strip().lower().endswith(".wav"):
-            preview_voice = f"{VOXCPM_INSTRUCT_PREFIX}{instruct}"
+            preview_voice = f"{TTS_VOICE_INSTRUCT_PREFIX}{instruct}"
     try:
         synthesize_kwargs = {
             "text": cleaned_text,
@@ -200,19 +335,39 @@ def _synthesize_voice_preview(
                 clone_mode=clone_mode,
                 anchor_text=anchor_text,
             )
+        if resolved_backend == "omnivoice":
+            ref_audio, resolved_anchor = _resolve_omnivoice_preview_clone(
+                preview_voice=preview_voice,
+                settings=preview_settings,
+                explicit_anchor=anchor_text,
+                clone=clone,
+            )
+            if ref_audio:
+                preview_voice = ref_audio
+                synthesize_kwargs["voice"] = preview_voice
+                if not resolved_anchor:
+                    raise AppError(
+                        422,
+                        ErrorInfo(
+                            code="OMNIVOICE_REF_TEXT_REQUIRED",
+                            message="OmniVoice clone requires ref_text that matches the reference audio.",
+                            action="Paste the matching ref_text in Settings or re-upload the voice in Clone tab.",
+                        ),
+                    )
+                synthesize_kwargs["anchor_text"] = resolved_anchor
         tts.synthesize(**synthesize_kwargs)
     except AppError:
         raise
     except Exception as exc:
         labels = {
-            "voxcpm": "VoxCPM2",
+            "omnivoice": "OmniVoice",
             "edge_tts": "Edge TTS",
             "google_tts": "Google TTS",
             "gemini_tts": "Gemini TTS",
         }
         label = labels.get(resolved_backend, resolved_backend)
         actions = {
-            "voxcpm": "Run 'python scripts/setup_voxcpm.py' for VoxCPM2.",
+            "omnivoice": "Run 'python scripts/setup_omnivoice.py' for OmniVoice.",
             "edge_tts": "Check your internet connection and Edge TTS voice selection.",
             "google_tts": "Check your Google Cloud TTS API key and voice selection.",
             "gemini_tts": "Verify Gemini API keys in Settings and retry.",
@@ -268,7 +423,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         runtime.run()
 
     runner = JobRunner(config, database)
-
+    raw_settings = settings.get_raw_all()
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         try:
@@ -287,7 +442,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "version": "0.1.0"}
+        return {
+            "status": "ok",
+            "version": "0.1.0",
+            "api_file": str(Path(__file__).resolve()),
+            "supports_transcript_error": "true",
+        }
 
     @app.get("/api/capabilities")
     def capabilities() -> dict:
@@ -337,15 +497,6 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             vendor_dir=vendor_dir,
             default_manifest_path=default_manifest
         )
-        return {"status": "started" if success else "already_running"}
-
-    @app.post("/api/runtime/bootstrap-pyannote")
-    def bootstrap_pyannote() -> dict:
-        from .bootstrap import BootstrapManager
-
-        project_root = Path(__file__).resolve().parents[2]
-        vendor_dir = Path(os.environ.get("DV_VENDOR_DIR", project_root / "vendor"))
-        success = BootstrapManager.start_pyannote_bootstrap(vendor_dir)
         return {"status": "started" if success else "already_running"}
 
     @app.get("/api/runtime/bootstrap-progress")
@@ -752,9 +903,16 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         voice: str | None = None
         settings: dict[str, Any] | None = None
 
+    @app.get("/api/dubbing/languages")
+    def list_dubbing_languages() -> list[dict]:
+        from .dubbing_languages import list_dub_language_options
+
+        return list_dub_language_options()
+
     @app.get("/api/tts/voices")
-    def list_tts_voices(backend: str = "edge_tts") -> list[dict]:
+    def list_tts_voices(backend: str = "edge_tts", locale: str | None = None) -> list[dict]:
         from .adapters.tts import GEMINI_TTS_VOICES, SUPPORTED_TTS_BACKENDS
+        from .dubbing_languages import dub_language_config, normalize_dub_language
 
         resolved = (backend or "").strip().lower()
         if resolved not in SUPPORTED_TTS_BACKENDS:
@@ -766,13 +924,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     action="Choose one of: " + ", ".join(SUPPORTED_TTS_BACKENDS),
                 ),
             )
+        lang_config = dub_language_config(normalize_dub_language(locale))
         if resolved == "edge_tts":
             from .adapters.edge_tts import list_edge_tts_voices
 
-            return list_edge_tts_voices()
+            return list_edge_tts_voices(locale_prefix=str(lang_config["edge_locale"]))
         if resolved == "google_tts":
-            from .adapters.google_tts import GOOGLE_TTS_VOICES
+            from .adapters.google_tts import list_google_tts_voices
 
+            voices = list_google_tts_voices(locale=str(lang_config["google_locale"]))
             return [
                 {
                     "id": voice["id"],
@@ -781,29 +941,23 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     "tier": voice.get("tier"),
                     "kind": "google_cloud",
                 }
-                for voice in GOOGLE_TTS_VOICES
+                for voice in voices
             ]
         if resolved == "gemini_tts":
             return [{"id": voice["id"], "name": voice["name"], "kind": "gemini"} for voice in GEMINI_TTS_VOICES]
-        presets = [
-            "Ngọc Lan",
-            "Minh Anh",
-            "Hoài Nam",
-            "Thu Hà",
-            "Quang Huy",
-            "Mai Phương",
-            "Đức Anh",
-            "Bảo Trâm",
-            "Gia Hân",
-            "Tuấn Kiệt",
-        ]
-        return [{"id": voice, "name": voice, "kind": "preset"} for voice in presets]
+        if resolved == "omnivoice":
+            return [
+                {"id": "auto", "name": "Auto voice", "kind": "preset"},
+                {"id": "clone", "name": "Clone từ audio tham chiếu", "kind": "preset"},
+                {"id": "design", "name": "Voice design (mô tả giọng)", "kind": "preset"},
+            ]
+        return []
 
     @app.post("/api/tts/preview")
     def preview_tts(payload: TtsPreviewPayload) -> FileResponse:
         raw_settings = settings.get_raw_all()
         merged_settings = {**raw_settings, **(payload.settings or {})}
-        backend = (payload.backend or merged_settings.get("tts_backend") or "voxcpm").strip().lower()
+        backend = (payload.backend or merged_settings.get("tts_backend") or "omnivoice").strip().lower()
         merged_settings["tts_backend"] = backend
         output_wav = _synthesize_voice_preview(
             voice=payload.voice,
@@ -820,7 +974,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.get("/api/voices/presets")
     def list_preset_voices() -> list[dict]:
-        return [item for item in list_tts_voices("voxcpm") if item.get("kind") == "preset"]
+        return [item for item in list_tts_voices("omnivoice") if item.get("kind") == "preset"]
 
     @app.post("/api/voices/preview")
     def preview_voice(payload: VoicePreviewPayload) -> FileResponse:
@@ -840,19 +994,19 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             voice=voice or None,
             text=payload.text,
             settings=raw_settings,
-            output_suffix="voxcpm",
-            backend=(payload.backend or "voxcpm").strip().lower(),
+            output_suffix="omnivoice",
+            backend=(payload.backend or "omnivoice").strip().lower(),
         )
-        return FileResponse(str(output_wav), media_type="audio/wav", filename="preview_voxcpm.wav")
+        return FileResponse(str(output_wav), media_type="audio/wav", filename="preview_omnivoice.wav")
 
     @app.get("/api/cloned-voices")
-    def list_cloned_voices() -> list[dict]:
+    def list_cloned_voices(backend: str = "omnivoice") -> list[dict]:
+        resolved_backend = _normalize_voice_backend(backend)
         rows = database.connection.execute(
-            "SELECT id, name, wav_filename, transcript, created_at FROM cloned_voices ORDER BY created_at DESC"
+            "SELECT id, name, wav_filename, transcript, created_at FROM cloned_voices WHERE backend = ? ORDER BY created_at DESC",
+            (resolved_backend,),
         ).fetchall()
-
-        cloned_dir = config.data_dir / "cloned_voices"
-        cloned_dir.mkdir(exist_ok=True)
+        cloned_dir = _cloned_voice_dir(config.data_dir, resolved_backend)
 
         voices = []
         for r in rows:
@@ -862,6 +1016,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 voices.append({
                     "id": r["id"],
                     "name": r["name"],
+                    "backend": resolved_backend,
                     "wav_filename": r["wav_filename"],
                     "wav_path": str(wav_path),
                     "transcript": transcript,
@@ -871,9 +1026,23 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return voices
 
     @app.get("/api/cloned-voices/{voice_id}/wav")
-    def get_cloned_voice_wav(voice_id: str) -> FileResponse:
-        cloned_dir = config.data_dir / "cloned_voices"
-        wav_path = cloned_dir / f"{voice_id}.wav"
+    def get_cloned_voice_wav(voice_id: str, backend: str = "omnivoice") -> FileResponse:
+        resolved_backend = _normalize_voice_backend(backend)
+        cloned_dir = _cloned_voice_dir(config.data_dir, resolved_backend)
+        row = database.connection.execute(
+            "SELECT wav_filename FROM cloned_voices WHERE id = ? AND backend = ?",
+            (voice_id, resolved_backend),
+        ).fetchone()
+        if not row:
+            raise AppError(
+                404,
+                ErrorInfo(
+                    code="VOICE_NOT_FOUND",
+                    message="The requested voice does not exist for this backend.",
+                    action="Verify backend and voice ID.",
+                )
+            )
+        wav_path = cloned_dir / row["wav_filename"]
         if not wav_path.is_file():
             raise AppError(
                 404,
@@ -886,9 +1055,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return FileResponse(str(wav_path), media_type="audio/wav", filename=f"{voice_id}.wav")
 
     @app.post("/api/cloned-voices", status_code=201)
-    def create_cloned_voice(name: str = Form(...), file: UploadFile = File(...)) -> dict:
-        cloned_dir = config.data_dir / "cloned_voices"
-        cloned_dir.mkdir(exist_ok=True)
+    def create_cloned_voice(
+        name: str = Form(...),
+        file: UploadFile = File(...),
+        backend: str = Form("omnivoice"),
+        ref_text: str = Form(""),
+    ) -> dict:
+        resolved_backend = _normalize_voice_backend(backend)
+        cloned_dir = _cloned_voice_dir(config.data_dir, resolved_backend)
         voice_name = name.strip()
         if not voice_name:
             raise AppError(
@@ -901,7 +1075,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             )
 
         existing = database.connection.execute(
-            "SELECT 1 FROM cloned_voices WHERE name = ?", (voice_name,)
+            "SELECT 1 FROM cloned_voices WHERE name = ? AND backend = ?", (voice_name, resolved_backend)
         ).fetchone()
         if existing:
             raise AppError(
@@ -943,31 +1117,44 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             except Exception:
                 pass
 
-        transcript = _transcribe_anchor_for_voice(wav_path).strip()
+        transcript = (ref_text or "").strip()
+        if not transcript:
+            raise AppError(
+                422,
+                ErrorInfo(
+                    code="OMNIVOICE_REF_TEXT_REQUIRED",
+                    message="OmniVoice clone requires ref_text that matches the reference audio.",
+                    action="Paste the exact transcript of the uploaded audio sample.",
+                ),
+            )
+        transcript_error = None
         if transcript:
             wav_path.with_suffix(".txt").write_text(transcript, encoding="utf-8")
 
         now = datetime.now(timezone.utc).isoformat()
         with database.connection:
             database.connection.execute(
-                "INSERT INTO cloned_voices (id, name, wav_filename, transcript, created_at) VALUES (?, ?, ?, ?, ?)",
-                (voice_id, voice_name, wav_filename, transcript, now)
+                "INSERT INTO cloned_voices (id, backend, name, wav_filename, transcript, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (voice_id, resolved_backend, voice_name, wav_filename, transcript, now)
             )
 
         return {
             "id": voice_id,
             "name": voice_name,
+            "backend": resolved_backend,
             "wav_filename": wav_filename,
             "wav_path": str(wav_path),
             "transcript": transcript,
+            "transcript_error": transcript_error,
             "transcribed": bool(transcript),
             "created_at": now
         }
 
     @app.delete("/api/cloned-voices/{voice_id}")
-    def delete_cloned_voice(voice_id: str) -> dict:
+    def delete_cloned_voice(voice_id: str, backend: str = "omnivoice") -> dict:
+        resolved_backend = _normalize_voice_backend(backend)
         row = database.connection.execute(
-            "SELECT wav_filename FROM cloned_voices WHERE id = ?", (voice_id,)
+            "SELECT wav_filename FROM cloned_voices WHERE id = ? AND backend = ?", (voice_id, resolved_backend)
         ).fetchone()
         if not row:
             raise AppError(
@@ -980,7 +1167,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             )
             
         wav_filename = row["wav_filename"]
-        cloned_dir = config.data_dir / "cloned_voices"
+        cloned_dir = _cloned_voice_dir(config.data_dir, resolved_backend)
         wav_path = cloned_dir / wav_filename
         
         if wav_path.is_file():
@@ -995,7 +1182,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
         with database.connection:
             database.connection.execute(
-                "DELETE FROM cloned_voices WHERE id = ?", (voice_id,)
+                "DELETE FROM cloned_voices WHERE id = ? AND backend = ?", (voice_id, resolved_backend)
             )
             
         return {"status": "deleted"}
@@ -1003,11 +1190,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     class VoiceTestPayload(BaseModel):
         text: str
         mode: str | None = None
+        backend: str | None = None
 
     @app.post("/api/cloned-voices/{voice_id}/test")
     def test_cloned_voice(voice_id: str, payload: VoiceTestPayload) -> FileResponse:
+        resolved_backend = _normalize_voice_backend(payload.backend or "omnivoice")
         row = database.connection.execute(
-            "SELECT wav_filename, transcript FROM cloned_voices WHERE id = ?", (voice_id,)
+            "SELECT wav_filename, transcript FROM cloned_voices WHERE id = ? AND backend = ?",
+            (voice_id, resolved_backend),
         ).fetchone()
         if not row:
             raise AppError(
@@ -1020,7 +1210,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             )
 
         wav_filename = row["wav_filename"]
-        cloned_dir = config.data_dir / "cloned_voices"
+        cloned_dir = _cloned_voice_dir(config.data_dir, resolved_backend)
         wav_path = cloned_dir / wav_filename
         if not wav_path.is_file():
             raise AppError(
@@ -1043,6 +1233,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 )
             )
         anchor_text = (row["transcript"] or _read_transcript_sidecar(wav_path)).strip()
+        if resolved_backend == "omnivoice" and not anchor_text:
+            raise AppError(
+                422,
+                ErrorInfo(
+                    code="OMNIVOICE_REF_TEXT_REQUIRED",
+                    message="This OmniVoice clone is missing ref_text.",
+                    action="Re-upload the voice sample and paste the matching ref_text.",
+                ),
+            )
         raw_settings = settings.get_raw_all()
         try:
             output_wav = _synthesize_voice_preview(
@@ -1053,6 +1252,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 clone=True,
                 clone_mode=clone_mode,
                 anchor_text=anchor_text,
+                backend=resolved_backend,
             )
         except AppError as e:
             raise e

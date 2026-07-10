@@ -49,7 +49,7 @@ class RuntimeGpuStatus(BaseModel):
     torch_allocated_mb: float | None = None
     torch_reserved_mb: float | None = None
     torch_peak_mb: float | None = None
-    active_voxcpm_clients: int = 0
+    active_omnivoice_clients: int = 0
     resident_models: list[str] = Field(default_factory=list)
     helper_processes: list[str] = Field(default_factory=list)
 
@@ -78,8 +78,8 @@ def _list_gpu_helper_processes() -> list[str]:
         if os.name == "nt":
             script = (
                 "$targets = Get-CimInstance Win32_Process | Where-Object { "
-                "$_.Name -in @('llama-tts-server.exe','voxcpm2-cli.exe') -or "
-                "((($_.CommandLine -as [string]) -ne '') -and ($_.CommandLine -match 'dv_backend\\.adapters\\.voxcpm_worker')) "
+                "$_.Name -in @('llama-tts-server.exe') -or "
+                "((($_.CommandLine -as [string]) -ne '') -and ($_.CommandLine -match 'dv_backend\\.adapters\\.omnivoice_worker')) "
                 "}; "
                 "foreach ($p in $targets) { "
                 "$cmd = ($p.CommandLine -as [string]); "
@@ -112,8 +112,7 @@ def _list_gpu_helper_processes() -> list[str]:
             lowered = line.lower()
             if (
                 "llama-tts-server" in lowered
-                or "voxcpm2-cli" in lowered
-                or "dv_backend.adapters.voxcpm_worker" in line
+                or "dv_backend.adapters.omnivoice_worker" in line
             ):
                 matches.append(_truncate_process_detail(line))
         return matches
@@ -127,8 +126,8 @@ def _terminate_gpu_helper_processes() -> list[str]:
         if os.name == "nt":
             script = (
                 "$targets = Get-CimInstance Win32_Process | Where-Object { "
-                "$_.Name -in @('llama-tts-server.exe','voxcpm2-cli.exe') -or "
-                "((($_.CommandLine -as [string]) -ne '') -and ($_.CommandLine -match 'dv_backend\\.adapters\\.voxcpm_worker')) "
+                "$_.Name -in @('llama-tts-server.exe') -or "
+                "((($_.CommandLine -as [string]) -ne '') -and ($_.CommandLine -match 'dv_backend\\.adapters\\.omnivoice_worker')) "
                 "}; "
                 "foreach ($p in $targets) { "
                 "Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue "
@@ -155,8 +154,7 @@ def _terminate_gpu_helper_processes() -> list[str]:
                 lowered = line.lower()
                 if (
                     "llama-tts-server" not in lowered
-                    and "voxcpm2-cli" not in lowered
-                    and "dv_backend.adapters.voxcpm_worker" not in line
+                    and "dv_backend.adapters.omnivoice_worker" not in line
                 ):
                     continue
                 pid_text = line.strip().split(maxsplit=1)[0]
@@ -188,7 +186,7 @@ def _clear_torch_cuda_state() -> None:
 
 
 def collect_runtime_gpu_status() -> RuntimeGpuStatus:
-    from .adapters.voxcpm_client import client_debug_snapshot
+    from .adapters.omnivoice_client import client_debug_snapshot
     from .gpu_manager import global_gpu_manager
 
     client_snapshot = client_debug_snapshot()
@@ -197,7 +195,7 @@ def collect_runtime_gpu_status() -> RuntimeGpuStatus:
 
     status = RuntimeGpuStatus(
         cuda_supported=False,
-        active_voxcpm_clients=int(client_snapshot.get("count") or 0),
+        active_omnivoice_clients=int(client_snapshot.get("count") or 0),
         resident_models=[
             f"{item['family']} ({item['device']}): {item['model']}"
             for item in manager_snapshot.get("resident_models", [])
@@ -244,12 +242,12 @@ def release_vram_resources(*, runner=None) -> ReleaseVramResult:
             errors.append(f"managed_job_processes: {exc}")
 
     try:
-        from .adapters.voxcpm_client import release_all_clients
+        from .adapters.omnivoice_client import release_all_clients as release_omnivoice_clients
 
-        release_all_clients()
-        released.append("voxcpm_clients")
+        release_omnivoice_clients()
+        released.append("omnivoice_clients")
     except Exception as exc:  # noqa: BLE001
-        errors.append(f"voxcpm_clients: {exc}")
+        errors.append(f"omnivoice_clients: {exc}")
 
     try:
         from .adapters.asr import reset_model_cache
@@ -317,7 +315,7 @@ class RuntimeSmokeTestService:
             self._check_storage(),
             self._check_sqlite(),
             self._check_qwen3_asr(),
-            self._check_voxcpm(),
+            self._check_omnivoice(),
         ]
         try:
             manifest = VendorManifest.load(self.manifest_path)
@@ -385,9 +383,20 @@ class RuntimeSmokeTestService:
 
     def _check_qwen3_asr(self) -> RuntimeCheck:
         try:
+            import importlib.util
+
             from .adapters.asr import DEFAULT_ASR_MODEL
             from .hardware import accelerator_available, resolve_inference_device
 
+            if importlib.util.find_spec("qwen_asr") is None:
+                return RuntimeCheck(
+                    id="qwen3_asr",
+                    display_name="Qwen3-ASR GPU",
+                    status="blocked",
+                    required=True,
+                    message="Qwen3-ASR Python package is missing in the backend runtime.",
+                    action="Install backend dependencies (qwen-asr and related packages), then rerun smoke test.",
+                )
             if not accelerator_available():
                 return RuntimeCheck(
                     id="qwen3_asr",
@@ -430,54 +439,27 @@ class RuntimeSmokeTestService:
                 detail=str(error),
             )
 
-    def _check_voxcpm(self) -> RuntimeCheck:
-        from .voxcpm_env import is_voxcpm_available, resolve_voxcpm_cli, voxcpm_venv_root
-        from .voxcpm_gguf import resolve_voxcpm_gguf_paths, VOXCPM_DEFAULT_MODEL
-        from .adapters.voxcpm_client import acquire_client, release_all_clients
+    def _check_omnivoice(self) -> RuntimeCheck:
+        from .omnivoice_env import is_omnivoice_available, omnivoice_venv_root, resolve_omnivoice_python
 
-        if not is_voxcpm_available():
+        if not is_omnivoice_available():
             return RuntimeCheck(
-                id="voxcpm",
-                display_name="VoxCPM2",
-                status="blocked",
-                required=True,
-                message="VoxCPM2 GGUF runtime is not ready (missing voxcpm2-cli or model files).",
-                action="Run 'python scripts/setup_voxcpm.py' and install voxcpm2-cli from llama.cpp-omni.",
-                resolved_path=str(voxcpm_venv_root()),
+                id="omnivoice",
+                display_name="OmniVoice",
+                status="warning",
+                required=False,
+                message="OmniVoice is not installed in the isolated virtualenv.",
+                action="Run 'python scripts/setup_omnivoice.py' to enable the OmniVoice TTS backend.",
+                resolved_path=str(omnivoice_venv_root()),
             )
-        try:
-            client = acquire_client(
-                data_dir=self.config.data_dir,
-                model=VOXCPM_DEFAULT_MODEL,
-                device="cpu",
-                num_steps=8,
-            )
-            client._ensure_alive()
-            cli_path = str(resolve_voxcpm_cli())
-            baselm, acoustic = resolve_voxcpm_gguf_paths(VOXCPM_DEFAULT_MODEL)
-            detail = f"cli={cli_path}; baselm={baselm.name}; acoustic={acoustic.name}"
-        except Exception as exc:  # noqa: BLE001
-            return RuntimeCheck(
-                id="voxcpm",
-                display_name="VoxCPM2",
-                status="blocked",
-                required=True,
-                message="VoxCPM2 worker could not be started.",
-                action="Re-run 'python scripts/setup_voxcpm.py' and verify voxcpm2-cli.",
-                resolved_path=str(voxcpm_venv_root()),
-                detail=str(exc),
-            )
-        finally:
-            release_all_clients()
         return RuntimeCheck(
-            id="voxcpm",
-            display_name="VoxCPM2",
+            id="omnivoice",
+            display_name="OmniVoice",
             status="ready",
-            required=True,
-            message="VoxCPM2 GGUF runtime and worker are operational.",
+            required=False,
+            message="OmniVoice package is available for the OmniVoice TTS backend.",
             action="No action required.",
-            resolved_path=cli_path,
-            detail=detail,
+            resolved_path=str(resolve_omnivoice_python()),
         )
 
     def _check_espeak(self) -> RuntimeCheck:

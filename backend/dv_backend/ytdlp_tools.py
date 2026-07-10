@@ -16,17 +16,21 @@ from .models import ErrorInfo
 YTDLP_WINDOWS_RELEASE = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
 YTDLP_MACOS_RELEASE = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
 
-# Chrome first; yt-dlp is retried with each browser until one succeeds.
-COOKIE_BROWSER_FALLBACK_ORDER: tuple[str, ...] = ("chrome", "edge", "firefox", "brave")
+# Prefer Firefox first, then try other browsers.
+COOKIE_BROWSER_FALLBACK_ORDER: tuple[str, ...] = ("firefox", "chrome", "edge", "brave")
 
 
 def yt_dlp_cookie_args_for_browser(browser: str) -> list[str]:
     return ["--cookies-from-browser", browser]
 
 
+def yt_dlp_cookie_args_for_file(cookies_file: str | Path) -> list[str]:
+    return ["--cookies", str(cookies_file)]
+
+
 def format_browsers_attempted(browsers: list[str]) -> str:
     if not browsers:
-        return "chrome → edge → firefox → brave"
+        return "firefox → chrome → edge → brave"
     return " → ".join(browsers)
 
 
@@ -53,13 +57,15 @@ def classify_yt_dlp_failure(
         browser_hint = f"{cookie_browser} (đã thử: {browser_hint})"
 
     if any(token in lowered for token in ("sign in", "login required", "cookies", "cookie", "authentication")):
+        auth_hint = (
+            f"Đặt file cookies.txt (Netscape) trong Cài đặt → Tải video, hoặc đăng nhập "
+            f"{source_label} trên Firefox/Chrome/Edge/Brave. "
+            f"Đã thử: {format_browsers_attempted(browsers_attempted)}."
+        )
         return ErrorInfo(
             code="YTDLP_AUTH_REQUIRED",
             message=f"Không thể {operation} — video yêu cầu đăng nhập hoặc cookie hợp lệ ({source_label}).",
-            action=(
-                f"Đăng nhập {source_label} trên Chrome (hoặc Edge/Firefox/Brave). "
-                f"App đã thử cookie theo thứ tự: {format_browsers_attempted(browsers_attempted)}."
-            ),
+            action=auth_hint,
             detail=detail,
             retryable=True,
         )
@@ -87,7 +93,11 @@ def classify_yt_dlp_failure(
         return ErrorInfo(
             code="YTDLP_EXTRACTOR_OUTDATED",
             message=f"Không thể {operation} — nền tảng có thể đã đổi cơ chế hoặc yt-dlp đã cũ.",
-            action="Vào Cài đặt → bấm «Cập nhật yt-dlp», sau đó chạy lại job.",
+            action=(
+                "Douyin đang yêu cầu chữ ký web (không chỉ cookie). "
+                "Cập nhật yt-dlp trong Cài đặt, thử cookies.txt mới hơn; "
+                "nếu vẫn lỗi thì cần extractor mới từ yt-dlp hoặc tải file video thủ công rồi import."
+            ),
             detail=detail,
             retryable=True,
         )
@@ -129,7 +139,7 @@ def yt_dlp_version(yt_dlp_path: Path) -> str:
             ErrorInfo(
                 code="YTDLP_VERSION_FAILED",
                 message="Không đọc được phiên bản yt-dlp.",
-                action="Kiểm tra yt-dlp trong môi trường portable hoặc PATH.",
+                action="Kiểm tra yt-dlp trong vendor/ hoặc PATH.",
                 detail=_tail(result.stderr or result.stdout),
             ),
         )

@@ -7,7 +7,7 @@ import wave
 from ..errors import AppError
 from ..models import ErrorInfo
 
-SUPPORTED_TTS_BACKENDS = ("voxcpm", "edge_tts", "google_tts", "gemini_tts")
+SUPPORTED_TTS_BACKENDS = ("omnivoice", "edge_tts", "google_tts", "gemini_tts")
 CLOUD_TTS_BACKENDS = frozenset({"edge_tts", "google_tts", "gemini_tts"})
 GEMINI_TTS_VOICES = (
     {"id": "Zephyr", "name": "Zephyr (Bright)"},
@@ -17,31 +17,13 @@ GEMINI_TTS_VOICES = (
     {"id": "Fenrir", "name": "Fenrir (Excitable)"},
     {"id": "Aoede", "name": "Aoede (Breezy)"},
 )
-VOXCPM_DEFAULT_MODEL = "gguf-q8"
-VOXCPM_INSTRUCT_PREFIX = "instruct:"
-VOXCPM_MODE_DESIGN = "design"
-VOXCPM_MODE_REFERENCE = "reference"
-VOXCPM_MODE_ULTIMATE = "ultimate"
-VOXCPM_CLONE_MODES = frozenset(
-    {VOXCPM_MODE_REFERENCE, VOXCPM_MODE_ULTIMATE}
-)
-
+OMNIVOICE_DEFAULT_MODEL = "k2-fsa/OmniVoice"
+TTS_VOICE_INSTRUCT_PREFIX = "instruct:"
 MAX_TTS_CHARS = 450
+OMNIVOICE_MAX_TTS_CHARS = 240
+OMNIVOICE_EXTERNAL_SPLIT_CHARS = 280
 _TTS_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…。，！？；;])\s+")
-
-
-def _normalize_clone_mode(value: object) -> str:
-    """Coerce caller-supplied clone mode into a known enum value.
-
-    Unknown / missing values fall back to ``"reference"`` so existing callers
-    that only know about the legacy boolean clone flag keep working.
-    """
-    if not value:
-        return VOXCPM_MODE_REFERENCE
-    candidate = str(value).strip().lower()
-    if candidate in VOXCPM_CLONE_MODES:
-        return candidate
-    return VOXCPM_MODE_REFERENCE
+_OMNI_TTS_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…。，！？；;,:\-—])\s+")
 
 
 def sanitize_tts_text(text: str) -> str:
@@ -91,13 +73,92 @@ def split_tts_text(text: str, *, max_chars: int = MAX_TTS_CHARS) -> list[str]:
     return [chunk for chunk in chunks if chunk]
 
 
-def parse_voxcpm_voice(voice: str | None) -> tuple[str | None, str | None, str | None]:
+def estimate_omnivoice_duration_sec(text: str, *, speed: float = 1.0, buffer: float = 1.45) -> float:
+    """Estimate narration duration for OmniVoice clone TTS.
+
+    OmniVoice prepends ``ref_text`` to the spoken prompt when it is set. For dubbing
+    we pass an empty ``ref_text`` and must supply an explicit duration that matches
+    only the target narration text.
+    """
+    cleaned = re.sub(r"\s+", " ", sanitize_tts_text(text).strip())
+    if not cleaned:
+        return 2.0
+    chars_per_sec = 10.5 * max(0.5, min(2.0, float(speed)))
+    return max(2.0, min(45.0, (len(cleaned) / chars_per_sec) * max(1.0, float(buffer))))
+
+
+_OMNI_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…。！？])\s+")
+
+
+def split_omnivoice_sentences(text: str) -> list[str]:
+    cleaned = re.sub(r"\s+", " ", sanitize_tts_text(text).strip())
+    if not cleaned:
+        return []
+    parts = [part.strip() for part in _OMNI_SENTENCE_SPLIT_RE.split(cleaned) if part.strip()]
+    return parts or [cleaned]
+
+
+def _append_word_safe_chunks(chunks: list[str], sentence: str, max_chars: int) -> None:
+    start = 0
+    length = len(sentence)
+    while start < length:
+        end = min(start + max_chars, length)
+        if end < length:
+            space = sentence.rfind(" ", start, end)
+            if space > start + max(20, max_chars // 3):
+                end = space
+        piece = sentence[start:end].strip()
+        if piece:
+            chunks.append(piece)
+        if end <= start:
+            end = min(start + max_chars, length)
+        start = end if end > start else start + max_chars
+
+
+def split_omnivoice_tts_text(text: str, *, max_chars: int = OMNIVOICE_MAX_TTS_CHARS) -> list[str]:
+    """Split narration for OmniVoice at punctuation and word boundaries.
+
+    Smaller chunks than the generic TTS splitter reduce dropped syllables when
+    the model synthesizes long Vietnamese segments.
+    """
+    cleaned = re.sub(r"\s+", " ", sanitize_tts_text(text).strip())
+    if not cleaned:
+        return []
+    if len(cleaned) <= max_chars:
+        return [cleaned]
+
+    sentences = [
+        part.strip()
+        for part in _OMNI_TTS_SENTENCE_SPLIT_RE.split(cleaned)
+        if part.strip()
+    ] or [cleaned]
+
+    chunks: list[str] = []
+    current = ""
+    for sentence in sentences:
+        candidate = f"{current} {sentence}".strip() if current else sentence
+        if len(candidate) <= max_chars:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+        if len(sentence) <= max_chars:
+            current = sentence
+            continue
+        _append_word_safe_chunks(chunks, sentence, max_chars)
+        current = ""
+    if current:
+        chunks.append(current)
+    return [chunk for chunk in chunks if chunk]
+
+
+def parse_tts_voice_string(voice: str | None) -> tuple[str | None, str | None, str | None]:
     """Return ``(prompt_wav_path, prompt_text, voice_design)`` for a voice string."""
     value = str(voice or "auto").strip()
     if not value or value.lower() == "auto":
         return None, None, None
-    if value.startswith(VOXCPM_INSTRUCT_PREFIX):
-        voice_design = value[len(VOXCPM_INSTRUCT_PREFIX):].strip()
+    if value.startswith(TTS_VOICE_INSTRUCT_PREFIX):
+        voice_design = value[len(TTS_VOICE_INSTRUCT_PREFIX):].strip()
         return None, None, voice_design or None
     path = Path(value)
     if path.is_file():
@@ -105,16 +166,11 @@ def parse_voxcpm_voice(voice: str | None) -> tuple[str | None, str | None, str |
     return None, None, None
 
 
-def _is_voxcpm_voice_clone(voice: str | None) -> bool:
-    prompt_wav_path, _, _ = parse_voxcpm_voice(voice)
-    return prompt_wav_path is not None
-
-
 def tts_backend_from_settings(settings: dict) -> str:
-    backend = str(settings.get("tts_backend") or "voxcpm").strip().lower()
+    backend = str(settings.get("tts_backend") or "omnivoice").strip().lower()
     if backend in SUPPORTED_TTS_BACKENDS:
         return backend
-    return "voxcpm"
+    return "omnivoice"
 
 
 def is_cloud_tts_backend(backend: str | None = None, *, settings: dict | None = None) -> bool:
@@ -123,30 +179,43 @@ def is_cloud_tts_backend(backend: str | None = None, *, settings: dict | None = 
 
 
 def resolve_tts_voice(settings: dict) -> str:
+    from ..dubbing_languages import dub_language_from_settings, dub_language_config
+
+    lang_config = dub_language_config(dub_language_from_settings(settings))
     backend = tts_backend_from_settings(settings)
     if backend == "edge_tts":
-        return str(settings.get("edge_tts_voice") or "vi-VN-HoaiMyNeural").strip() or "vi-VN-HoaiMyNeural"
+        default_voice = str(lang_config["default_edge_voice"])
+        return str(settings.get("edge_tts_voice") or default_voice).strip() or default_voice
     if backend == "google_tts":
-        return str(settings.get("google_tts_voice") or "vi-VN-Standard-A").strip() or "vi-VN-Standard-A"
+        default_voice = str(lang_config["default_google_voice"])
+        return str(settings.get("google_tts_voice") or default_voice).strip() or default_voice
     if backend == "gemini_tts":
         return str(settings.get("gemini_tts_voice") or "Zephyr").strip() or "Zephyr"
-    instruct = str(settings.get("voxcpm_instruct") or "").strip()
-    if instruct:
-        return f"{VOXCPM_INSTRUCT_PREFIX}{instruct}"
-    ref_audio = str(settings.get("voxcpm_ref_audio") or "").strip()
-    if ref_audio:
-        return ref_audio
+    if backend == "omnivoice":
+        instruct = str(settings.get("omnivoice_instruct") or "").strip()
+        if instruct:
+            return f"{TTS_VOICE_INSTRUCT_PREFIX}{instruct}"
+        ref_audio = str(settings.get("omnivoice_ref_audio") or "").strip()
+        if ref_audio:
+            return ref_audio
+        return "auto"
     return "auto"
 
 
-def resolve_voxcpm_model(model: str) -> str:
-    from ..voxcpm_gguf import normalize_voxcpm_model_id
+def resolve_omnivoice_device(device: str | None) -> str:
+    configured = (device or "cuda:0").strip().lower() or "cuda:0"
+    if configured in {"auto", "default"}:
+        configured = "cuda:0"
+    if configured.startswith("cuda"):
+        try:
+            import torch
 
-    configured = (model or VOXCPM_DEFAULT_MODEL).strip() or VOXCPM_DEFAULT_MODEL
-    path = Path(configured)
-    if path.exists():
-        return str(path.resolve())
-    return normalize_voxcpm_model_id(configured)
+            if torch.cuda.is_available():
+                return configured
+        except Exception:
+            pass
+        return "cpu"
+    return configured
 
 
 def _wav_format_key(params: wave._wave_params) -> tuple:
@@ -157,6 +226,19 @@ def _wav_format_key(params: wave._wave_params) -> tuple:
         params.comptype,
         params.compname,
     )
+
+
+def _read_wav_mono_float(path: Path) -> tuple["object", int, tuple]:
+    import numpy as np
+
+    with wave.open(str(path), "rb") as wav_file:
+        params = wav_file.getparams()
+        sample_rate = int(wav_file.getframerate())
+        raw = wav_file.readframes(wav_file.getnframes())
+    samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    if params.nchannels > 1:
+        samples = samples.reshape(-1, params.nchannels).mean(axis=1)
+    return samples, sample_rate, params
 
 
 def _concat_wav_files(paths: list[Path], output_path: Path) -> None:
@@ -182,437 +264,41 @@ def _concat_wav_files(paths: list[Path], output_path: Path) -> None:
             output.writeframes(frame)
 
 
-class VoxCPMTtsAdapter:
-    """Adapter backed by a long-lived VoxCPM worker.
+def _concat_wav_files_crossfade(paths: list[Path], output_path: Path, *, gap_ms: int = 100) -> None:
+    """Join chunk WAVs with a short silence gap to avoid clipped words at seams."""
+    import numpy as np
 
-    The adapter routes every segment through a shared
-    :class:`VoxCPMWorkerClient` which keeps the VoxCPM2 model resident in VRAM
-    and coalesces compatible requests. Combined with the on-disk cache
-    (key = sha256(voice_id, text, model, num_step, voice_design, cfg_value))
-    repeated or re-run jobs become near-instant.
-    """
+    if not paths:
+        raise ValueError("No WAV files to concatenate.")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if len(paths) == 1:
+        shutil.copy2(paths[0], output_path)
+        return
 
-    def __init__(
-        self,
-        *,
-        model: str = VOXCPM_DEFAULT_MODEL,
-        device: str = "cuda:0",
-        num_steps: int = 10,
-        data_dir: Path | None = None,
-        runner: object | None = None,
-        max_batch: int | None = None,
-        flush_ms: int | None = None,
-        enable_cache: bool = True,
-        # Test seams: inject a fake client / cache. Production code never
-        # sets these.
-        _client: object | None = None,
-        _cache: object | None = None,
-    ) -> None:
-        self.model = resolve_voxcpm_model(model)
-        self.device = (device or "cuda:0").strip() or "cuda:0"
-        self.num_steps = max(4, min(64, int(num_steps)))
-        self._data_dir = Path(data_dir) if data_dir is not None else None
-        self._runner = runner
-        self._max_batch = max_batch
-        self._flush_ms = flush_ms
-        self._enable_cache = enable_cache
-        self._client = None
-        self._cache = None
-        self._injected_client = _client
-        self._injected_cache = _cache
+    arrays: list[np.ndarray] = []
+    sample_rate: int | None = None
+    params = None
+    for path in paths:
+        samples, rate, file_params = _read_wav_mono_float(path)
+        if sample_rate is None:
+            sample_rate = rate
+            params = file_params
+        elif rate != sample_rate:
+            raise ValueError(f"Incompatible sample rate: {path}")
+        arrays.append(samples)
 
-    def _resolve_data_dir(self) -> Path:
-        if self._data_dir is not None:
-            return self._data_dir
-        from ..config import AppConfig
+    assert sample_rate is not None and params is not None
+    gap = np.zeros(max(1, int(sample_rate * gap_ms / 1000)), dtype=np.float32)
+    merged = arrays[0]
+    for samples in arrays[1:]:
+        merged = np.concatenate([merged, gap, samples])
+    pcm16 = np.clip(merged, -1.0, 1.0)
+    pcm16 = (pcm16 * 32767.0).astype(np.int16)
+    with wave.open(str(output_path), "wb") as output:
+        mono_params = params._replace(nchannels=1)
+        output.setparams(mono_params)
+        output.writeframes(pcm16.tobytes())
 
-        try:
-            return AppConfig.from_env().data_dir
-        except Exception:
-            return Path.cwd() / "data"
-
-    def _ensure_runtime(self) -> None:
-        if self._client is not None:
-            return
-        if self._injected_client is not None:
-            self._client = self._injected_client
-            self._cache = self._injected_cache
-            return
-        from .voxcpm_cache import VoxCPMCache
-        from .voxcpm_client import acquire_client
-
-        data_dir = self._resolve_data_dir()
-        if self._enable_cache:
-            self._cache = VoxCPMCache(data_dir / "cache" / "voxcpm")
-        else:
-            self._cache = None
-        self._client = acquire_client(
-            data_dir=data_dir,
-            model=self.model,
-            device=self.device,
-            num_steps=self.num_steps,
-            max_batch=self._max_batch or 4,
-            flush_ms=self._flush_ms or 150,
-        )
-        self._client.register_with_runner(self._runner)
-
-    def _run_infer(
-        self,
-        *,
-        text: str,
-        output_path: Path,
-        prompt_wav_path: str | None,
-        prompt_text: str | None,
-        voice_design: str | None,
-        voice_id: str,
-        reference_wav_path: str | None = None,
-        anchor_text: str | None = None,
-        mode: str = VOXCPM_MODE_DESIGN,
-    ) -> None:
-        self._ensure_runtime()
-        cache_key = None
-        if self._cache is not None:
-            from .voxcpm_cache import cache_key as make_cache_key
-
-            cache_key = make_cache_key(
-                voice_id=voice_id,
-                text=text,
-                model=self.model,
-                num_step=self.num_steps,
-                voice_design=voice_design,
-                cfg_value=2.0,
-                mode=mode,
-                reference_wav_path=reference_wav_path,
-                reference_text=prompt_text,
-                anchor_text=anchor_text,
-            )
-            if self._cache.materialize(cache_key, output_path):
-                return
-        assert self._client is not None
-        response = self._client.synthesize(
-            text=text,
-            output_path=output_path,
-            prompt_wav_path=prompt_wav_path,
-            prompt_text=prompt_text,
-            voice_design=voice_design,
-            reference_wav_path=reference_wav_path,
-            anchor_text=anchor_text,
-            mode=mode,
-            cfg_value=2.0,
-            inference_timesteps=self.num_steps,
-            cache_key=cache_key,
-        )
-        if not response.get("ok", False):
-            raise AppError(
-                502,
-                ErrorInfo(
-                    code=response.get("code") or "VOXCPM_TTS_FAILED",
-                    message=response.get("message") or "VoxCPM2 could not generate narration.",
-                    action=(
-                        "Check VoxCPM2 model, GPU availability, and reference audio settings. "
-                        "Run 'python scripts/setup_voxcpm.py' if the isolated env is missing."
-                    ),
-                    detail=response.get("detail"),
-                    retryable=bool(response.get("retryable", True)),
-                ),
-            )
-        if not output_path.is_file() or output_path.stat().st_size == 0:
-            raise AppError(
-                502,
-                ErrorInfo(
-                    code="VOXCPM_TTS_FAILED",
-                    message="VoxCPM2 produced an empty audio file.",
-                    action="Try another reference clip or switch to auto voice mode.",
-                    retryable=True,
-                ),
-            )
-        if self._cache is not None and cache_key is not None:
-            self._cache.put(cache_key, output_path)
-
-    def _single_infer_kwargs(
-        self,
-        text: str,
-        output_path: Path,
-        *,
-        voice: str,
-        ref_text: str | None,
-        anchor_text: str | None = None,
-        mode: str = VOXCPM_MODE_DESIGN,
-    ) -> dict[str, object]:
-        prompt_wav_path, _, voice_design = parse_voxcpm_voice(voice)
-        if voice_design:
-            text = f"({voice_design}){text}"
-        if mode == VOXCPM_MODE_ULTIMATE:
-            if not prompt_wav_path:
-                raise AppError(
-                    422,
-                    ErrorInfo(
-                        code="VOXCPM_ULTIMATE_REQUIRES_REFERENCE_AUDIO",
-                        message=(
-                            "Ultimate clone mode requires a reference audio path "
-                            "(the voice argument must point to a WAV file)."
-                        ),
-                        action="Provide a reference audio file in the voice argument.",
-                    ),
-                )
-            anchor_clean = (anchor_text or "").strip()
-            if not anchor_clean:
-                raise AppError(
-                    422,
-                    ErrorInfo(
-                        code="VOXCPM_ULTIMATE_REQUIRES_ANCHOR_TRANSCRIPT",
-                        message=(
-                            "Ultimate clone mode requires the exact transcript of "
-                            "the reference audio (anchor_text), not source or "
-                            "target text."
-                        ),
-                        action=(
-                            "Provide the verbatim transcript of the reference audio "
-                            "file, or switch to reference mode for the ordinary "
-                            "clone path that does not require a transcript."
-                        ),
-                    ),
-                )
-            return {
-                "text": text,
-                "output_path": output_path,
-                "prompt_wav_path": prompt_wav_path,
-                "prompt_text": anchor_clean,
-                "reference_wav_path": prompt_wav_path,
-                "anchor_text": anchor_clean,
-                "voice_design": voice_design,
-                "voice_id": voice or "",
-                "mode": VOXCPM_MODE_ULTIMATE,
-            }
-        if mode == VOXCPM_MODE_REFERENCE and prompt_wav_path is not None:
-            return {
-                "text": text,
-                "output_path": output_path,
-                "prompt_wav_path": None,
-                "prompt_text": None,
-                "reference_wav_path": prompt_wav_path,
-                "anchor_text": None,
-                "voice_design": voice_design,
-                "voice_id": voice or "",
-                "mode": VOXCPM_MODE_REFERENCE,
-            }
-        return {
-            "text": text,
-            "output_path": output_path,
-            "prompt_wav_path": prompt_wav_path,
-            "prompt_text": ref_text,
-            "reference_wav_path": prompt_wav_path,
-            "anchor_text": None,
-            "voice_design": voice_design,
-            "voice_id": voice or "",
-            "mode": VOXCPM_MODE_DESIGN,
-        }
-
-    def _synthesize_single(
-        self,
-        text: str,
-        output_path: Path,
-        *,
-        voice: str,
-        ref_text: str | None,
-        anchor_text: str | None = None,
-        mode: str = VOXCPM_MODE_DESIGN,
-    ) -> None:
-        self._run_infer(
-            **self._single_infer_kwargs(
-                text,
-                output_path,
-                voice=voice,
-                ref_text=ref_text,
-                anchor_text=anchor_text,
-                mode=mode,
-            )
-        )
-
-    def close(self) -> None:
-        return None
-
-    def synthesize(
-        self,
-        text: str,
-        output_path: Path,
-        *,
-        voice: str,
-        ref_text: str | None = None,
-        anchor_text: str | None = None,
-        clone: bool = False,
-        clone_mode: str | None = None,
-    ) -> None:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        chunks = split_tts_text(text)
-        if not chunks:
-            raise AppError(
-                422,
-                ErrorInfo(
-                    code="EMPTY_TTS_TEXT",
-                    message="Cannot synthesize empty narration text.",
-                    action="Verify translation output for this segment.",
-                ),
-            )
-        # Resolve explicit mode only when the caller signals cloning. Legacy
-        # callers that pass clone=True without a mode get the default
-        # reference (ordinary clone) path. clone=False always means design.
-        if clone:
-            mode = _normalize_clone_mode(clone_mode) if clone_mode else VOXCPM_MODE_REFERENCE
-        else:
-            mode = VOXCPM_MODE_DESIGN
-        try:
-            if len(chunks) == 1:
-                self._synthesize_single(
-                    chunks[0],
-                    output_path,
-                    voice=voice,
-                    ref_text=ref_text,
-                    anchor_text=anchor_text,
-                    mode=mode,
-                )
-                return
-
-            parts: list[Path] = []
-            for index, chunk in enumerate(chunks):
-                part_path = output_path.with_name(f"{output_path.stem}.part{index:03d}.wav")
-                self._synthesize_single(
-                    chunk,
-                    part_path,
-                    voice=voice,
-                    ref_text=ref_text,
-                    anchor_text=anchor_text,
-                    mode=mode,
-                )
-                parts.append(part_path)
-            _concat_wav_files(parts, output_path)
-        except AppError:
-            raise
-        except Exception as cause:
-            raise AppError(
-                502,
-                ErrorInfo(
-                    code="VOXCPM_TTS_FAILED",
-                    message="VoxCPM2 could not generate narration.",
-                    action="Ensure the VoxCPM virtualenv is installed and the GPU is available.",
-                    detail=str(cause),
-                    retryable=True,
-                ),
-            ) from cause
-        finally:
-            for part_path in output_path.parent.glob(f"{output_path.stem}.part*.wav"):
-                part_path.unlink(missing_ok=True)
-
-    def synthesize_batch(self, items: list[dict]) -> None:
-        if not items:
-            return
-        self._ensure_runtime()
-        assert self._client is not None
-        from .voxcpm_cache import cache_key as make_cache_key
-
-        submitted: list[tuple[str, Path, str | None]] = []
-        requests: list[dict] = []
-        for item in items:
-            text = str(item.get("text") or "")
-            output_path = Path(item["output_path"])
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            chunks = split_tts_text(text)
-            if not chunks:
-                raise AppError(
-                    422,
-                    ErrorInfo(
-                        code="EMPTY_TTS_TEXT",
-                        message="Cannot synthesize empty narration text.",
-                        action="Verify translation output for this segment.",
-                    ),
-                )
-            if len(chunks) != 1:
-                self.synthesize(
-                    text,
-                    output_path,
-                    voice=str(item.get("voice") or "auto"),
-                    ref_text=item.get("ref_text"),
-                    anchor_text=item.get("anchor_text"),
-                    clone=bool(item.get("clone", False)),
-                    clone_mode=item.get("clone_mode"),
-                )
-                continue
-            mode = (
-                _normalize_clone_mode(item.get("clone_mode"))
-                if bool(item.get("clone", False)) and item.get("clone_mode")
-                else (VOXCPM_MODE_REFERENCE if bool(item.get("clone", False)) else VOXCPM_MODE_DESIGN)
-            )
-            infer = self._single_infer_kwargs(
-                chunks[0],
-                output_path,
-                voice=str(item.get("voice") or "auto"),
-                ref_text=item.get("ref_text"),
-                anchor_text=item.get("anchor_text"),
-                mode=mode,
-            )
-            cache_key = None
-            if self._cache is not None:
-                cache_key = make_cache_key(
-                    voice_id=str(infer["voice_id"]),
-                    text=str(infer["text"]),
-                    model=self.model,
-                    num_step=self.num_steps,
-                    voice_design=infer.get("voice_design"),
-                    cfg_value=2.0,
-                    mode=str(infer["mode"]),
-                    reference_wav_path=infer.get("reference_wav_path"),
-                    reference_text=infer.get("prompt_text"),
-                    anchor_text=infer.get("anchor_text"),
-                )
-                if self._cache.materialize(cache_key, output_path):
-                    continue
-            requests.append(
-                {
-                    "text": str(infer["text"]),
-                    "output_path": output_path,
-                    "prompt_wav_path": infer.get("prompt_wav_path"),
-                    "prompt_text": infer.get("prompt_text"),
-                    "voice_design": infer.get("voice_design"),
-                    "reference_wav_path": infer.get("reference_wav_path"),
-                    "anchor_text": infer.get("anchor_text"),
-                    "mode": str(infer["mode"]),
-                    "cfg_value": 2.0,
-                    "inference_timesteps": self.num_steps,
-                    "cache_key": cache_key,
-                }
-            )
-            submitted.append(("", output_path, cache_key))
-        request_ids = self._client.submit_batch(requests)
-        for index, request_id in enumerate(request_ids):
-            submitted[index] = (request_id, submitted[index][1], submitted[index][2])
-        responses = self._client.wait_batch(request_ids)
-        for (_request_id, output_path, cache_key), response in zip(submitted, responses):
-            if not response.get("ok", False):
-                raise AppError(
-                    502,
-                    ErrorInfo(
-                        code=response.get("code") or "VOXCPM_TTS_FAILED",
-                        message=response.get("message") or "VoxCPM2 could not generate narration.",
-                        action=(
-                            "Check VoxCPM2 model, GPU availability, and reference audio settings. "
-                            "Run 'python scripts/setup_voxcpm.py' if the isolated env is missing."
-                        ),
-                        detail=response.get("detail"),
-                        retryable=bool(response.get("retryable", True)),
-                    ),
-                )
-            if not output_path.is_file() or output_path.stat().st_size == 0:
-                raise AppError(
-                    502,
-                    ErrorInfo(
-                        code="VOXCPM_TTS_FAILED",
-                        message="VoxCPM2 produced an empty audio file.",
-                        action="Try another reference clip or switch to auto voice mode.",
-                        retryable=True,
-                    ),
-                )
-            if self._cache is not None and cache_key is not None:
-                self._cache.put(cache_key, output_path)
 
 
 class TtsSession:
@@ -632,8 +318,10 @@ class TtsSession:
         self._adapter = None
         self.backend = tts_backend_from_settings(self.settings)
         self.voice = resolve_tts_voice(self.settings)
-        self.clone = self.backend == "voxcpm" and bool(str(self.settings.get("voxcpm_ref_audio") or "").strip())
-        self.clone_mode = self._clone_mode() if self.clone else "reference"
+        self.clone = self.backend == "omnivoice" and bool(
+            str(self.settings.get("omnivoice_ref_audio") or "").strip()
+        )
+        self.clone_mode = "reference"
         self.anchor_text = self._anchor_transcript() if self.clone else None
         if gpu_manager is None:
             from ..gpu_manager import global_gpu_manager
@@ -644,10 +332,20 @@ class TtsSession:
         self._model_key = self._build_model_key()
 
     def _build_model_key(self) -> str:
-        model = str(self.settings.get("voxcpm_model", "") or "")
-        device = str(self.settings.get("voxcpm_device", "cuda:0") or "cuda:0")
-        steps = self.settings.get("voxcpm_num_steps", 10)
-        return f"{model}|{device}|{int(steps or 0)}|{self.clone_mode}"
+        if self.backend == "omnivoice":
+            model = str(self.settings.get("omnivoice_model", "") or OMNIVOICE_DEFAULT_MODEL)
+            device = resolve_omnivoice_device(str(self.settings.get("omnivoice_device", "cuda:0") or "cuda:0"))
+            steps = self.settings.get("omnivoice_num_steps", 32)
+            speed = self.settings.get("omnivoice_speed", 1.0)
+            return f"{model}|{device}|{int(steps or 0)}|{float(speed or 1.0)}"
+        raise AppError(
+            422,
+            ErrorInfo(
+                code="UNSUPPORTED_TTS_BACKEND",
+                message=f"Unsupported TTS backend for session: {self.backend}",
+                action="Use omnivoice or a cloud TTS backend.",
+            ),
+        )
 
     def __enter__(self) -> "TtsSession":
         return self
@@ -658,7 +356,7 @@ class TtsSession:
     def _adapter_instance(self):
         if self._adapter is not None:
             return self._adapter
-        device = str(self.settings.get("voxcpm_device", "cuda:0") or "cuda:0")
+        device = resolve_omnivoice_device(str(self.settings.get("omnivoice_device", "cuda:0") or "cuda:0")) if self.backend == "omnivoice" else "cpu"
         if (
             self.gpu_manager is not None
             and not self._session_disabled()
@@ -679,9 +377,15 @@ class TtsSession:
         return not bool(self.settings.get("tts_session_reuse_enabled", True))
 
     def _anchor_transcript(self) -> str | None:
-        ref_audio = str(self.settings.get("voxcpm_ref_audio") or "").strip()
+        ref_audio = str(self.settings.get("omnivoice_ref_audio") or "").strip()
         if not ref_audio:
             return None
+        if self.backend == "omnivoice":
+            manual = str(self.settings.get("omnivoice_ref_text") or "").strip()
+            if manual:
+                if len(manual) > 400:
+                    return manual[:400].rstrip()
+                return manual
         sidecar = Path(ref_audio).with_suffix(".txt")
         if not sidecar.is_file():
             return None
@@ -696,9 +400,6 @@ class TtsSession:
         if len(transcript) > 400:
             return transcript[:400].rstrip()
         return transcript
-
-    def _clone_mode(self) -> str:
-        return _normalize_clone_mode(self.settings.get("voxcpm_clone_mode"))
 
     def synthesize(self, text: str, output_path: Path, *, segment: dict | None = None) -> None:
         segment = segment or {}
@@ -872,23 +573,38 @@ def create_tts_adapter(settings: dict, *, data_dir: Path | None = None, runner: 
             GeminiKeyPool(keys, cursor=int(settings.get("gemini_key_cursor", 0) or 0)),
             model=str(settings.get("gemini_tts_model") or "gemini-2.5-flash-preview-tts"),
         )
+    if backend == "omnivoice":
+        from ..omnivoice_env import OMNIVOICE_DEFAULT_MODEL
+        from .omnivoice_tts import OmniVoiceTtsAdapter
 
-    try:
-        batch_size = int(settings.get("voxcpm_batch_size", 4) or 4)
-    except (TypeError, ValueError):
-        batch_size = 4
-    try:
-        flush_ms = int(settings.get("voxcpm_batch_flush_ms", 150) or 150)
-    except (TypeError, ValueError):
-        flush_ms = 150
-    return VoxCPMTtsAdapter(
-        model=str(settings.get("voxcpm_model", VOXCPM_DEFAULT_MODEL) or VOXCPM_DEFAULT_MODEL),
-        device=str(settings.get("voxcpm_device", "cuda:0") or "cuda:0"),
-        num_steps=int(settings.get("voxcpm_num_steps", 10) or 10),
-        data_dir=data_dir,
-        runner=runner,
-        max_batch=max(1, batch_size),
-        flush_ms=max(0, flush_ms),
-        enable_cache=str(settings.get("voxcpm_cache_enabled", True)).lower()
-        not in {"0", "false", "no"},
+        try:
+            speed = float(settings.get("omnivoice_speed", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            speed = 1.0
+        try:
+            chunk_threshold = float(settings.get("omnivoice_audio_chunk_threshold", 30.0) or 30.0)
+        except (TypeError, ValueError):
+            chunk_threshold = 30.0
+        try:
+            chunk_duration = float(settings.get("omnivoice_audio_chunk_duration", 15.0) or 15.0)
+        except (TypeError, ValueError):
+            chunk_duration = 15.0
+        return OmniVoiceTtsAdapter(
+            model=str(settings.get("omnivoice_model", OMNIVOICE_DEFAULT_MODEL) or OMNIVOICE_DEFAULT_MODEL),
+            device=resolve_omnivoice_device(str(settings.get("omnivoice_device", "cuda:0") or "cuda:0")),
+            num_step=int(settings.get("omnivoice_num_steps", 32) or 32),
+            speed=max(0.5, min(1.5, speed)),
+            language_id=str(settings.get("omnivoice_language_id") or "").strip() or None,
+            audio_chunk_threshold=chunk_threshold,
+            audio_chunk_duration=chunk_duration,
+            data_dir=data_dir,
+            runner=runner,
+        )
+    raise AppError(
+        422,
+        ErrorInfo(
+            code="UNSUPPORTED_TTS_BACKEND",
+            message=f"Unsupported TTS backend: {backend}",
+            action="Choose omnivoice, edge_tts, google_tts, or gemini_tts.",
+        ),
     )

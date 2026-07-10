@@ -2,6 +2,12 @@ import type { Job, JobFolder, JobsApi, RuntimeReport } from "./contracts";
 
 const baseUrl = import.meta.env.VITE_BACKEND_URL ?? "http://127.0.0.1:8765";
 
+export function formatApiError(body: { error?: { message?: string; action?: string; detail?: string } }): string {
+  const err = body.error;
+  const parts = [err?.message, err?.action, err?.detail ? `Chi tiết: ${err.detail}` : null].filter(Boolean);
+  return parts.join("\n\n") || "Backend unavailable";
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${baseUrl}${path}`, {
     ...init,
@@ -9,9 +15,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   const body = await response.json();
   if (!response.ok) {
-    const err = body.error;
-    const parts = [err?.message, err?.action, err?.detail ? `Chi tiết: ${err.detail}` : null].filter(Boolean);
-    throw new Error(parts.join("\n\n") || "Backend unavailable");
+    throw new Error(formatApiError(body));
   }
   return body;
 }
@@ -49,11 +53,15 @@ export const api: JobsApi = {
   updateSettings: (payload) => request("/api/settings", { method: "PUT", body: JSON.stringify(payload) }),
   getEvents: () => request("/api/events"),
   listOutputs: () => request("/api/outputs"),
-  listClonedVoices: () => request<any[]>("/api/cloned-voices"),
-  createClonedVoice: async (name, file) => {
+  listClonedVoices: (backend = "omnivoice") => request<any[]>(`/api/cloned-voices?backend=${encodeURIComponent(backend)}`),
+  createClonedVoice: async (name, file, backend = "omnivoice", refText) => {
     const formData = new FormData();
     formData.append("name", name);
     formData.append("file", file);
+    formData.append("backend", backend);
+    if (refText?.trim()) {
+      formData.append("ref_text", refText.trim());
+    }
     const response = await fetch(`${baseUrl}/api/cloned-voices`, {
       method: "POST",
       body: formData
@@ -62,12 +70,13 @@ export const api: JobsApi = {
     if (!response.ok) throw new Error(body.error?.message ?? "Failed to create cloned voice");
     return body;
   },
-  deleteClonedVoice: (voiceId) => request(`/api/cloned-voices/${voiceId}`, { method: "DELETE" }),
-  testClonedVoice: async (voiceId, text, mode = "reference") => {
+  deleteClonedVoice: (voiceId, backend = "omnivoice") => request(`/api/cloned-voices/${voiceId}?backend=${encodeURIComponent(backend)}`, { method: "DELETE" }),
+  testClonedVoice: async (voiceId, text, mode = "reference", backend = "omnivoice") => {
     const response = await fetch(`${baseUrl}/api/cloned-voices/${voiceId}/test`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, mode })
+      body: JSON.stringify({ text, mode, backend }),
+      signal: AbortSignal.timeout(180_000),
     });
     if (!response.ok) {
       const body = await response.json();
@@ -87,7 +96,11 @@ export const api: JobsApi = {
     }
     return response.blob();
   },
-  listTtsVoices: async (backend) => request(`/api/tts/voices?backend=${encodeURIComponent(backend)}`),
+  listTtsVoices: async (backend, locale) => {
+    const params = new URLSearchParams({ backend });
+    if (locale) params.set("locale", locale);
+    return request(`/api/tts/voices?${params.toString()}`);
+  },
   listOpenAiModels: async (options = {}) =>
     request<Array<{ id: string; name: string }>>("/api/translation/openai-models", {
       method: "POST",
@@ -106,10 +119,11 @@ export const api: JobsApi = {
         voice: options.voice,
         settings: options.settings,
       }),
+      signal: AbortSignal.timeout(180_000),
     });
     if (!response.ok) {
       const body = await response.json();
-      throw new Error(body.error?.message ?? "Failed to preview TTS");
+      throw new Error(formatApiError(body));
     }
     return response.blob();
   },
@@ -120,6 +134,5 @@ export const api: JobsApi = {
   getJobFolder: (jobId) => request<JobFolder>(`/api/jobs/${jobId}/folder`),
   detectHardware: () => request("/api/runtime/detect-hardware"),
   bootstrapVendor: (profile) => request("/api/runtime/bootstrap-vendor", { method: "POST", body: JSON.stringify({ profile }) }),
-  bootstrapPyannote: () => request("/api/runtime/bootstrap-pyannote", { method: "POST" }),
   bootstrapProgress: () => request("/api/runtime/bootstrap-progress")
 };

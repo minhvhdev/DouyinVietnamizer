@@ -520,7 +520,7 @@ def test_normalize_segments_splits_single_long_asr_segment_with_vad(test_env):
     assert "".join(segment["text"] for segment in segments) == "ABCDEFGHIJKL"
 
 
-@patch("dv_backend.pipeline.call_openai_chat")
+@patch("dv_backend.translation_timing_rewrite.call_openai_chat")
 @patch("dv_backend.pipeline.GoogleFreeTranslator")
 def test_translate_step(translator_type, mock_chat, test_env):
     config, database, job_service, runner = test_env
@@ -681,10 +681,6 @@ def test_tts_step_micro_batches_multiple_segments(
             "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
             ("tts_micro_batch_enabled", json.dumps(True), "now"),
         )
-        database.connection.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
-            ("voxcpm_batch_size", json.dumps(4), "now"),
-        )
 
     pipeline.tts_step("job123", config, database, runner)
 
@@ -758,7 +754,7 @@ def test_tts_step_passes_clone_mode_and_anchor_transcript(
     tts.synthesize_batch.side_effect = lambda items: [synthesize(item["text"], item["output_path"]) for item in items]
     mock_run.side_effect = convert
 
-    cloned_dir = config.data_dir / "cloned_voices"
+    cloned_dir = config.data_dir / "cloned_voices_omnivoice"
     cloned_dir.mkdir(parents=True, exist_ok=True)
     voice_path = cloned_dir / "voice-abc.wav"
     write_dummy_wav(voice_path, duration=1.0, sample_rate=16000, channels=1)
@@ -772,11 +768,11 @@ def test_tts_step_passes_clone_mode_and_anchor_transcript(
     with database.connection:
         database.connection.execute(
             "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
-            ("voxcpm_ref_audio", json.dumps(str(voice_path)), "now"),
+            ("omnivoice_ref_audio", json.dumps(str(voice_path)), "now"),
         )
         database.connection.execute(
             "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
-            ("voxcpm_clone_mode", json.dumps("ultimate"), "now"),
+            ("omnivoice_ref_text", json.dumps("xin chào"), "now"),
         )
 
     pipeline.tts_step("job123", config, database, runner)
@@ -788,9 +784,9 @@ def test_tts_step_passes_clone_mode_and_anchor_transcript(
 
     session_kwargs = tts_factory.call_args.kwargs
     from dv_backend.adapters.tts import TtsSession
-    session = TtsSession(settings={"voxcpm_ref_audio": str(voice_path), "voxcpm_clone_mode": "ultimate"}, data_dir=config.data_dir, runner=runner, adapter_factory=tts_factory)
+    session = TtsSession(settings={"omnivoice_ref_audio": str(voice_path), "omnivoice_ref_text": "xin chào"}, data_dir=config.data_dir, runner=runner, adapter_factory=tts_factory)
     assert session.clone is True
-    assert session.clone_mode == "ultimate"
+    assert session.clone_mode == "reference"
     assert session.anchor_text == "xin chào"
     assert session.voice == str(voice_path)
     assert session_kwargs["data_dir"] == config.data_dir
@@ -1467,15 +1463,8 @@ def test_full_runner_execution_and_resume(
     tts_factory.return_value.synthesize.side_effect = tts_synthesize_side_effect
     tts_factory.return_value.synthesize_batch.side_effect = lambda items: [tts_synthesize_side_effect(item["text"], item["output_path"]) for item in items]
 
-    with patch("dv_backend.pipeline.call_openai_chat") as mock_chat, \
-         patch("dv_backend.pipeline.call_openai_tts") as mock_tts:
-
+    with patch("dv_backend.translation_timing_rewrite.call_openai_chat") as mock_chat:
         mock_chat.return_value = {"choices": [{"message": {"content": json.dumps({"translations": [{"index": 0, "translation": "tr0"}, {"index": 1, "translation": "tr1"}]})}}]}
-
-        def tts_side_effect(api_base, api_key, model, voice, text, output_path):
-            write_dummy_wav(output_path, duration=1.0, sample_rate=48000, channels=2)
-
-        mock_tts.side_effect = tts_side_effect
 
         source_video = tmp_path / "sample.mp4"
         source_video.write_text("dummy mp4")

@@ -9,10 +9,10 @@ The GPU pipeline is implemented end to end:
 1. Resolve and download a Douyin or Bilibili video.
 2. Extract audio, detect speech, and transcribe Chinese with Qwen3-ASR on CUDA.
 3. Translate to Vietnamese with Google Translate or Gemini.
-4. Synthesize Vietnamese speech with VoxCPM2.
+4. Synthesize Vietnamese speech with OmniVoice (voice clone).
 5. Repair timing, mix audio, render `dubbed.mp4`, and produce JSON/HTML QC reports.
 
-Speaker diarization/per-speaker voice assignment has been removed; all segments use the single VoxCPM2 configuration.
+Speaker diarization/per-speaker voice assignment has been removed; all segments use the single OmniVoice configuration.
 
 ## Quick start
 
@@ -20,10 +20,10 @@ Requirements: Node.js 20+, pnpm, **Python 3.12** (not 3.13), [uv](https://docs.a
 
 ```powershell
 pnpm run setup   # pnpm install + uv sync (backend deps)
-pnpm run dev     # backend + UI, opens browser automatically
+pnpm tauri:dev   # Tauri desktop app (backend + UI)
 ```
 
-Backend dependencies are installed into `backend/.venv` via `uv sync`. Use `cd backend && uv python pin 3.12` if uv picks the wrong Python version. Run `python scripts/setup_voxcpm.py` in `backend` to prepare VoxCPM2.
+Backend dependencies are installed into `backend/.venv` via `uv sync`. Use `cd backend && uv python pin 3.12` if uv picks the wrong Python version.
 
 Press `Ctrl+C` to stop both processes.
 
@@ -37,22 +37,20 @@ Development state defaults to `%LOCALAPPDATA%\DouyinVietnamizer`. Set `DV_DATA_D
 
 ## Tauri desktop app
 
-`pnpm tauri:dev` opens the app in a Tauri window. Rust spawns the Python backend from `vendor/portable-runtime` on `127.0.0.1:8765`. The dev app does not run first-time setup; prepare `vendor/portable-runtime` once, then frontend and backend source changes reload without rebuilding the runtime.
+`pnpm tauri:dev` opens the app in a Tauri window. Rust spawns the Python backend from `backend/` via `uv run` on `127.0.0.1:8765`.
 
-Portable runtime layout:
+Dev layout:
 
 ```text
-vendor/portable-runtime/
-├── .venv/ or python/
-├── backend/
-├── tools/
-│   ├── ffmpeg/
-│   ├── yt-dlp/
-│   └── voxcpm2/          # voxcpm2-cli.exe + llama-tts-server.exe + ggml DLLs
-├── models/
-│   ├── qwen3-asr/
-│   └── voxcpm2/          # VoxCPM2-BaseLM-Q8_0.gguf + Acoustic F16
-└── manifest.json
+backend/
+├── .venv/              # uv sync
+├── dv_backend/
+├── models/             # qwen3-asr, omnivoice weights
+└── scripts/
+vendor/
+├── manifest.json
+├── ffmpeg/
+└── yt-dlp/
 ```
 
 Hot-reload during development:
@@ -60,53 +58,19 @@ Hot-reload during development:
 - Edit `backend/dv_backend/**` — uvicorn reloads because `DV_RELOAD=1`.
 - Edit `src-tauri/src/**` — Cargo rebuilds the affected crate, window refreshes.
 
-`pnpm tauri:build` produces a Windows app bundle (NSIS) that includes the prepared portable runtime. For the folder-style portable release, run:
+First-time setup:
 
 ```powershell
-pnpm tauri:build:portable
+pnpm run setup
 ```
 
-This refreshes `vendor/portable-runtime` (GGUF weights + `voxcpm2-cli` under `tools/voxcpm2/`), mirrors it into `dist-portable/DouyinVietnamizer-0.1.0-portable/`, builds the Tauri binary, and syncs backend code. To refresh only the runtime folder (for `tauri:dev`), use `pnpm tauri:build:portable:runtime`.
+`pnpm tauri:build` produces a standard Tauri installer. The desktop shell still expects the repo layout above when launched from a development checkout.
 
-Prerequisites before the first portable build:
+## macOS (Apple Silicon)
 
-1. `vendor/portable-runtime/` with embedded Python `.venv` (existing dev bootstrap).
-2. `vendor/voxcpm2/voxcpm2-cli.exe` (+ CUDA DLLs) built from llama.cpp-omni.
-3. Network access for the first GGUF download (~3.3 GB into `portable-runtime/models/voxcpm2/`).
+Dev workflow matches Windows: `pnpm run setup`, then `pnpm tauri:dev` or `pnpm run dev`.
 
-Copy `douyin-vietnamizer.exe` together with its sibling `portable-runtime/` directory to another Windows x64 machine with compatible NVIDIA/CUDA drivers.
-
-## macOS portable (Apple Silicon)
-
-Pre-built portable zips are available on the [Releases page](../../releases) as `DouyinVietnamizer-0.1.0-portable-macos.zip` (arm64 only; macOS 12+).
-
-To use:
-
-1. Download the zip from the latest release.
-2. Unzip anywhere (e.g. `~/Applications/`).
-3. Open the resulting folder and double-click `DouyinVietnamizer.app`.
-4. **First launch only:** macOS Gatekeeper will block the unsigned app. Right-click `DouyinVietnamizer.app` → **Open** → confirm. Subsequent launches double-click normally.
-
-The `.app` looks for a sibling `portable-runtime/` folder with the bundled Python interpreter, models, and tools. Keep the folder intact.
-
-### Building from source (maintainers)
-
-**Full guide (Cursor-friendly, step-by-step):** [docs/BUILD_MACOS.md](docs/BUILD_MACOS.md)
-
-Quick path on a fresh Apple Silicon Mac (M1–M4):
-
-```bash
-git clone https://github.com/minhvhdev/DouyinVietnamizer.git
-cd DouyinVietnamizer
-xcode-select --install   # if needed; wait for GUI install to finish
-brew install cmake git   # if Homebrew already present
-pnpm run voxcpm:build:mac
-pnpm run tauri:build:mac:m4
-```
-
-`voxcpm:build:mac` builds `vendor/voxcpm2/voxcpm2-cli` from [llama.cpp-omni](https://github.com/tc-mb/llama.cpp-omni) (required before the portable build). `tauri:build:mac:m4` bootstraps Node/pnpm/rust/uv, downloads models (~11 GB first run), and produces `dist-portable/DouyinVietnamizer-0.1.0-portable-macos.zip`.
-
-Requirements: macOS 12+, arm64, ≥ 25 GB free disk, stable internet. See [docs/BUILD_MACOS.md](docs/BUILD_MACOS.md) for dev mode, troubleshooting, and agent checklist.
+See [docs/BUILD_MACOS.md](docs/BUILD_MACOS.md) for Mac-specific tool setup.
 
 ## Vendor tools
 
@@ -120,6 +84,6 @@ Missing tools or Qwen3 models? Use the setup wizard in the UI (Môi trường) t
 
 - Douyin and Bilibili URLs and downloaded media are processed locally.
 - Google Translate or Gemini receives transcript text when selected for translation.
-- VoxCPM2 runs through native `voxcpm2-cli` + GGUF weights bundled under `portable-runtime/tools/voxcpm2` and `portable-runtime/models/voxcpm2`.
+- OmniVoice runs locally with cloned reference audio and user-provided `ref_text`.
 - Browser cookies are optional and are only passed to yt-dlp when selected.
 - Douyin and Bilibili may change their sites or require authentication, which can break a URL.

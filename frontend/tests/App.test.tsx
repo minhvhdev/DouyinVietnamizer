@@ -43,11 +43,9 @@ const baseApi: JobsApi = {
   selectVideo: vi.fn().mockResolvedValue({ status: "selected", video: {} }),
   updateYtDlp: vi.fn().mockResolvedValue({ status: "updated", version: "2026.01.01", previous_version: "2025.01.01", method: "binary_replace" }),
   importJob: vi.fn().mockResolvedValue(job),
-    bootstrapPyannote: vi.fn().mockResolvedValue({ status: "started" }),
-
   runtimeStatus: vi.fn().mockResolvedValue(readyRuntime),
   runSmokeTest: vi.fn().mockResolvedValue(readyRuntime),
-  releaseVram: vi.fn().mockResolvedValue({ status: "ok", released: [], terminated_processes: [], errors: [], gpu: { cuda_supported: false, active_voxcpm_clients: 0, resident_models: [], helper_processes: [] } }),
+  releaseVram: vi.fn().mockResolvedValue({ status: "ok", released: [], terminated_processes: [], errors: [], gpu: { cuda_supported: false, active_omnivoice_clients: 0, resident_models: [], helper_processes: [] } }),
   startJob: vi.fn().mockResolvedValue({ status: "started" }),
   cancelJob: vi.fn().mockResolvedValue({ status: "cancelled" }),
   deleteJob: vi.fn().mockResolvedValue({ status: "deleted" }),
@@ -88,31 +86,34 @@ test("keeps the dashboard grid limited to sidebar and main content", async () =>
   expect(Array.from(shell?.children ?? []).map((child) => child.tagName)).toEqual(["ASIDE", "MAIN"]);
 });
 
-test("shows portable package errors when bundled runtime is incomplete", async () => {
+test("shows environment errors when dev layout is incomplete", async () => {
   const bridge = await import("../src/lib/tauri-bridge");
   vi.mocked(bridge.waitForBackend).mockRejectedValueOnce({
-    kind: "portable_missing",
-    root: "C:/App/resources/portable-runtime",
+    kind: "environment_missing",
+    root: "C:/repo",
     missing_items: [
-      "models/qwen3-asr (C:/App/resources/portable-runtime/models/qwen3-asr)",
-      "tools/ffmpeg (C:/App/resources/portable-runtime/tools/ffmpeg)",
+      "backend/dv_backend (C:/repo/backend/dv_backend)",
+      "vendor/manifest.json (C:/repo/vendor/manifest.json)",
     ],
   });
 
   render(<App api={baseApi} />);
 
-  expect(await screen.findByText("Portable package is incomplete")).toBeInTheDocument();
-  expect(screen.getByText("C:/App/resources/portable-runtime")).toBeInTheDocument();
-  expect(screen.getByText(/models\/qwen3-asr/)).toBeInTheDocument();
-  expect(screen.getByText(/tools\/ffmpeg/)).toBeInTheDocument();
+  expect(await screen.findByText("Môi trường dev chưa sẵn sàng")).toBeInTheDocument();
+  expect(screen.getByText("C:/repo")).toBeInTheDocument();
+  expect(screen.getByText(/backend\/dv_backend/)).toBeInTheDocument();
+  expect(screen.getByText(/vendor\/manifest.json/)).toBeInTheDocument();
 });
 
 test("shows an actionable backend connection error", async () => {
   const api: JobsApi = { ...baseApi, listJobs: vi.fn().mockRejectedValue(new Error("Backend unavailable")) };
   render(<App api={api} />);
 
+  const errorsButton = await screen.findByRole("button", { name: /Lỗi và thông báo \(1\)/i });
+  fireEvent.click(errorsButton);
+
   expect(await screen.findByText("Backend unavailable")).toBeInTheDocument();
-  expect(screen.getByText(/kiểm tra nhật ký hoạt động hoặc cấu hình/i)).toBeInTheDocument();
+  expect(screen.getByText(/Lỗi thao tác/i)).toBeInTheDocument();
 });
 
 test("creates a job from a local video file", async () => {
@@ -254,7 +255,7 @@ test("keeps the main app visible when runtime stays blocked", async () => {
   const blocked = {
     ...readyRuntime,
     status: "blocked",
-    checks: [{ ...readyRuntime.checks[0], status: "blocked", message: "Portable runtime check failed.", action: "Open diagnostics." }]
+    checks: [{ ...readyRuntime.checks[0], status: "blocked", message: "Dev environment check failed.", action: "Open diagnostics." }]
   };
   const api: JobsApi = {
     ...baseApi,
@@ -302,7 +303,7 @@ test("shows the VRAM summary on the sidebar button", async () => {
       torch_allocated_mb: 0,
       torch_reserved_mb: 0,
       torch_peak_mb: 0,
-      active_voxcpm_clients: 0,
+      active_omnivoice_clients: 0,
       resident_models: [],
       helper_processes: []
     }
@@ -314,12 +315,12 @@ test("shows the VRAM summary on the sidebar button", async () => {
   expect(await screen.findByText("VRAM 1.10 GB / 8.00 GB")).toBeInTheDocument();
 });
 
-test("shows translation and VoxCPM2 settings", async () => {
+test("shows translation and OmniVoice settings", async () => {
   const api: JobsApi = {
     ...baseApi,
     getSettings: vi.fn().mockResolvedValue({
       translation_backend: "google_free",
-      tts_backend: "voxcpm",
+      tts_backend: "omnivoice",
     })
   };
   render(<App api={api} />);
@@ -346,7 +347,7 @@ test("manages Gemini API key pool from settings", async () => {
     updateSettings,
     getSettings: vi.fn().mockResolvedValue({
       translation_backend: "gemini",
-      tts_backend: "voxcpm",
+      tts_backend: "omnivoice",
       gemini_api_keys: [{ id: "key-1", masked: "AIza...7890", label: "Studio quota 1" }],
       gemini_translation_model: "gemini-2.5-flash",
     })
@@ -355,7 +356,7 @@ test("manages Gemini API key pool from settings", async () => {
 
   fireEvent.click(await screen.findByRole("button", { name: "Cài đặt" }));
   fireEvent.click(await screen.findByRole("tab", { name: "Dịch thuật" }));
-  expect(await screen.findByText("Google AI Studio / Khóa API Gemini")).toBeInTheDocument();
+  expect(await screen.findByText("Quản lý khóa Gemini")).toBeInTheDocument();
   expect(screen.getByText("AIza...7890")).toBeInTheDocument();
   expect(screen.getByDisplayValue("Studio quota 1")).toBeInTheDocument();
 
@@ -379,7 +380,7 @@ test("manages Gemini API key pool from settings", async () => {
   expect(screen.queryByText("AIzaSyNewSecret")).not.toBeInTheDocument();
 });
 
-test("saves a pending Gemini key when saving settings", async () => {
+test("saves a pending Gemini key when a field loses focus", async () => {
   const updateSettings = vi.fn().mockResolvedValue({
     gemini_api_keys: [{ id: "key-1", masked: "AIza...7890", label: "AIza...7890" }]
   });
@@ -388,7 +389,7 @@ test("saves a pending Gemini key when saving settings", async () => {
     updateSettings,
     getSettings: vi.fn().mockResolvedValue({
       translation_backend: "gemini",
-      tts_backend: "voxcpm",
+      tts_backend: "omnivoice",
       gemini_api_keys: []
     })
   };
@@ -399,7 +400,7 @@ test("saves a pending Gemini key when saving settings", async () => {
   fireEvent.change(screen.getByPlaceholderText(/Dán khóa API Google AI Studio/i), {
     target: { value: "AIzaSySecret1234567890" }
   });
-  fireEvent.click(screen.getByRole("button", { name: "Lưu cài đặt" }));
+  fireEvent.blur(screen.getByPlaceholderText(/Dán khóa API Google AI Studio/i));
 
   await waitFor(() =>
     expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
@@ -410,7 +411,7 @@ test("saves a pending Gemini key when saving settings", async () => {
   expect(screen.getByPlaceholderText(/Dán khóa API Google AI Studio/i)).toHaveValue("");
 });
 
-test("does not resend stale Gemini key command fields from settings", async () => {
+test("does not resend stale Gemini key command fields on autosave", async () => {
   const updateSettings = vi.fn().mockResolvedValue({
     gemini_api_keys: []
   });
@@ -419,7 +420,7 @@ test("does not resend stale Gemini key command fields from settings", async () =
     updateSettings,
     getSettings: vi.fn().mockResolvedValue({
       translation_backend: "gemini",
-      tts_backend: "voxcpm",
+      tts_backend: "omnivoice",
       gemini_api_keys: [],
       gemini_api_key_add: "AIzaSyStaleSecret1234567890"
     })
@@ -427,10 +428,45 @@ test("does not resend stale Gemini key command fields from settings", async () =
   render(<App api={api} />);
 
   fireEvent.click(await screen.findByRole("button", { name: "Cài đặt" }));
-  fireEvent.click(screen.getByRole("button", { name: "Lưu cài đặt" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "Dịch thuật" }));
+  const backendSelect = await screen.findByLabelText(/Bộ dịch thuật/i);
+  fireEvent.change(backendSelect, { target: { value: "openai" } });
+  fireEvent.blur(backendSelect);
 
-  await waitFor(() => expect(updateSettings).toHaveBeenCalled());
+  await waitFor(() =>
+    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      translation_backend: "openai",
+    }))
+  );
   expect(updateSettings.mock.calls[0][0]).not.toHaveProperty("gemini_api_key_add");
+});
+
+test("auto-saves settings when an input loses focus", async () => {
+  const updateSettings = vi.fn().mockResolvedValue({
+    translation_backend: "openai",
+    tts_backend: "omnivoice",
+  });
+  const api: JobsApi = {
+    ...baseApi,
+    updateSettings,
+    getSettings: vi.fn().mockResolvedValue({
+      translation_backend: "google_free",
+      tts_backend: "omnivoice",
+    })
+  };
+  render(<App api={api} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Cài đặt" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "Dịch thuật" }));
+  const backendSelect = await screen.findByLabelText(/Bộ dịch thuật/i);
+  fireEvent.change(backendSelect, { target: { value: "openai" } });
+  fireEvent.blur(backendSelect);
+
+  await waitFor(() =>
+    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      translation_backend: "openai",
+    }))
+  );
 });
 
 test("navigates to Clone Giong tab and lists cloned voices", async () => {

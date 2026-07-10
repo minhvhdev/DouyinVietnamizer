@@ -219,16 +219,16 @@ def test_cloned_voices_crud(tmp_path: Path) -> None:
     
     wav_content = b"fake wav audio data"
     files = {"file": ("test_voice.wav", wav_content, "audio/wav")}
-    data = {"name": "Giong Test"}
-    
+    data = {"name": "Giong Test", "ref_text": "xin chao test"}
+
     resp = client.post("/api/cloned-voices", data=data, files=files)
     assert resp.status_code == 201
     created = resp.json()
     assert created["name"] == "Giong Test"
     assert created["id"] is not None
     assert created["wav_filename"] == f"{created['id']}.wav"
-    
-    voice_dir = tmp_path / "cloned_voices"
+
+    voice_dir = tmp_path / "cloned_voices_omnivoice"
     saved_file = voice_dir / created["wav_filename"]
     assert saved_file.is_file()
     assert saved_file.read_bytes() == wav_content
@@ -241,7 +241,11 @@ def test_cloned_voices_crud(tmp_path: Path) -> None:
     assert resp.status_code == 200
     assert resp.content == wav_content
     
-    resp = client.post("/api/cloned-voices", data={"name": "Giong Test"}, files={"file": ("t.wav", b"data")})
+    resp = client.post(
+        "/api/cloned-voices",
+        data={"name": "Giong Test", "ref_text": "other"},
+        files={"file": ("t.wav", b"data")},
+    )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "VOICE_NAME_EXISTS"
     
@@ -259,8 +263,8 @@ def test_list_preset_voices(tmp_path: Path) -> None:
     resp = client.get("/api/voices/presets")
     assert resp.status_code == 200
     presets = resp.json()
-    assert len(presets) == 10
-    assert presets[0] == {"id": "Ngọc Lan", "name": "Ngọc Lan", "kind": "preset"}
+    assert len(presets) == 3
+    assert presets[0] == {"id": "auto", "name": "Auto voice", "kind": "preset"}
 
 
 @patch("dv_backend.api._synthesize_voice_preview")
@@ -272,13 +276,13 @@ def test_preview_preset_voice(mock_preview: MagicMock, tmp_path: Path) -> None:
 
     resp = client.post(
         "/api/voices/preview",
-        json={"voice": "Ngọc Lan", "text": "Xin chào"},
+        json={"voice": "auto", "text": "Xin chào"},
     )
 
     assert resp.status_code == 200
     assert resp.content == b"RIFFfake"
     mock_preview.assert_called_once()
-    assert mock_preview.call_args.kwargs["voice"] == "Ngọc Lan"
+    assert mock_preview.call_args.kwargs["voice"] == "auto"
 
 
 def test_preview_preset_voice_rejects_unknown(tmp_path: Path) -> None:

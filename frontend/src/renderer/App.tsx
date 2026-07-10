@@ -1,13 +1,18 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   Activity,
+  AudioLines,
   CircleAlert,
   Clock3,
+  Download,
   Info,
+  Languages,
+  Mic2,
   Plus,
   Radio,
   RefreshCw,
   Settings2,
+  Subtitles,
   X,
   Play,
   FileVideo,
@@ -48,15 +53,106 @@ const PIPELINE_STEPS = [
 
 const PRESET_VOICES = [] as const;
 
-const SETTINGS_TABS = [
-  { id: "download", label: "Tải video" },
-  { id: "translation", label: "Dịch thuật" },
-  { id: "audio", label: "Âm thanh" },
-  { id: "tts", label: "Lồng tiếng" },
-  { id: "subtitles", label: "Phụ đề" },
+const SETTINGS_NAV = [
+  { id: "download", label: "Tải video", hint: "Cookies & yt-dlp", Icon: Download },
+  { id: "translation", label: "Dịch thuật", hint: "Google / Gemini / OpenAI", Icon: Languages },
+  { id: "audio", label: "Âm thanh", hint: "VAD & nhận dạng", Icon: AudioLines },
+  { id: "tts", label: "Lồng tiếng", hint: "Engine & giọng đọc", Icon: Mic2 },
+  { id: "subtitles", label: "Phụ đề", hint: "Chữ trên video", Icon: Subtitles },
 ] as const;
 
-type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
+type SettingsTabId = (typeof SETTINGS_NAV)[number]["id"];
+type SettingsHealth = "ready" | "attention" | "neutral";
+
+function evaluateSettingsTabHealth(
+  tabId: SettingsTabId,
+  settings: Record<string, any>,
+  activeTtsBackend: string,
+): SettingsHealth {
+  switch (tabId) {
+    case "download":
+      return "neutral";
+    case "translation": {
+      const backend = settings.translation_backend ?? "google_free";
+      if (backend === "gemini" && (settings.gemini_api_keys ?? []).length === 0) {
+        return "attention";
+      }
+      if (backend === "openai" && !settings.openai_api_key_configured) {
+        return "attention";
+      }
+      return "ready";
+    }
+    case "audio":
+      return "neutral";
+    case "tts": {
+      if (activeTtsBackend === "google_tts" && !settings.google_tts_api_key_configured) {
+        return "attention";
+      }
+      if (activeTtsBackend === "gemini_tts" && (settings.gemini_api_keys ?? []).length === 0) {
+        return "attention";
+      }
+      if (activeTtsBackend === "omnivoice" && !settings.omnivoice_ref_audio && !settings.omnivoice_instruct) {
+        return "attention";
+      }
+      return "ready";
+    }
+    case "subtitles":
+      return settings.subtitles_enabled === false ? "neutral" : "ready";
+    default:
+      return "neutral";
+  }
+}
+
+function SettingsSectionHead({ title, description }: { title: string; description?: string }) {
+  return (
+    <div className="settings-section-head">
+      <h3>{title}</h3>
+      {description ? <p>{description}</p> : null}
+    </div>
+  );
+}
+
+function SettingsTabBar({
+  activeTab,
+  onSelect,
+  settings,
+  activeTtsBackend,
+}: {
+  activeTab: SettingsTabId;
+  onSelect: (id: SettingsTabId) => void;
+  settings: Record<string, any>;
+  activeTtsBackend: string;
+}) {
+  return (
+    <div className="settings-tabbar" role="tablist" aria-label="Nhóm cài đặt">
+      {SETTINGS_NAV.map((tab) => {
+        const health = evaluateSettingsTabHealth(tab.id, settings, activeTtsBackend);
+        const Icon = tab.Icon;
+        return (
+          <button
+            key={tab.id}
+            type="button"
+            role="tab"
+            aria-label={tab.label}
+            aria-selected={activeTab === tab.id}
+            className={`settings-tabbar__item${activeTab === tab.id ? " active" : ""}`}
+            onClick={(event) => {
+              onSelect(tab.id);
+              event.currentTarget.scrollIntoView?.({ inline: "nearest", block: "nearest" });
+            }}
+          >
+            <Icon size={16} aria-hidden="true" className="settings-tabbar__icon" />
+            <span className="settings-tabbar__label">{tab.label}</span>
+            <span
+              className={`settings-tabbar__dot${health === "ready" ? " ready" : health === "attention" ? " attention" : ""}`}
+              title={health === "attention" ? "Cần cấu hình thêm" : health === "ready" ? "Sẵn sàng" : "Tùy chọn"}
+            />
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 function SettingHint({ text }: { text: string }) {
   return (
@@ -104,11 +200,39 @@ function SettingsCheckboxField({
   );
 }
 
+const DUB_LANGUAGE_OPTIONS = [
+  {
+    id: "vi",
+    label: "Tiếng Việt",
+    defaultEdgeVoice: "vi-VN-HoaiMyNeural",
+    defaultGoogleVoice: "vi-VN-Standard-A",
+    omnivoiceLanguageId: "vi",
+    speakingRate: 3.2,
+    edgeLocale: "vi",
+    googleLocale: "vi-VN",
+  },
+  {
+    id: "th",
+    label: "Tiếng Thái",
+    defaultEdgeVoice: "th-TH-PremwadeeNeural",
+    defaultGoogleVoice: "th-TH-Standard-A",
+    omnivoiceLanguageId: "th",
+    speakingRate: 2.8,
+    edgeLocale: "th",
+    googleLocale: "th-TH",
+  },
+] as const;
+
+function getDubLanguageOption(language?: string) {
+  const normalized = (language ?? "vi").trim().toLowerCase();
+  return DUB_LANGUAGE_OPTIONS.find((option) => option.id === normalized) ?? DUB_LANGUAGE_OPTIONS[0];
+}
+
 const TTS_BACKEND_OPTIONS = [
   {
-    id: "voxcpm",
-    label: "VoxCPM2",
-    hint: "Clone giọng offline, cần GPU",
+    id: "omnivoice",
+    label: "OmniVoice",
+    hint: "600+ ngôn ngữ, clone/design offline, cần GPU",
   },
   {
     id: "edge_tts",
@@ -118,7 +242,7 @@ const TTS_BACKEND_OPTIONS = [
   {
     id: "google_tts",
     label: "Google TTS",
-    hint: "Google Cloud Standard, 4 giọng vi-VN",
+    hint: "Google Cloud Standard, hỗ trợ vi-VN và th-TH",
   },
   {
     id: "gemini_tts",
@@ -128,11 +252,19 @@ const TTS_BACKEND_OPTIONS = [
 ] as const;
 
 const GOOGLE_TTS_VOICES = [
-  { id: "vi-VN-Standard-A", name: "Standard A — Nữ" },
-  { id: "vi-VN-Standard-B", name: "Standard B — Nam" },
-  { id: "vi-VN-Standard-C", name: "Standard C — Nữ" },
-  { id: "vi-VN-Standard-D", name: "Standard D — Nam" },
+  { id: "vi-VN-Standard-A", name: "Standard A — Nữ (vi)" },
+  { id: "vi-VN-Standard-B", name: "Standard B — Nam (vi)" },
+  { id: "vi-VN-Standard-C", name: "Standard C — Nữ (vi)" },
+  { id: "vi-VN-Standard-D", name: "Standard D — Nam (vi)" },
+  { id: "th-TH-Standard-A", name: "Standard A — Nữ (th)" },
+  { id: "th-TH-Neural2-C", name: "Neural2 C — Nữ (th)" },
+  { id: "th-TH-Neural2-D", name: "Neural2 D — Nam (th)" },
 ] as const;
+
+function googleTtsVoicesForLanguage(language?: string) {
+  const locale = getDubLanguageOption(language).googleLocale.toLowerCase();
+  return GOOGLE_TTS_VOICES.filter((voice) => voice.id.toLowerCase().startsWith(locale));
+}
 
 const GEMINI_TTS_VOICES = [
   { id: "Zephyr", name: "Zephyr (Sáng)" },
@@ -168,7 +300,8 @@ const translateJobStatus = (status: string) => {
   }
 };
 
-const translateStepName = (name: string) => {
+const translateStepName = (name: string, dubLanguage?: string) => {
+  const dubLang = getDubLanguageOption(dubLanguage);
   switch (name.toLowerCase()) {
     case "resolve": return "Phân tích liên kết";
     case "download": return "Tải video";
@@ -177,7 +310,7 @@ const translateStepName = (name: string) => {
     case "asr": return "Nhận dạng tiếng Trung (ASR)";
     case "normalize_segments": return "Chuẩn hóa phân đoạn";
     case "translate": return "Dịch thuật";
-    case "tts": return "Lồng tiếng tiếng Việt (TTS)";
+    case "tts": return `Lồng tiếng ${dubLang.label} (TTS)`;
     case "duration_repair": return "Khớp độ dài âm thanh";
     case "mix": return "Trộn nhạc nền & giọng nói";
     case "render": return "Xuất video thành phẩm";
@@ -271,9 +404,139 @@ function summarizeVramRelease(result: ReleaseVramResult): string {
   return `${released} ${terminated}${suffix}`;
 }
 
+type AppNoticeSeverity = "error" | "warning";
+type CloneBackend = "omnivoice";
+
+type AppNotice = {
+  id: string;
+  title: string;
+  message: string;
+  source: string;
+  severity: AppNoticeSeverity;
+  dismiss?: () => void;
+  action?: { label: string; onClick: () => void };
+};
+
+function buildAppNotices(input: {
+  error: string | null;
+  voiceError: string | null;
+  ttsPreviewError: string | null;
+  runtimeError: string | null;
+  runtime: RuntimeReport | null;
+  backendConnection: BackendConnectionState;
+  backendNotice: string | null;
+  backendCheckedAt: number | null;
+  jobs: Job[];
+  onDismissError: () => void;
+  onDismissVoiceError: () => void;
+  onDismissTtsPreviewError: () => void;
+  onDismissRuntimeError: () => void;
+  onRecoverBackend: (reason: string) => void;
+  formatBackendClock: (timestamp: number | null) => string;
+}): AppNotice[] {
+  const notices: AppNotice[] = [];
+
+  if (input.error) {
+    notices.push({
+      id: "app-error",
+      title: "Lỗi thao tác",
+      message: input.error,
+      source: "Ứng dụng",
+      severity: "error",
+      dismiss: input.onDismissError,
+    });
+  }
+
+  if (input.voiceError) {
+    notices.push({
+      id: "voice-error",
+      title: "Quản lý giọng đọc",
+      message: input.voiceError,
+      source: "Clone giọng",
+      severity: "error",
+      dismiss: input.onDismissVoiceError,
+    });
+  }
+
+  if (input.ttsPreviewError && input.ttsPreviewError !== input.error) {
+    notices.push({
+      id: "tts-preview-error",
+      title: "Nghe thử lồng tiếng",
+      message: input.ttsPreviewError,
+      source: "Cài đặt · Lồng tiếng",
+      severity: "error",
+      dismiss: input.onDismissTtsPreviewError,
+    });
+  }
+
+  if (input.runtimeError) {
+    notices.push({
+      id: "runtime-error",
+      title: "Môi trường thực thi",
+      message: input.runtimeError,
+      source: "Hệ thống",
+      severity: "error",
+      dismiss: input.onDismissRuntimeError,
+    });
+  }
+
+  if (input.backendConnection === "offline") {
+    notices.push({
+      id: "backend-offline",
+      title: "Backend không phản hồi",
+      message:
+        input.backendNotice
+        ?? `Job có thể bị treo nếu backend đã dừng. Kiểm tra lần cuối lúc ${input.formatBackendClock(input.backendCheckedAt)}.`,
+      source: "Backend",
+      severity: "error",
+      action: { label: "Khởi động lại", onClick: () => input.onRecoverBackend("Đang khởi động lại backend…") },
+    });
+  }
+
+  if (input.backendConnection === "restarting") {
+    notices.push({
+      id: "backend-restarting",
+      title: "Backend đang khởi động lại",
+      message: input.backendNotice ?? "Tiến trình Python có thể đã dừng giữa chừng. Đang thử kết nối lại…",
+      source: "Backend",
+      severity: "warning",
+    });
+  }
+
+  for (const job of input.jobs) {
+    if ((job.status === "failed" || job.status === "interrupted") && job.last_error_message) {
+      notices.push({
+        id: `job-error-${job.id}-${job.updated_at}`,
+        title: job.last_error_code ?? "Tiến trình thất bại",
+        message: job.last_error_message,
+        source: `Tiến trình · ${formatJobLabel(job)}`,
+        severity: "error",
+      });
+    }
+  }
+
+  if (input.runtime) {
+    for (const check of input.runtime.checks) {
+      const status = check.status.toLowerCase();
+      if (check.required && (status === "fail" || status === "blocked")) {
+        notices.push({
+          id: `runtime-check-${check.id}`,
+          title: check.display_name,
+          message: check.action ? `${check.message}\n\n${check.action}` : check.message,
+          source: "Môi trường",
+          severity: "error",
+        });
+      }
+    }
+  }
+
+  return notices;
+}
+
 export function App({ api = defaultApi }: { api?: JobsApi }) {
   const [activeTab, setActiveTab] = useState<"jobs" | "outputs" | "settings" | "cloning">("jobs");
   const [jobs, setJobs] = useState<Job[]>([]);
+  const jobsRef = useRef<Job[]>([]);
   const [videoFiles, setVideoFiles] = useState<File[]>([]);
   const [sourceUrl, setSourceUrl] = useState("");
   const [creatingLinkJob, setCreatingLinkJob] = useState(false);
@@ -285,6 +548,13 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   const [error, setError] = useState<string | null>(null);
   const [runtime, setRuntime] = useState<RuntimeReport | null>(null);
   const [runtimeOpen, setRuntimeOpen] = useState(false);
+  const [errorsModalOpen, setErrorsModalOpen] = useState(false);
+  const [dismissedNoticeIds, setDismissedNoticeIds] = useState<string[]>([]);
+  const [toastNotice, setToastNotice] = useState<AppNotice | null>(null);
+  const [toastVisible, setToastVisible] = useState(false);
+  const [noticesReady, setNoticesReady] = useState(false);
+  const prevNoticeIdsRef = useRef<Set<string>>(new Set());
+  const noticesInitializedRef = useRef(false);
   const [runtimeLoading, setRuntimeLoading] = useState(false);
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [testingRuntime, setTestingRuntime] = useState(false);
@@ -298,8 +568,18 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   const [backendConnection, setBackendConnection] = useState<BackendConnectionState>("checking");
   const [backendLastOkAt, setBackendLastOkAt] = useState<number | null>(null);
   const [backendCheckedAt, setBackendCheckedAt] = useState<number | null>(null);
+  const [backendChecking, setBackendChecking] = useState(false);
   const recoveringBackendRef = useRef(false);
+  const lastBackendRecoverAtRef = useRef(0);
   const backendPollFailuresRef = useRef(0);
+  const lastJobsPollAtRef = useRef(0);
+  const lastJobDetailsRefreshAtRef = useRef(0);
+  const lastOutputsRefreshAtRef = useRef(0);
+  const lastClonedVoicesRefreshAtRef = useRef(0);
+
+  useEffect(() => {
+    jobsRef.current = jobs;
+  }, [jobs]);
 
   // Selected job details modal state
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
@@ -334,49 +614,81 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     openai_translation_model: "",
     gemini_tts_model: "gemini-2.5-flash-preview-tts",
     gemini_tts_voice: "Zephyr",
-    tts_backend: "voxcpm",
+    tts_backend: "omnivoice",
     edge_tts_voice: "vi-VN-HoaiMyNeural",
     google_tts_voice: "vi-VN-Standard-A",
     google_tts_speaking_rate: 1,
-    voxcpm_clone_mode: "reference",
+    omnivoice_num_steps: 32,
+    omnivoice_speed: 1,
+    omnivoice_language_id: "",
+    omnivoice_ref_text: "",
+    omnivoice_instruct: "",
+    omnivoice_auto_voice: true,
   });
   const [newGeminiKey, setNewGeminiKey] = useState("");
   const [newGoogleTtsKey, setNewGoogleTtsKey] = useState("");
   const [newOpenAiKey, setNewOpenAiKey] = useState("");
-  const [settingsSuccess, setSettingsSuccess] = useState(false);
+  const [, setSettingsSuccess] = useState(false);
+  const settingsSaveInFlightRef = useRef(false);
+  const settingsSaveQueuedRef = useRef(false);
+  const lastSettingsSnapshotRef = useRef<string>("");
+  const settingsAutoSaveReadyRef = useRef(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTabId>("tts");
   const [ttsPreviewText, setTtsPreviewText] = useState("Xin chào, đây là bản nghe thử giọng đọc tiếng Việt.");
   const [ttsPreviewLoading, setTtsPreviewLoading] = useState(false);
   const [ttsPreviewUrl, setTtsPreviewUrl] = useState<string | null>(null);
+  const [ttsPreviewError, setTtsPreviewError] = useState<string | null>(null);
   const [edgeTtsVoices, setEdgeTtsVoices] = useState<Array<{ id: string; name: string }>>([]);
   const [openAiModels, setOpenAiModels] = useState<Array<{ id: string; name: string }>>([]);
   const [openAiModelsLoading, setOpenAiModelsLoading] = useState(false);
   const ttsPreviewUrlRef = useRef<string | null>(null);
 
   // Cloned voices states
-  const [clonedVoices, setClonedVoices] = useState<ClonedVoice[]>([]);
+  const [clonedVoicesByBackend, setClonedVoicesByBackend] = useState<Record<CloneBackend, ClonedVoice[]>>({
+    omnivoice: [],
+  });
+  const [cloningBackend, setCloningBackend] = useState<CloneBackend>("omnivoice");
   const [voiceName, setVoiceName] = useState("");
   const [voiceFile, setVoiceFile] = useState<File | null>(null);
+  const [voiceRefText, setVoiceRefText] = useState("");
   const [voiceUploading, setVoiceUploading] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
   const [testText, setTestText] = useState<Record<string, string>>({});
   const [testSynthesizing, setTestSynthesizing] = useState<Record<string, boolean>>({});
   const [testAudioUrls, setTestAudioUrls] = useState<Record<string, string>>({});
-  const selectedClonedVoice = clonedVoices.find((voice) => voice.wav_path === settings.voxcpm_ref_audio);
-  const activeTtsBackend = settings.tts_backend ?? "voxcpm";
+  const activeTtsBackend = settings.tts_backend ?? "omnivoice";
+  const activeCloneBackend: CloneBackend = "omnivoice";
+  const clonedVoices = clonedVoicesByBackend[activeCloneBackend] ?? [];
+  const cloningVoices = clonedVoicesByBackend[cloningBackend] ?? [];
+  const selectedOmniVoiceClone = clonedVoicesByBackend.omnivoice.find(
+    (voice) => voice.wav_path === settings.omnivoice_ref_audio,
+  );
 
+  useEffect(() => {
+    if (activeTab !== "cloning") return;
+    setCloningBackend("omnivoice");
+  }, [activeTab]);
   const loadEdgeTtsVoices = useCallback(async () => {
+    const language = settings.translation_target_language ?? "vi";
     try {
-      const voices = await api.listTtsVoices("edge_tts");
+      const voices = await api.listTtsVoices("edge_tts", language);
       setEdgeTtsVoices(voices);
     } catch {
-      setEdgeTtsVoices([
-        { id: "vi-VN-HoaiMyNeural", name: "Hoài My (Nữ)" },
-        { id: "vi-VN-NamMinhNeural", name: "Nam Minh (Nam)" },
-      ]);
+      const lang = getDubLanguageOption(language);
+      setEdgeTtsVoices(
+        lang.id === "th"
+          ? [
+              { id: "th-TH-PremwadeeNeural", name: "Premwadee (Nữ)" },
+              { id: "th-TH-NiwatNeural", name: "Niwat (Nam)" },
+            ]
+          : [
+              { id: "vi-VN-HoaiMyNeural", name: "Hoài My (Nữ)" },
+              { id: "vi-VN-NamMinhNeural", name: "Nam Minh (Nam)" },
+            ],
+      );
     }
-  }, [api]);
+  }, [api, settings.translation_target_language]);
 
   const loadOpenAiModels = useCallback(async () => {
     const baseUrl = String(settings.openai_api_base ?? "").trim();
@@ -422,7 +734,34 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     if (activeTab === "settings" && settingsTab === "tts" && activeTtsBackend === "edge_tts") {
       void loadEdgeTtsVoices();
     }
-  }, [activeTab, settingsTab, activeTtsBackend, loadEdgeTtsVoices]);
+  }, [activeTab, settingsTab, activeTtsBackend, loadEdgeTtsVoices, settings.translation_target_language]);
+
+  const activeDubLanguage = getDubLanguageOption(settings.translation_target_language);
+  const activeGoogleTtsVoices = useMemo(
+    () => googleTtsVoicesForLanguage(settings.translation_target_language),
+    [settings.translation_target_language],
+  );
+
+  const applyDubLanguageChange = useCallback(async (languageId: string) => {
+    const lang = getDubLanguageOption(languageId);
+    const payload = {
+      translation_target_language: lang.id,
+      edge_tts_voice: lang.defaultEdgeVoice,
+      google_tts_voice: lang.defaultGoogleVoice,
+      omnivoice_language_id: lang.omnivoiceLanguageId,
+      vietnamese_speaking_rate_wps: lang.speakingRate,
+    };
+    setSettings((current) => ({ ...current, ...payload }));
+    setSettingsSuccess(false);
+    setError(null);
+    try {
+      const updated = await api.updateSettings(payload);
+      lastSettingsSnapshotRef.current = "";
+      setSettings((current) => ({ ...current, ...updated }));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Không thể đổi ngôn ngữ lồng tiếng");
+    }
+  }, [api]);
 
   useEffect(() => {
     if (activeTab === "settings" && settingsTab === "translation" && settings.translation_backend === "openai") {
@@ -431,7 +770,11 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   }, [activeTab, settingsTab, settings.translation_backend, loadOpenAiModels]);
 
   const recoverBackend = useCallback(async (reason: string) => {
-    if (recoveringBackendRef.current) return;
+    const now = Date.now();
+    if (recoveringBackendRef.current || now - lastBackendRecoverAtRef.current < 8_000) {
+      return;
+    }
+    lastBackendRecoverAtRef.current = now;
     recoveringBackendRef.current = true;
     setBackendError(null);
     setBackend({ kind: "starting" });
@@ -475,20 +818,39 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
 
   // Fetch initial data
   useEffect(() => {
-    refreshJobs();
-    refreshOutputs();
-    loadSettings();
-    if (activeTab === "cloning" || activeTab === "settings") {
-      refreshClonedVoices();
-    }
+    let cancelled = false;
 
-    // Auto-refresh running jobs every 2 seconds
+    void (async () => {
+      try {
+        await refreshJobs();
+        await refreshOutputs();
+        await loadSettings();
+        if (activeTab === "cloning" || activeTab === "settings") {
+          await refreshClonedVoices();
+        }
+      } finally {
+        if (!cancelled) {
+          setNoticesReady(true);
+        }
+      }
+    })();
+
+    // Poll every 2s for responsiveness, but throttle expensive fetches while idle.
     const interval = setInterval(() => {
+      const now = Date.now();
+      const hasActiveJobs = jobsRef.current.some((job) =>
+        !["done", "failed", "cancelled"].includes(String(job.status || "").toLowerCase()),
+      );
+      if (!hasActiveJobs && now - lastJobsPollAtRef.current < 8_000) {
+        return;
+      }
+      lastJobsPollAtRef.current = now;
       api.listJobs().then((newJobs) => {
         setJobs(newJobs);
         if (selectedJobId) {
           const updated = newJobs.find((j) => j.id === selectedJobId);
-          if (updated) {
+          if (updated && now - lastJobDetailsRefreshAtRef.current >= 4_000) {
+            lastJobDetailsRefreshAtRef.current = now;
             setSelectedJob(updated);
             if (updated.status === "waiting_for_selection" || updated.current_step === "download") {
               fetchResolveCheckpoint(updated.id);
@@ -500,15 +862,20 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
       }).catch(() => {
         // Connection recovery is handled by the dedicated backend health poll.
       });
-      if (activeTab === "outputs") {
+      if (activeTab === "outputs" && now - lastOutputsRefreshAtRef.current >= 6_000) {
+        lastOutputsRefreshAtRef.current = now;
         refreshOutputs();
       }
-      if (activeTab === "cloning" || activeTab === "settings") {
+      if (activeTab === "cloning" && now - lastClonedVoicesRefreshAtRef.current >= 8_000) {
+        lastClonedVoicesRefreshAtRef.current = now;
         refreshClonedVoices();
       }
-    }, 2000);
+    }, 2_000);
 
-    return () => clearInterval(interval);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }, [api, selectedJobId, activeTab, recoverBackend]);
 
   // Tauri bridge: wait for Python backend to be ready, subscribe to crash events
@@ -535,22 +902,15 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     return () => { unlisten?.(); };
   }, [recoverBackend]);
 
-  // Poll /api/health so we can surface backend drops while the UI stays open.
-  useEffect(() => {
-    if (!backend || backend.kind === "starting" || backend.kind === "crashed" || backend.kind === "portable_missing") {
+  const checkBackendHealth = useCallback(async () => {
+    if (recoveringBackendRef.current || backendChecking) {
       return;
     }
-    let cancelled = false;
+    setBackendChecking(true);
+    setBackendConnection((current) => (current === "restarting" ? "restarting" : "checking"));
     const baseUrl = backend?.kind === "ready" ? backend.base_url : BACKEND_BASE;
-
-    const tick = async () => {
-      if (recoveringBackendRef.current) {
-        return;
-      }
+    try {
       const ok = await probeBackendHealth(baseUrl);
-      if (cancelled) {
-        return;
-      }
       const now = Date.now();
       setBackendCheckedAt(now);
       if (ok) {
@@ -558,29 +918,28 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
         setBackendConnection("online");
         setBackendLastOkAt(now);
         setBackendNotice(null);
-        if (backend?.kind !== "ready") {
-          setBackend({ kind: "ready", base_url: baseUrl });
-        }
+        setBackend({ kind: "ready", base_url: baseUrl });
         return;
       }
       backendPollFailuresRef.current += 1;
       setBackendConnection((current) => (current === "restarting" ? "restarting" : "offline"));
-      if (backendPollFailuresRef.current >= 2) {
-        setBackendNotice("Backend không phản hồi. Ứng dụng sẽ không tự tắt backend; hãy dùng nút khởi động lại nếu cần.");
-      }
-    };
+      setBackendNotice("Backend không phản hồi. Ứng dụng sẽ không tự tắt backend; hãy dùng nút khởi động lại nếu cần.");
+    } finally {
+      setBackendChecking(false);
+    }
+  }, [backend, backendChecking]);
 
-    void tick();
-    const id = setInterval(() => { void tick(); }, 2_000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, [backend, recoverBackend]);
-
-  async function refreshClonedVoices() {
+  async function refreshClonedVoices(backend?: CloneBackend) {
     try {
-      setClonedVoices(await api.listClonedVoices());
+      if (backend) {
+        const voices = await api.listClonedVoices(backend);
+        setClonedVoicesByBackend((prev) => ({ ...prev, [backend]: voices }));
+        return;
+      }
+      const omnivoiceVoices = await api.listClonedVoices("omnivoice");
+      setClonedVoicesByBackend({
+        omnivoice: omnivoiceVoices,
+      });
     } catch (cause) {
       setVoiceError(cause instanceof Error ? cause.message : "Không thể tải danh sách giọng clone");
     }
@@ -592,22 +951,29 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
       setVoiceError("Vui lòng nhập tên giọng và chọn tệp âm thanh mẫu (.wav hoặc .mp3).");
       return;
     }
+    if (!voiceRefText.trim()) {
+      setVoiceError("OmniVoice clone cần ref_text — hãy dán nguyên văn nội dung audio mẫu.");
+      return;
+    }
     setVoiceUploading(true);
     setVoiceError(null);
     setVoiceNotice(null);
     try {
-      const created = await api.createClonedVoice(voiceName, voiceFile);
-      const transcriptLength = (created.transcript ?? "").length;
+      const created = await api.createClonedVoice(
+        voiceName,
+        voiceFile,
+        cloningBackend,
+        voiceRefText,
+      );
       setVoiceNotice(
-        transcriptLength > 0
-          ? `Đã upload và transcript ${transcriptLength} ký tự. Giọng đã sẵn sàng cho ultimate clone.`
-          : "Đã upload giọng, nhưng ASR chưa tạo được transcript. Ultimate clone cần file .txt cạnh WAV."
+        `Đã lưu giọng OmniVoice với ref_text ${(created.transcript ?? "").length} ký tự. Sẵn sàng clone.`,
       );
       setVoiceName("");
       setVoiceFile(null);
+      setVoiceRefText("");
       const fileInput = document.getElementById("voice-file-input") as HTMLInputElement;
       if (fileInput) fileInput.value = "";
-      await refreshClonedVoices();
+      await refreshClonedVoices(cloningBackend);
     } catch (cause) {
       setVoiceError(cause instanceof Error ? cause.message : "Tải lên tệp mẫu thất bại");
     } finally {
@@ -619,8 +985,8 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     if (!confirm("Bạn có chắc chắn muốn xóa giọng nói clone này không?")) return;
     setVoiceError(null);
     try {
-      await api.deleteClonedVoice(id);
-      await refreshClonedVoices();
+      await api.deleteClonedVoice(id, cloningBackend);
+      await refreshClonedVoices(cloningBackend);
     } catch (cause) {
       setVoiceError(cause instanceof Error ? cause.message : "Xóa giọng nói thất bại");
     }
@@ -628,11 +994,16 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
 
   async function handleTestVoice(id: string) {
     const text = testText[id] || "Chào bạn, đây là thử nghiệm giọng nói clone offline của tôi.";
+    const selectedVoice = cloningVoices.find((voice) => voice.id === id);
+    if (cloningBackend === "omnivoice" && !selectedVoice?.transcribed) {
+      setVoiceError("Giọng OmniVoice này chưa có ref_text. Hãy upload lại và dán transcript khớp audio mẫu.");
+      return;
+    }
     setTestSynthesizing(prev => ({ ...prev, [id]: true }));
     setVoiceError(null);
     try {
-      const mode = settings.voxcpm_clone_mode === "ultimate" ? "ultimate" : "reference";
-      const blob = await api.testClonedVoice(id, text, mode);
+      const mode = "reference";
+      const blob = await api.testClonedVoice(id, text, mode, cloningBackend);
       const url = URL.createObjectURL(blob);
       setTestAudioUrls(prev => {
         if (prev[id]) URL.revokeObjectURL(prev[id]);
@@ -967,31 +1338,60 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     }
   }
 
-  async function handleSaveSettings(event: FormEvent) {
-    event.preventDefault();
+  function buildSettingsSavePayload() {
+    const {
+      gemini_api_keys,
+      gemini_api_key_add,
+      gemini_api_key_remove,
+      gemini_api_key_update,
+      google_tts_api_key_configured,
+      google_tts_api_key_masked,
+      openai_api_key_configured,
+      openai_api_key_masked,
+      ...savePayload
+    } = settings;
+    const pendingGeminiKey = newGeminiKey.trim();
+    const pendingGoogleTtsKey = newGoogleTtsKey.trim();
+    const pendingOpenAiKey = newOpenAiKey.trim();
+    if (pendingGeminiKey) {
+      savePayload.gemini_api_key_add = pendingGeminiKey;
+    }
+    if (pendingGoogleTtsKey) {
+      savePayload.google_tts_api_key = pendingGoogleTtsKey;
+    }
+    if (pendingOpenAiKey) {
+      savePayload.openai_api_key = pendingOpenAiKey;
+    }
+    return { savePayload, pendingGeminiKey, pendingGoogleTtsKey, pendingOpenAiKey };
+  }
+
+  async function persistSettings({ silent = false }: { silent?: boolean } = {}) {
+    if (settingsSaveInFlightRef.current) {
+      settingsSaveQueuedRef.current = true;
+      return;
+    }
+
+    const { savePayload, pendingGeminiKey, pendingGoogleTtsKey, pendingOpenAiKey } =
+      buildSettingsSavePayload();
+    const snapshot = JSON.stringify({
+      savePayload,
+      pendingGeminiKey,
+      pendingGoogleTtsKey,
+      pendingOpenAiKey,
+    });
+    if (snapshot === lastSettingsSnapshotRef.current) {
+      return;
+    }
+
     setSettingsSuccess(false);
+    settingsSaveInFlightRef.current = true;
     try {
-      const {
-        gemini_api_keys,
-        gemini_api_key_add,
-        gemini_api_key_remove,
-        gemini_api_key_update,
-        ...savePayload
-      } = settings;
-      const pendingGeminiKey = newGeminiKey.trim();
-      const pendingGoogleTtsKey = newGoogleTtsKey.trim();
-      const pendingOpenAiKey = newOpenAiKey.trim();
-      if (pendingGeminiKey) {
-        savePayload.gemini_api_key_add = pendingGeminiKey;
-      }
-      if (pendingGoogleTtsKey) {
-        savePayload.google_tts_api_key = pendingGoogleTtsKey;
-      }
-      if (pendingOpenAiKey) {
-        savePayload.openai_api_key = pendingOpenAiKey;
-      }
       const updated = await api.updateSettings(savePayload);
-      setSettings(updated);
+      lastSettingsSnapshotRef.current = snapshot;
+      setSettings((current) => ({
+        ...current,
+        ...updated,
+      }));
       if (pendingGeminiKey) {
         setNewGeminiKey("");
       }
@@ -1001,12 +1401,36 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
       if (pendingOpenAiKey) {
         setNewOpenAiKey("");
       }
-      setSettingsSuccess(true);
-      setTimeout(() => setSettingsSuccess(false), 3000);
+      if (!silent) {
+        setSettingsSuccess(true);
+        setTimeout(() => setSettingsSuccess(false), 3000);
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Không thể lưu cài đặt");
+      lastSettingsSnapshotRef.current = "";
+    } finally {
+      settingsSaveInFlightRef.current = false;
+      if (settingsSaveQueuedRef.current) {
+        settingsSaveQueuedRef.current = false;
+        void persistSettings({ silent: true });
+      }
     }
   }
+
+  useEffect(() => {
+    if (activeTab !== "settings") {
+      settingsAutoSaveReadyRef.current = false;
+      return;
+    }
+    if (!settingsAutoSaveReadyRef.current) {
+      settingsAutoSaveReadyRef.current = true;
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void persistSettings({ silent: true });
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [activeTab, settings, newGeminiKey, newGoogleTtsKey, newOpenAiKey]);
 
   async function handleAddGeminiKey() {
     const key = newGeminiKey.trim();
@@ -1064,10 +1488,21 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
       setError("Nhập nội dung để nghe thử giọng đọc.");
       return;
     }
+    const backend = activeTtsBackend;
+    if (
+      backend === "omnivoice"
+      && settings.omnivoice_ref_audio?.trim()
+      && !settings.omnivoice_ref_text?.trim()
+    ) {
+      const message = "OmniVoice clone cần ref_text khớp audio mẫu. Chọn giọng từ tab Clone hoặc dán transcript vào ô ref_text.";
+      setTtsPreviewError(message);
+      setError(message);
+      return;
+    }
     setTtsPreviewLoading(true);
     setError(null);
+    setTtsPreviewError(null);
     try {
-      const backend = activeTtsBackend;
       const voice =
         backend === "edge_tts"
           ? settings.edge_tts_voice
@@ -1087,10 +1522,13 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
           google_tts_api_key: newGoogleTtsKey.trim() || undefined,
           gemini_tts_model: settings.gemini_tts_model,
           gemini_tts_voice: settings.gemini_tts_voice,
-          voxcpm_ref_audio: settings.voxcpm_ref_audio,
-          voxcpm_instruct: settings.voxcpm_instruct,
-          voxcpm_clone_mode: settings.voxcpm_clone_mode,
-          voxcpm_auto_voice: settings.voxcpm_auto_voice,
+          omnivoice_ref_audio: settings.omnivoice_ref_audio,
+          omnivoice_ref_text: settings.omnivoice_ref_text,
+          omnivoice_instruct: settings.omnivoice_instruct,
+          omnivoice_auto_voice: settings.omnivoice_auto_voice,
+          omnivoice_num_steps: settings.omnivoice_num_steps,
+          omnivoice_speed: settings.omnivoice_speed,
+          omnivoice_language_id: settings.omnivoice_language_id,
         },
       });
       if (ttsPreviewUrlRef.current) {
@@ -1100,7 +1538,9 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
       ttsPreviewUrlRef.current = url;
       setTtsPreviewUrl(url);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Không thể nghe thử giọng đọc");
+      const message = cause instanceof Error ? cause.message : "Không thể nghe thử giọng đọc";
+      setTtsPreviewError(message);
+      setError(message);
     } finally {
       setTtsPreviewLoading(false);
     }
@@ -1151,49 +1591,101 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     }
   }
 
-  function renderBackendBanner() {
-    if (backendConnection !== "offline" && backendConnection !== "restarting") {
-      return null;
-    }
-    return (
-      <div className={`backend-banner backend-banner--${backendConnection}`}>
-        <AlertTriangle size={20} />
-        <div>
-          <strong>
-            {backendConnection === "restarting"
-              ? "Backend đang được khởi động lại"
-              : "Backend không phản hồi"}
-          </strong>
-          <span>
-            {backendNotice
-              ?? (backendConnection === "restarting"
-                ? "Tiến trình Python có thể đã dừng giữa chừng. Đang thử kết nối lại…"
-                : "Job có thể bị treo nếu backend đã dừng. Kiểm tra lần cuối lúc "
-                  + formatBackendClock(backendCheckedAt) + ".")}
-          </span>
-        </div>
-        {backendConnection === "offline" && (
-          <button type="button" onClick={() => void recoverBackend("Đang khởi động lại backend…")}>
-            Khởi động lại
-          </button>
-        )}
-      </div>
-    );
-  }
+  const appNotices = useMemo(
+    () => buildAppNotices({
+      error,
+      voiceError,
+      ttsPreviewError,
+      runtimeError,
+      runtime,
+      backendConnection,
+      backendNotice,
+      backendCheckedAt,
+      jobs,
+      onDismissError: () => setError(null),
+      onDismissVoiceError: () => setVoiceError(null),
+      onDismissTtsPreviewError: () => setTtsPreviewError(null),
+      onDismissRuntimeError: () => setRuntimeError(null),
+      onRecoverBackend: (reason) => void recoverBackend(reason),
+      formatBackendClock,
+    }),
+    [
+      error,
+      voiceError,
+      ttsPreviewError,
+      runtimeError,
+      runtime,
+      backendConnection,
+      backendNotice,
+      backendCheckedAt,
+      jobs,
+      recoverBackend,
+    ],
+  );
 
-  if (backend?.kind === "portable_missing") {
+  const visibleNotices = useMemo(
+    () => appNotices.filter((notice) => !dismissedNoticeIds.includes(notice.id)),
+    [appNotices, dismissedNoticeIds],
+  );
+
+  const dismissNotice = useCallback((notice: AppNotice) => {
+    notice.dismiss?.();
+    setDismissedNoticeIds((prev) => (prev.includes(notice.id) ? prev : [...prev, notice.id]));
+  }, []);
+
+  const dismissAllNotices = useCallback(() => {
+    for (const notice of visibleNotices) {
+      notice.dismiss?.();
+    }
+    setDismissedNoticeIds((prev) => [...new Set([...prev, ...visibleNotices.map((notice) => notice.id)])]);
+  }, [visibleNotices]);
+
+  useEffect(() => {
+    if (!noticesReady) {
+      return;
+    }
+
+    const currentIds = new Set(visibleNotices.map((notice) => notice.id));
+
+    if (!noticesInitializedRef.current) {
+      prevNoticeIdsRef.current = currentIds;
+      noticesInitializedRef.current = true;
+      return;
+    }
+
+    const brandNew = visibleNotices.filter((notice) => !prevNoticeIdsRef.current.has(notice.id));
+    prevNoticeIdsRef.current = currentIds;
+
+    if (brandNew.length === 0) {
+      return;
+    }
+
+    const latest = brandNew[brandNew.length - 1];
+    setToastNotice(latest);
+    setToastVisible(true);
+
+    const fadeOutTimer = window.setTimeout(() => setToastVisible(false), 5000);
+    const clearTimer = window.setTimeout(() => setToastNotice(null), 5600);
+
+    return () => {
+      window.clearTimeout(fadeOutTimer);
+      window.clearTimeout(clearTimer);
+    };
+  }, [visibleNotices, noticesReady]);
+
+  if (backend?.kind === "environment_missing") {
     return (
       <div className="p-6 max-w-3xl mx-auto text-zinc-100">
-        <h1 className="text-xl font-semibold text-red-400">Portable package is incomplete</h1>
-        <p className="mt-2 text-zinc-300">The app could not find required bundled runtime files.</p>
+        <h1 className="text-xl font-semibold text-red-400">Môi trường dev chưa sẵn sàng</h1>
+        <p className="mt-2 text-zinc-300">App không tìm thấy đủ file cần thiết trong repo. Chạy <code>pnpm run setup</code> rồi thử lại.</p>
         <div className="mt-4 rounded bg-zinc-900 p-3">
-          <strong>Runtime path</strong>
+          <strong>Repo root</strong>
           <code className="block mt-1 text-sm text-zinc-300">{backend.root}</code>
         </div>
         <ul className="mt-4 list-disc pl-6 text-sm text-red-200">
           {backend.missing_items.map((item) => <li key={item}>{item}</li>)}
         </ul>
-        <button onClick={() => location.reload()} className="mt-4 underline">Retry after fixing the portable folder</button>
+        <button onClick={() => location.reload()} className="mt-4 underline">Thử lại</button>
       </div>
     );
   }
@@ -1239,6 +1731,33 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
 
   return (
     <>
+      {toastNotice && (
+        <div
+          className={`notice-toast notice-toast--${toastNotice.severity}${toastVisible ? " notice-toast--visible" : ""}`}
+          role="status"
+          onClick={() => setErrorsModalOpen(true)}
+        >
+          <span className="notice-toast__icon" aria-hidden="true">
+            {toastNotice.severity === "warning" ? <AlertTriangle size={18} /> : <CircleAlert size={18} />}
+          </span>
+          <div className="notice-toast__body">
+            <strong>{toastNotice.title}</strong>
+            <span>{toastNotice.message}</span>
+          </div>
+          <button
+            type="button"
+            className="notice-toast__close"
+            aria-label="Đóng thông báo"
+            onClick={(event) => {
+              event.stopPropagation();
+              setToastVisible(false);
+              window.setTimeout(() => setToastNotice(null), 350);
+            }}
+          >
+            <X size={16} />
+          </button>
+        </div>
+      )}
       <div className="shell">
       <aside>
         <div className="brand">
@@ -1264,28 +1783,54 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
           </button>
         </nav>
         <div className="sidebar-foot">
-          <div
-            className={`backend-status backend-status--${backendConnection}`}
-            title={
-              backendConnection === "online"
-                ? `Backend phản hồi ổn định. Lần kiểm tra gần nhất: ${formatBackendClock(backendCheckedAt)}`
-                : `Backend ${backendConnectionLabel(backendConnection).toLowerCase()}`
-            }
+          <button
+            type="button"
+            className={`errors-foot-btn${visibleNotices.length > 0 ? " has-notices" : ""}`}
+            onClick={() => setErrorsModalOpen(true)}
+            aria-label={visibleNotices.length > 0 ? `Lỗi và thông báo (${visibleNotices.length})` : "Lỗi và thông báo"}
           >
-            <i />
+            <CircleAlert size={14} />
             <div>
-              <strong>
-                <Server size={14} style={{ display: "inline", marginRight: 6, verticalAlign: "-2px" }} />
-                Backend: {backendConnectionLabel(backendConnection)}
-              </strong>
-              <small>
-                {backendConnection === "online"
-                  ? `OK lúc ${formatBackendClock(backendLastOkAt)}`
-                  : backendConnection === "restarting"
-                    ? (backendNotice ?? "Đang kết nối lại…")
-                    : `Mất kết nối · kiểm tra ${formatBackendClock(backendCheckedAt)}`}
-              </small>
+              <strong>Lỗi{visibleNotices.length > 0 ? ` (${visibleNotices.length})` : ""}</strong>
+              <small>{visibleNotices.length > 0 ? "Có thông báo cần xem" : "Không có thông báo"}</small>
             </div>
+          </button>
+          <div className="backend-status-row">
+            <div
+              className={`backend-status backend-status--${backendConnection}`}
+              title={
+                backendConnection === "online"
+                  ? `Backend phản hồi ổn định. Lần kiểm tra gần nhất: ${formatBackendClock(backendCheckedAt)}`
+                  : `Backend ${backendConnectionLabel(backendConnection).toLowerCase()}`
+              }
+            >
+              <i />
+              <div>
+                <strong>
+                  <Server size={14} style={{ display: "inline", marginRight: 6, verticalAlign: "-2px" }} />
+                  Backend: {backendConnectionLabel(backendConnection)}
+                </strong>
+                <small>
+                  {backendConnection === "online"
+                    ? `OK lúc ${formatBackendClock(backendLastOkAt)}`
+                    : backendConnection === "restarting"
+                      ? (backendNotice ?? "Đang kết nối lại…")
+                      : backendCheckedAt
+                        ? `Mất kết nối · kiểm tra ${formatBackendClock(backendCheckedAt)}`
+                        : "Chưa kiểm tra"}
+                </small>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="backend-status-check-btn"
+              onClick={() => void checkBackendHealth()}
+              disabled={backendChecking || recoveringBackendRef.current}
+              title="Kiểm tra backend"
+              aria-label="Kiểm tra backend"
+            >
+              <RefreshCw size={14} className={backendChecking ? "spin" : undefined} />
+            </button>
           </div>
           <button
             className={`runtime ${runtime?.status ?? (runtimeError ? "warning" : "loading")}`}
@@ -1300,8 +1845,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
         </div>
       </aside>
 
-      <main>
-        {renderBackendBanner()}
+      <main className={activeTab === "settings" ? "main--settings" : undefined}>
         {activeTab === "jobs" && (
           <>
             <header>
@@ -1311,23 +1855,13 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
               <span className="phase">Tiến trình hoạt động</span>
             </header>
 
-            {error && (
-              <div className="error">
-                <CircleAlert size={22} />
-                <div>
-                  <strong>{error}</strong>
-                  <span>Vui lòng kiểm tra nhật ký hoạt động hoặc cấu hình, sau đó thử lại.</span>
-                </div>
-                <button onClick={() => setError(null)} style={{ background: "transparent", color: "inherit", marginLeft: "auto" }}>
-                  <X size={18} />
-                </button>
-              </div>
-            )}
-
             <section className="new-job">
               <div>
                 <h2>Tạo tiến trình lồng tiếng mới</h2>
-                <p>Tải từ liên kết Douyin/Bilibili hoặc chọn video local — nhiều file local sẽ được xếp hàng.</p>
+                <p>
+                  Tải từ liên kết Douyin/Bilibili hoặc chọn video local — nhiều file local sẽ được xếp hàng.
+                  Ngôn ngữ lồng tiếng hiện tại: <strong>{activeDubLanguage.label}</strong> (đổi trong Cài đặt → Dịch thuật).
+                </p>
               </div>
 
               <form onSubmit={createLinkJob} className="link-job-form">
@@ -1440,7 +1974,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                       </div>
                       <div className="timeline">
                         {job.steps.map((step) => (
-                          <div key={step.name} title={`${translateStepName(step.name)}: ${translateStepStatus(step.status)}`} className={step.status} />
+                          <div key={step.name} title={`${translateStepName(step.name, settings.translation_target_language)}: ${translateStepStatus(step.status)}`} className={step.status} />
                         ))}
                       </div>
                     </article>
@@ -1453,28 +1987,20 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
 
         {activeTab === "cloning" && (
           <>
-            <header className="settings-header">
+            <header className="settings-header settings-header--cloning">
               <div>
                 <h1>Quản lý giọng nói nhân bản (Voice Cloning)</h1>
-                <p className="settings-subtitle">Thêm giọng từ .wav hoặc .mp3; backend tự transcript ra file .txt cạnh WAV để dùng ultimate clone.</p>
+                <p className="settings-subtitle">
+                  OmniVoice: upload audio mẫu 3–10 giây và dán ref_text khớp nguyên văn với nội dung audio.
+                </p>
               </div>
             </header>
 
-            {voiceError && (
-              <div className="error" style={{ marginBottom: "20px" }}>
-                <CircleAlert size={22} />
-                <div>
-                  <strong>Lỗi quản lý giọng đọc</strong>
-                  <span>{voiceError}</span>
-                </div>
-                <button onClick={() => setVoiceError(null)} style={{ background: "transparent", color: "inherit", marginLeft: "auto" }}>
-                  <X size={18} />
-                </button>
-              </div>
-            )}
             {voiceNotice && (
               <div className="success" style={{ marginBottom: "20px" }}>
-                <CheckCircle2 size={18} />
+                <span className="voice-notice-check" aria-hidden="true">
+                  <CheckCircle2 size={14} />
+                </span>
                 <span>{voiceNotice}</span>
               </div>
             )}
@@ -1488,7 +2014,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                     <h3>Thêm Giọng Nhân Bản Mới</h3>
                   </div>
                   <p className="card-description">
-                    Tải lên một tệp âm thanh mẫu (.wav hoặc .mp3, dài 3-10 giây). Backend sẽ chuyển MP3 sang WAV và tự tạo transcript .txt cạnh file audio.
+                    Tải lên audio mẫu (.wav hoặc .mp3, 3–10 giây) và dán ref_text — transcript chính xác của đoạn audio đó.
                   </p>
                   
                   <form onSubmit={handleUploadVoice} style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
@@ -1516,6 +2042,19 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                       />
                     </label>
 
+                    <label className="settings-label">
+                      <span>ref_text (bắt buộc) — nội dung audio mẫu</span>
+                      <textarea
+                        required
+                        className="settings-input"
+                        rows={4}
+                        placeholder="Dán nguyên văn những gì được nói trong file audio mẫu..."
+                        value={voiceRefText}
+                        onChange={(e) => setVoiceRefText(e.target.value)}
+                        style={{ minHeight: "96px", resize: "vertical" }}
+                      />
+                    </label>
+
                     <button
                       type="submit"
                       disabled={voiceUploading}
@@ -1538,10 +2077,10 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                   <p className="card-description">Danh sách các giọng đọc đã được đăng ký và sẵn sàng sử dụng.</p>
 
                   <div className="gemini-keys-list" style={{ maxHeight: "650px", overflowY: "auto" }}>
-                    {clonedVoices.length === 0 ? (
+                    {cloningVoices.length === 0 ? (
                       <div className="empty-keys-placeholder">Chưa có giọng nhân bản nào. Hãy tải lên một tệp mẫu ở cột bên trái.</div>
                     ) : (
-                      clonedVoices.map((voice) => (
+                      cloningVoices.map((voice) => (
                         <div key={voice.id} className="gemini-key-card" style={{ gap: "12px" }}>
                           <div className="key-card-header">
                             <div className="key-info">
@@ -1561,9 +2100,13 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                             <div className={`alert-info-box ${voice.transcribed ? "info" : "warning"}`}>
                               {voice.transcribed ? <CheckCircle2 size={14} /> : <CircleAlert size={14} />}
                               <span>
-                                {voice.transcribed
-                                  ? `Transcript sẵn sàng (${(voice.transcript ?? "").length} ký tự) cho ultimate clone.`
-                                  : "Chưa có transcript .txt; ultimate clone sẽ cần transcript chính xác."}
+                                {cloningBackend === "omnivoice"
+                                  ? voice.transcribed
+                                    ? `ref_text (${(voice.transcript ?? "").length} ký tự): ${(voice.transcript ?? "").slice(0, 120)}${(voice.transcript ?? "").length > 120 ? "…" : ""}`
+                                    : "Thiếu ref_text — upload lại và dán transcript khớp audio mẫu."
+                                  : voice.transcribed
+                                    ? `Transcript sẵn sàng (${(voice.transcript ?? "").length} ký tự) cho ultimate clone.`
+                                    : "Chưa có transcript .txt; ultimate clone sẽ cần transcript chính xác."}
                               </span>
                             </div>
 
@@ -1572,7 +2115,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                               <span style={{ fontSize: "12px", color: "#8b949e" }}>Âm thanh mẫu:</span>
                               <audio
                                 controls
-                                src={`http://127.0.0.1:8765/api/cloned-voices/${voice.id}/wav`}
+                                src={`http://127.0.0.1:8765/api/cloned-voices/${voice.id}/wav?backend=${encodeURIComponent(cloningBackend)}`}
                                 style={{ height: "30px", width: "100%", maxWidth: "300px" }}
                               />
                             </div>
@@ -1685,52 +2228,65 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
         {activeTab === "settings" && (
           <>
             <header className="settings-header settings-header-compact">
-              <div>
-                <h1>Cài đặt ứng dụng</h1>
-                <p className="settings-subtitle">
-                  Cấu hình theo từng nhóm: tải video, dịch thuật, xử lý âm thanh, lồng tiếng và phụ đề.
-                </p>
+              <div className="settings-header__row">
+                <div>
+                  <h1>Cài đặt</h1>
+                  <p className="settings-subtitle">
+                    Tự lưu khi thay đổi. Chọn nhóm bên dưới để cấu hình pipeline.
+                  </p>
+                </div>
+                <div className="settings-readiness" aria-label="Trạng thái pipeline">
+                  {([
+                    { id: "translation" as const, label: "Dịch" },
+                    { id: "tts" as const, label: "Lồng tiếng" },
+                  ]).map((item) => {
+                    const health = evaluateSettingsTabHealth(item.id, settings, activeTtsBackend);
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        className={`settings-readiness__chip${health === "ready" ? " ready" : health === "attention" ? " attention" : ""}`}
+                        onClick={() => setSettingsTab(item.id)}
+                      >
+                        {health === "ready" ? <CheckCircle2 size={13} /> : health === "attention" ? <CircleAlert size={13} /> : null}
+                        <span>{item.label}</span>
+                        <em>{health === "ready" ? "Sẵn sàng" : health === "attention" ? "Cần cấu hình" : "Tùy chọn"}</em>
+                      </button>
+                    );
+                  })}
+                  <span className="settings-readiness__engine">
+                    Engine: {TTS_BACKEND_OPTIONS.find((o) => o.id === activeTtsBackend)?.label ?? activeTtsBackend}
+                  </span>
+                </div>
               </div>
             </header>
-            <form onSubmit={handleSaveSettings} className="settings-page-layout settings-page-layout--tabbed">
-              <div className="settings-shell">
-                <div className="settings-toolbar">
-                  <div className="settings-tabs settings-tabs--grow" role="tablist" aria-label="Nhóm cài đặt">
-                    {SETTINGS_TABS.map((tab) => (
-                      <button
-                        key={tab.id}
-                        type="button"
-                        role="tab"
-                        aria-selected={settingsTab === tab.id}
-                        className={`settings-tab-btn${settingsTab === tab.id ? " active" : ""}`}
-                        onClick={() => setSettingsTab(tab.id)}
-                      >
-                        {tab.label}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="settings-save-slot">
-                    <button type="submit" className="save-settings-button">
-                      <Save size={18} /> Lưu cài đặt
-                    </button>
-                    {settingsSuccess && (
-                      <span className="save-success-badge">
-                        <CheckCircle2 size={18} /> Đã lưu
-                      </span>
-                    )}
-                  </div>
-                </div>
-
+            <div className="settings-page">
+              <SettingsTabBar
+                activeTab={settingsTab}
+                onSelect={setSettingsTab}
+                settings={settings}
+                activeTtsBackend={activeTtsBackend}
+              />
+              <div className="settings-content-scroll">
+              <form className="settings-panel">
                 {settingsTab === "download" && (
-                  <div className="settings-tab-panel">
-                    <section className="settings-card settings-card--full">
-                      <div className="card-header-accent">
-                        <span className="accent-bar"></span>
-                        <h3>Tải video (Douyin / Bilibili)</h3>
-                      </div>
-                      <p className="card-description">
-                        Tự lấy cookie từ Chrome, rồi lần lượt thử Edge → Firefox → Brave nếu cần.
-                        Đăng nhập Douyin/Bilibili trên Chrome trước khi tạo job từ liên kết.
+                  <div className="settings-tab-panel" role="tabpanel">
+                    <SettingsSectionHead
+                      title="Tải video (Douyin / Bilibili)"
+                      description="Ưu tiên cookies.txt; nếu thiếu app tự lấy cookie Firefox → Chrome → Edge → Brave."
+                    />
+                    <div className="settings-form-fields">
+                      <label className="settings-label">
+                        <span>Đường dẫn cookies.txt (Douyin)</span>
+                        <input
+                          className="settings-input"
+                          placeholder="C:\Users\...\AppData\Local\DouyinVietnamizer\cookies\douyin_cookies.txt"
+                          value={settings.cookies_file ?? ""}
+                          onChange={(e) => setSettings({ ...settings, cookies_file: e.target.value })}
+                        />
+                      </label>
+                      <p className="card-description card-description--compact">
+                        Export từ Firefox (extension cookies.txt) khi đã đăng nhập Douyin. Để trống để chỉ dùng cookie trình duyệt.
                       </p>
                       <button
                         type="button"
@@ -1742,22 +2298,37 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                         <RefreshCw size={16} /> {ytDlpUpdating ? "Đang cập nhật yt-dlp..." : "Cập nhật yt-dlp"}
                       </button>
                       {ytDlpNotice && (
-                        <p className="import-file-count" style={{ marginTop: "10px", color: "#9be7a8" }}>{ytDlpNotice}</p>
+                        <p className="settings-notice settings-notice--ok">{ytDlpNotice}</p>
                       )}
-                    </section>
+                    </div>
                   </div>
                 )}
 
                 {settingsTab === "translation" && (
-                  <div className="settings-tab-panel">
-                    <section className="settings-card">
-                      <div className="card-header-accent">
-                        <span className="accent-bar"></span>
-                        <h3>Dịch thuật</h3>
-                      </div>
-                      <p className="card-description card-description--compact">
-                        Chọn bộ dịch cho phụ đề và nội dung lồng tiếng.
-                      </p>
+                  <div className="settings-tab-panel" role="tabpanel">
+                    <div className="settings-translation-layout">
+                      <div className="settings-translation-main">
+                        <SettingsSectionHead
+                          title="Dịch thuật"
+                          description="Chọn ngôn ngữ lồng tiếng và bộ dịch cho phụ đề, nội dung TTS."
+                        />
+                      <label className="settings-label">
+                        <SettingsFieldLabel
+                          label="Ngôn ngữ lồng tiếng"
+                          hint="Video sẽ được dịch và lồng tiếng sang ngôn ngữ này. Đổi ngôn ngữ sẽ tự cập nhật giọng TTS mặc định."
+                        />
+                        <select
+                          className="settings-input"
+                          value={settings.translation_target_language ?? "vi"}
+                          onChange={(e) => applyDubLanguageChange(e.target.value)}
+                        >
+                          {DUB_LANGUAGE_OPTIONS.map((option) => (
+                            <option key={option.id} value={option.id}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
                       <label className="settings-label">
                         <span>Bộ dịch thuật</span>
                         <select
@@ -1846,137 +2417,145 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                           )}
                         </div>
                       )}
-                    </section>
+                      </div>
 
-                    <section className="settings-card">
-                      <div className="card-header-accent">
-                        <span className="accent-bar"></span>
-                        <h3>Google AI Studio / Khóa API Gemini</h3>
-                      </div>
-                      <p className="card-description card-description--compact">
-                        Dùng cho dịch Gemini và Gemini TTS. Thêm nhiều khóa để luân phiên khi hết quota.
-                      </p>
-                      <div className="add-key-container">
-                        <label className="settings-label" style={{ flex: 1 }}>
-                          <span>Khóa API Gemini mới</span>
-                          <input
-                            className="settings-input"
-                            type="password"
-                            placeholder="Dán khóa API Google AI Studio"
-                            value={newGeminiKey}
-                            onChange={(e) => setNewGeminiKey(e.target.value)}
+                      <div className="settings-translation-side">
+                        <section className="settings-card">
+                          <SettingsSectionHead
+                            title="Khóa API Gemini"
+                            description="Dùng cho dịch Gemini và Gemini TTS — thêm nhiều khóa để luân phiên quota."
                           />
-                        </label>
-                        <button type="button" className="gradient-button" onClick={handleAddGeminiKey}>
-                          <Plus size={16} /> Thêm khóa
-                        </button>
-                      </div>
-                      <div className="gemini-keys-list">
-                        {(settings.gemini_api_keys ?? []).length === 0 ? (
-                          <div className="empty-keys-placeholder">Chưa có khóa API Gemini nào.</div>
-                        ) : (
-                          (settings.gemini_api_keys ?? []).map((item: any) => (
-                            <div key={item.id} className="gemini-key-card">
-                              <div className="key-card-header">
-                                <div className="key-info">
-                                  <span className="key-badge">API KEY</span>
-                                  <code className="key-masked">{item.masked ?? item.label}</code>
-                                </div>
-                                <button
-                                  type="button"
-                                  aria-label={`Remove Gemini key ${item.masked ?? item.label}`}
-                                  onClick={() => handleRemoveGeminiKey(item.id)}
-                                  className="key-action-btn delete-btn"
-                                >
-                                  <Trash2 size={13} /> Gỡ bỏ
-                                </button>
-                              </div>
-                              <div className="key-card-body">
-                                <div className="key-label-wrapper">
-                                  <span className="input-label-small">Nhãn</span>
-                                  <div className="input-with-button">
-                                    <input
-                                      aria-label={`Edit label for Gemini key ${item.masked ?? item.label}`}
-                                      className="settings-input key-label-input"
-                                      placeholder="Ví dụ: Khóa dự phòng"
-                                      value={item.label ?? item.masked ?? ""}
-                                      onChange={(event) => updateGeminiKeyLabel(item.id, event.target.value)}
-                                    />
+                        <div className="settings-section settings-section--nested">
+                          <SettingsSectionHead title="Quản lý khóa Gemini" />
+                          <div className="add-key-container">
+                            <label className="settings-label" style={{ flex: 1 }}>
+                              <span>Khóa API Gemini mới</span>
+                              <input
+                                className="settings-input"
+                                type="password"
+                                placeholder="Dán khóa API Google AI Studio"
+                                value={newGeminiKey}
+                                onChange={(e) => setNewGeminiKey(e.target.value)}
+                              />
+                            </label>
+                            <button type="button" className="gradient-button" onClick={handleAddGeminiKey}>
+                              <Plus size={16} /> Thêm khóa
+                            </button>
+                          </div>
+                          <div className="gemini-keys-list">
+                            {(settings.gemini_api_keys ?? []).length === 0 ? (
+                              <div className="empty-keys-placeholder">Chưa có khóa API Gemini nào.</div>
+                            ) : (
+                              (settings.gemini_api_keys ?? []).map((item: any) => (
+                                <div key={item.id} className="gemini-key-card">
+                                  <div className="key-card-header">
+                                    <div className="key-info">
+                                      <span className="key-badge">API KEY</span>
+                                      <code className="key-masked">{item.masked ?? item.label}</code>
+                                    </div>
                                     <button
                                       type="button"
-                                      aria-label={`Save label for Gemini key ${item.masked ?? item.label}`}
-                                      onClick={() => handleSaveGeminiKeyLabel(item.id, item.label ?? "")}
-                                      className="key-action-btn save-btn"
+                                      aria-label={`Remove Gemini key ${item.masked ?? item.label}`}
+                                      onClick={() => handleRemoveGeminiKey(item.id)}
+                                      className="key-action-btn delete-btn"
                                     >
-                                      <Save size={13} /> Lưu nhãn
+                                      <Trash2 size={13} /> Gỡ bỏ
                                     </button>
                                   </div>
+                                  <div className="key-card-body">
+                                    <div className="key-label-wrapper">
+                                      <span className="input-label-small">Nhãn</span>
+                                      <div className="input-with-button">
+                                        <input
+                                          aria-label={`Edit label for Gemini key ${item.masked ?? item.label}`}
+                                          className="settings-input key-label-input"
+                                          placeholder="Ví dụ: Khóa dự phòng"
+                                          value={item.label ?? item.masked ?? ""}
+                                          onChange={(event) => updateGeminiKeyLabel(item.id, event.target.value)}
+                                        />
+                                        <button
+                                          type="button"
+                                          aria-label={`Save label for Gemini key ${item.masked ?? item.label}`}
+                                          onClick={() => handleSaveGeminiKeyLabel(item.id, item.label ?? "")}
+                                          className="key-action-btn save-btn"
+                                        >
+                                          <Save size={13} /> Lưu nhãn
+                                        </button>
+                                      </div>
+                                    </div>
+                                  </div>
                                 </div>
-                              </div>
-                            </div>
-                          ))
-                        )}
+                              ))
+                            )}
+                          </div>
+                        </div>
+                        </section>
                       </div>
-                    </section>
+                    </div>
                   </div>
                 )}
 
                 {settingsTab === "audio" && (
-                  <div className="settings-tab-panel">
-                    <section className="settings-card settings-card--full">
-                      <div className="card-header-accent">
-                        <span className="accent-bar"></span>
-                        <h3>Nhận diện giọng nói (VAD)</h3>
-                      </div>
-                      <p className="card-description card-description--compact">
-                        Xác định vùng có lời nói trước khi nhận dạng tiếng Trung. Thay đổi có hiệu lực từ bước VAD trở đi — chạy lại job từ VAD hoặc ASR.
-                      </p>
-                      <div className="settings-field-grid settings-field-grid--2">
-                        <label className="settings-label settings-field-grid__span-2">
-                          <SettingsFieldLabel
-                            label="Engine VAD"
-                            hint="Silero dùng mô hình neural, chính xác hơn trên Windows/macOS. FFmpeg silencedetect là phương án cũ để rollback khi cần."
-                          />
-                          <select
-                            className="settings-input"
-                            value={settings.vad_engine ?? "silero"}
-                            onChange={(e) => setSettings({ ...settings, vad_engine: e.target.value })}
-                          >
-                            <option value="silero">Silero VAD (khuyến nghị)</option>
-                            <option value="silencedetect">FFmpeg silencedetect (legacy)</option>
-                          </select>
-                        </label>
-                        <SettingsCheckboxField
-                          label="Lọc ASR do VAD nhầm"
-                          hint="Loại bỏ đoạn ASR trùng lặp hoặc rỗng khi VAD nhầm nhạc nền là lời nói. Bật mặc định; tắt nếu thấy mất câu hợp lệ."
-                          checked={settings.vad_false_positive_filter_enabled ?? true}
-                          onChange={(checked) => setSettings({ ...settings, vad_false_positive_filter_enabled: checked })}
+                  <div className="settings-tab-panel" role="tabpanel">
+                    <div className="settings-audio-layout">
+                      <div className="settings-audio-main">
+                        <SettingsSectionHead
+                          title="Nhận diện giọng nói (VAD)"
+                          description="Xác định vùng có lời nói trước khi nhận dạng tiếng Trung. Chạy lại job từ VAD hoặc ASR để áp dụng."
                         />
-                        <SettingsCheckboxField
-                          label="Lọc theo năng lượng giọng/nhạc"
-                          hint="So sánh stem vocals và nhạc nền (Demucs) để loại vùng nghi ngờ chỉ có nhạc. Cần mix_mode background_only để có stem."
-                          checked={settings.vad_energy_filter_enabled ?? true}
-                          onChange={(checked) => setSettings({ ...settings, vad_energy_filter_enabled: checked })}
-                        />
-                        <label className="settings-label settings-field-grid__span-2">
-                          <SettingsFieldLabel
-                            label={`Tỷ lệ giọng/nhạc tối thiểu (${settings.vad_energy_min_vocal_ratio ?? 1.15})`}
-                            hint="Vùng có tỷ lệ năng lượng vocals so với nhạc nền thấp hơn ngưỡng này sẽ bị loại. Tăng nếu còn nhầm nhạc; giảm nếu mất câu hợp lệ."
-                          />
-                          <input
-                            className="settings-input"
-                            type="range"
-                            min={0.8}
-                            max={2.5}
-                            step={0.05}
-                            value={settings.vad_energy_min_vocal_ratio ?? 1.15}
-                            onChange={(e) => setSettings({ ...settings, vad_energy_min_vocal_ratio: Number(e.target.value) })}
-                            disabled={!(settings.vad_energy_filter_enabled ?? true)}
-                          />
-                        </label>
+                        <div className="settings-form-fields settings-form-fields--fluid">
+                          <div className="settings-field-grid settings-field-grid--2">
+                            <label className="settings-label settings-field-grid__span-2">
+                              <SettingsFieldLabel
+                                label="Engine VAD"
+                                hint="Silero dùng mô hình neural, chính xác hơn trên Windows/macOS. FFmpeg silencedetect là phương án cũ để rollback khi cần."
+                              />
+                              <select
+                                className="settings-input"
+                                value={settings.vad_engine ?? "silero"}
+                                onChange={(e) => setSettings({ ...settings, vad_engine: e.target.value })}
+                              >
+                                <option value="silero">Silero VAD (khuyến nghị)</option>
+                                <option value="silencedetect">FFmpeg silencedetect (legacy)</option>
+                              </select>
+                            </label>
+                            <SettingsCheckboxField
+                              label="Lọc ASR do VAD nhầm"
+                              hint="Loại bỏ đoạn ASR trùng lặp hoặc rỗng khi VAD nhầm nhạc nền là lời nói. Bật mặc định; tắt nếu thấy mất câu hợp lệ."
+                              checked={settings.vad_false_positive_filter_enabled ?? true}
+                              onChange={(checked) => setSettings({ ...settings, vad_false_positive_filter_enabled: checked })}
+                            />
+                            <SettingsCheckboxField
+                              label="Lọc theo năng lượng giọng/nhạc"
+                              hint="So sánh stem vocals và nhạc nền (Demucs) để loại vùng nghi ngờ chỉ có nhạc. Cần mix_mode background_only để có stem."
+                              checked={settings.vad_energy_filter_enabled ?? true}
+                              onChange={(checked) => setSettings({ ...settings, vad_energy_filter_enabled: checked })}
+                            />
+                            <label className="settings-label settings-field-grid__span-2">
+                              <SettingsFieldLabel
+                                label={`Tỷ lệ giọng/nhạc tối thiểu (${settings.vad_energy_min_vocal_ratio ?? 1.15})`}
+                                hint="Vùng có tỷ lệ năng lượng vocals so với nhạc nền thấp hơn ngưỡng này sẽ bị loại. Tăng nếu còn nhầm nhạc; giảm nếu mất câu hợp lệ."
+                              />
+                              <input
+                                className="settings-input"
+                                type="range"
+                                min={0.8}
+                                max={2.5}
+                                step={0.05}
+                                value={settings.vad_energy_min_vocal_ratio ?? 1.15}
+                                onChange={(e) => setSettings({ ...settings, vad_energy_min_vocal_ratio: Number(e.target.value) })}
+                                disabled={!(settings.vad_energy_filter_enabled ?? true)}
+                              />
+                            </label>
+                          </div>
+                        </div>
                       </div>
-                    </section>
 
+                      <div className="settings-audio-side">
+                        <SettingsSectionHead
+                          title="Tinh chỉnh VAD & ASR"
+                          description="Chỉ mở khi cần chỉnh chi tiết Silero, FFmpeg hoặc ASR thưa."
+                        />
                     {(settings.vad_engine ?? "silero") === "silero" && (
                       <section className="settings-card">
                         <div className="card-header-accent">
@@ -2170,133 +2749,63 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                         </label>
                       </div>
                     </section>
+                      </div>
+                    </div>
                   </div>
                 )}
 
                 {settingsTab === "tts" && (
-                  <div className="settings-tab-panel">
-                    <section className="settings-card settings-card--full">
-                      <div className="card-header-accent">
-                        <span className="accent-bar"></span>
-                        <h3>Khớp thời lượng lồng tiếng</h3>
-                      </div>
-                      <p className="card-description card-description--compact">
-                        Điều chỉnh bước <strong>duration_repair</strong> khi giọng TTS ngắn hoặc dài hơn timeline gốc.
-                        Khi cần rút ngắn/kéo dài câu, pipeline dùng cùng backend dịch đã chọn ở tab Dịch thuật (OpenAPI hoặc Gemini).
-                        Chạy lại job từ duration_repair hoặc TTS để áp dụng.
-                      </p>
-                      <SettingsCheckboxField
-                        label="Bật khớp thời lượng chính xác"
-                        hint="Khi bật, pipeline cố căn thời lượng từng đoạn TTS với slot gốc (kéo dài, rút ngắn hoặc thêm im lặng)."
-                        checked={settings.exact_timing_enabled ?? true}
-                        onChange={(checked) => setSettings({ ...settings, exact_timing_enabled: checked })}
+                  <div className="settings-tab-panel settings-tts-panel" role="tabpanel">
+                    <div className="settings-engine-block">
+                      <SettingsSectionHead
+                        title="Engine lồng tiếng"
+                        description="Chọn engine — cấu hình bên dưới chỉ hiện đúng engine đang dùng."
                       />
-                      <div className="settings-field-grid settings-field-grid--2">
-                        <label className="settings-label settings-field-grid__span-2">
-                          <SettingsFieldLabel
-                            label={`Tốc độ TTS toàn cục (${(settings.tts_global_speed ?? 1).toFixed(2)}×)`}
-                            hint="Nhân tốc độ phát audio TTS trước khi khớp timeline. Tăng nhẹ (vd. 1.05) nếu lồng tiếng vẫn dài hơn giọng gốc; giảm nếu quá nhanh."
-                          />
-                          <input
-                            className="settings-input"
-                            type="range"
-                            min={0.9}
-                            max={1.3}
-                            step={0.01}
-                            value={settings.tts_global_speed ?? 1}
-                            onChange={(e) => setSettings({ ...settings, tts_global_speed: Number(e.target.value) })}
-                            disabled={!settings.exact_timing_enabled}
-                          />
-                        </label>
-                        <label className="settings-label settings-field-grid__span-2">
-                          <SettingsFieldLabel
-                            label={`Tốc độ nói tiếng Việt ước lượng (${(settings.vietnamese_speaking_rate_wps ?? 3.2).toFixed(2)} từ/giây)`}
-                            hint="Dùng khi dịch để ước lượng độ dài câu. Tự hiệu chỉnh sau mỗi job TTS; chỉnh tay nếu giọng đọc nhanh/chậm hơn mặc định."
-                          />
-                          <input
-                            className="settings-input"
-                            type="range"
-                            min={2}
-                            max={5}
-                            step={0.05}
-                            value={settings.vietnamese_speaking_rate_wps ?? 3.2}
-                            onChange={(e) => setSettings({ ...settings, vietnamese_speaking_rate_wps: Number(e.target.value) })}
-                          />
-                        </label>
-                        <label className="settings-label">
-                          <SettingsFieldLabel
-                            label="Ngưỡng kéo dài TTS ngắn (giây)"
-                            hint="Chênh lệch tối thiểu giữa slot gốc và TTS hiện tại mới kích hoạt kéo dài/thêm từ. Tăng nếu repair làm audio dài hơn thực tế."
-                          />
-                          <input
-                            className="settings-input"
-                            type="number"
-                            min={0.2}
-                            max={5}
-                            step={0.1}
-                            value={settings.short_tts_lengthen_min_gap_sec ?? 1.5}
-                            onChange={(e) => setSettings({ ...settings, short_tts_lengthen_min_gap_sec: Number(e.target.value) })}
-                            disabled={!settings.exact_timing_enabled}
-                          />
-                        </label>
-                        <label className="settings-label">
-                          <SettingsFieldLabel
-                            label={`Tỷ lệ kéo dài tối đa (${settings.short_tts_lengthen_max_ratio ?? 1.6}×)`}
-                            hint="Giới hạn độ dài sau khi kéo dài TTS ngắn (vd. 1.6 = tối đa 160% độ dài hiện tại). Giảm nếu repair vẫn kéo dài quá mức."
-                          />
-                          <input
-                            className="settings-input"
-                            type="number"
-                            min={1.05}
-                            max={2}
-                            step={0.05}
-                            value={settings.short_tts_lengthen_max_ratio ?? 1.6}
-                            onChange={(e) => setSettings({ ...settings, short_tts_lengthen_max_ratio: Number(e.target.value) })}
-                            disabled={!settings.exact_timing_enabled}
-                          />
-                        </label>
-                      </div>
-                    </section>
-
-                    <section className="settings-card settings-card--full">
-                      <div className="card-header-accent">
-                        <span className="accent-bar"></span>
-                        <h3>Engine lồng tiếng</h3>
-                      </div>
-                      <p className="card-description card-description--compact">
-                        Chọn engine phù hợp: clone offline (VoxCPM2), neural miễn phí (Edge / Google TTS), hoặc AI Studio (Gemini TTS).
-                      </p>
-                      <div className="settings-field-grid settings-backend-grid">
+                      <div className="settings-engine-rail" role="radiogroup" aria-label="Engine lồng tiếng">
                         {TTS_BACKEND_OPTIONS.map((option) => (
                           <button
                             key={option.id}
                             type="button"
-                            className={`settings-backend-card${activeTtsBackend === option.id ? " active" : ""}`}
+                            role="radio"
+                            aria-checked={activeTtsBackend === option.id}
+                            className={`settings-engine-card${activeTtsBackend === option.id ? " active" : ""}`}
                             onClick={() => setSettings({ ...settings, tts_backend: option.id })}
                           >
+                            <span className="settings-engine-card__mark" aria-hidden="true" />
                             <strong>{option.label}</strong>
                             <span>{option.hint}</span>
                           </button>
                         ))}
                       </div>
-                    </section>
+                    </div>
 
-                    {activeTtsBackend === "voxcpm" && (
+                    <div className="settings-tts-layout">
+                      <div className="settings-tts-main">
+                    {activeTtsBackend === "omnivoice" && (
                       <section className="settings-card">
                         <div className="card-header-accent">
                           <span className="accent-bar"></span>
-                          <h3>VoxCPM2 — Clone giọng</h3>
+                          <h3>OmniVoice — Đa ngôn ngữ</h3>
                         </div>
                         <p className="card-description card-description--compact">
-                          Upload giọng mẫu ở tab <strong>Clone Giọng</strong>, hoặc dùng voice design / auto voice.
+                          Model TTS mới nhất hỗ trợ 600+ ngôn ngữ, clone giọng và voice design. Cần cài môi trường qua{" "}
+                          <code>python scripts/setup_omnivoice.py</code>.
                         </p>
                         <div className="settings-field-grid settings-field-grid--2">
                           <label className="settings-label">
                             <span>Audio tham chiếu (.wav)</span>
                             <select
                               className="settings-input"
-                              value={settings.voxcpm_ref_audio ?? ""}
-                              onChange={(e) => setSettings({ ...settings, voxcpm_ref_audio: e.target.value })}
+                              value={settings.omnivoice_ref_audio ?? ""}
+                              onChange={(e) => {
+                                const wavPath = e.target.value;
+                                const voice = clonedVoicesByBackend.omnivoice.find((item) => item.wav_path === wavPath);
+                                setSettings({
+                                  ...settings,
+                                  omnivoice_ref_audio: wavPath,
+                                  omnivoice_ref_text: voice?.transcript?.trim() || "",
+                                });
+                              }}
                             >
                               <option value="">Không dùng / Auto voice</option>
                               {clonedVoices.map((voice) => (
@@ -2307,44 +2816,79 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                             </select>
                           </label>
                           <label className="settings-label">
-                            <span>Chế độ clone</span>
-                            <select
+                            <span>Ngôn ngữ đích OmniVoice</span>
+                            <input
                               className="settings-input"
-                              value={settings.voxcpm_clone_mode ?? "reference"}
-                              onChange={(e) => setSettings({ ...settings, voxcpm_clone_mode: e.target.value })}
-                            >
-                              <option value="reference">Reference clone (ổn định)</option>
-                              <option value="ultimate">Ultimate clone (dùng transcript)</option>
-                            </select>
+                              placeholder={activeDubLanguage.omnivoiceLanguageId}
+                              value={settings.omnivoice_language_id ?? ""}
+                              onChange={(e) => setSettings({ ...settings, omnivoice_language_id: e.target.value })}
+                            />
+                          </label>
+                          <label className="settings-label settings-field-grid__span-2">
+                            <span>ref_text (bắt buộc khi clone) — khớp audio mẫu</span>
+                            <textarea
+                              className="settings-input"
+                              rows={3}
+                              placeholder="Dán nguyên văn nội dung audio tham chiếu..."
+                              value={settings.omnivoice_ref_text ?? ""}
+                              onChange={(e) => setSettings({ ...settings, omnivoice_ref_text: e.target.value })}
+                              style={{ minHeight: "84px", resize: "vertical" }}
+                            />
                           </label>
                           <label className="settings-label settings-field-grid__span-2">
                             <span>Voice design (tùy chọn)</span>
                             <input
                               className="settings-input"
-                              placeholder="female, low pitch"
-                              value={settings.voxcpm_instruct ?? ""}
-                              onChange={(e) => setSettings({ ...settings, voxcpm_instruct: e.target.value })}
+                              placeholder="female, low pitch, british accent"
+                              value={settings.omnivoice_instruct ?? ""}
+                              onChange={(e) => setSettings({ ...settings, omnivoice_instruct: e.target.value })}
+                            />
+                          </label>
+                          <label className="settings-label">
+                            <span>Diffusion steps ({settings.omnivoice_num_steps ?? 32})</span>
+                            <input
+                              className="settings-input"
+                              type="range"
+                              min={8}
+                              max={64}
+                              step={4}
+                              value={settings.omnivoice_num_steps ?? 32}
+                              onChange={(e) =>
+                                setSettings({ ...settings, omnivoice_num_steps: Number(e.target.value) })
+                              }
+                            />
+                          </label>
+                          <label className="settings-label">
+                            <span>Tốc độ đọc ({settings.omnivoice_speed ?? 1}x)</span>
+                            <input
+                              className="settings-input"
+                              type="range"
+                              min={0.75}
+                              max={1.5}
+                              step={0.05}
+                              value={settings.omnivoice_speed ?? 1}
+                              onChange={(e) => setSettings({ ...settings, omnivoice_speed: Number(e.target.value) })}
                             />
                           </label>
                           <label className="settings-label settings-label--inline settings-field-grid__span-2">
                             <input
                               type="checkbox"
-                              checked={Boolean(settings.voxcpm_auto_voice ?? true)}
-                              onChange={(e) => setSettings({ ...settings, voxcpm_auto_voice: e.target.checked })}
+                              checked={Boolean(settings.omnivoice_auto_voice ?? true)}
+                              onChange={(e) => setSettings({ ...settings, omnivoice_auto_voice: e.target.checked })}
                             />
                             <span>Auto voice khi không có audio tham chiếu</span>
                           </label>
                         </div>
-                        {settings.voxcpm_clone_mode === "ultimate" && !settings.voxcpm_ref_audio && (
+                        {settings.omnivoice_ref_audio && !(settings.omnivoice_ref_text ?? "").trim() && (
                           <div className="alert-info-box warning">
                             <CircleAlert size={14} />
-                            <span>Ultimate clone cần chọn audio tham chiếu đã upload.</span>
+                            <span>OmniVoice clone cần ref_text khớp với audio tham chiếu. Chọn giọng từ tab Clone hoặc dán thủ công.</span>
                           </div>
                         )}
-                        {settings.voxcpm_clone_mode === "ultimate" && selectedClonedVoice && !selectedClonedVoice.transcribed && (
+                        {settings.omnivoice_ref_audio && selectedOmniVoiceClone && !selectedOmniVoiceClone.transcribed && (
                           <div className="alert-info-box warning">
                             <CircleAlert size={14} />
-                            <span>Giọng đã chọn chưa có transcript .txt; hãy upload lại file rõ tiếng hơn.</span>
+                            <span>Giọng đã chọn thiếu ref_text — hãy upload lại ở tab Clone giọng (OmniVoice).</span>
                           </div>
                         )}
                       </section>
@@ -2360,15 +2904,14 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                           Dùng giọng neural của Microsoft qua internet. Không cần GPU hay API key.
                         </p>
                         <label className="settings-label">
-                          <span>Giọng tiếng Việt</span>
+                          <span>Giọng {activeDubLanguage.label}</span>
                           <select
                             className="settings-input"
-                            value={settings.edge_tts_voice ?? "vi-VN-HoaiMyNeural"}
+                            value={settings.edge_tts_voice ?? activeDubLanguage.defaultEdgeVoice}
                             onChange={(e) => setSettings({ ...settings, edge_tts_voice: e.target.value })}
                           >
                             {(edgeTtsVoices.length > 0 ? edgeTtsVoices : [
-                              { id: "vi-VN-HoaiMyNeural", name: "Hoài My (Nữ)" },
-                              { id: "vi-VN-NamMinhNeural", name: "Nam Minh (Nam)" },
+                              { id: activeDubLanguage.defaultEdgeVoice, name: activeDubLanguage.label },
                             ]).map((voice) => (
                               <option key={voice.id} value={voice.id}>
                                 {voice.name}
@@ -2386,7 +2929,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                           <h3>Google TTS — Cloud Text-to-Speech</h3>
                         </div>
                         <p className="card-description card-description--compact">
-                          4 giọng Standard tiếng Việt (A/B/C/D). Cần API key từ Google Cloud Console — khác khóa Gemini AI Studio.
+                          Giọng Standard/Neural2 cho {activeDubLanguage.label}. Cần API key từ Google Cloud Console — khác khóa Gemini AI Studio.
                         </p>
                         <div className="settings-field-grid settings-field-grid--2">
                           <label className="settings-label settings-field-grid__span-2">
@@ -2406,13 +2949,13 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                             </div>
                           )}
                           <label className="settings-label settings-field-grid__span-2">
-                            <span>Giọng đọc tiếng Việt</span>
+                            <span>Giọng đọc {activeDubLanguage.label}</span>
                             <select
                               className="settings-input"
-                              value={settings.google_tts_voice ?? "vi-VN-Standard-A"}
+                              value={settings.google_tts_voice ?? activeDubLanguage.defaultGoogleVoice}
                               onChange={(e) => setSettings({ ...settings, google_tts_voice: e.target.value })}
                             >
-                              {GOOGLE_TTS_VOICES.map((voice) => (
+                              {activeGoogleTtsVoices.map((voice) => (
                                 <option key={voice.id} value={voice.id}>
                                   {voice.name}
                                 </option>
@@ -2483,55 +3026,135 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                       </section>
                     )}
 
-                    <section className="settings-card settings-card--full">
-                      <div className="card-header-accent">
-                        <span className="accent-bar"></span>
-                        <h3>Nghe thử giọng đọc</h3>
                       </div>
-                      <p className="card-description card-description--compact">
-                        Tạo audio mẫu với cấu hình hiện tại (chưa cần lưu nếu chỉ đổi nội dung thử).
-                      </p>
-                      <div className="settings-field-grid settings-field-grid--2">
-                        <label className="settings-label settings-field-grid__span-2">
-                          <span>Nội dung nghe thử</span>
-                          <textarea
-                            className="settings-input"
-                            rows={3}
-                            value={ttsPreviewText}
-                            onChange={(e) => setTtsPreviewText(e.target.value)}
-                            placeholder="Nhập câu tiếng Việt để nghe thử..."
+
+                      <aside className="settings-tts-side">
+                        <div className="settings-preview-card">
+                          <SettingsSectionHead
+                            title="Nghe thử"
+                            description="Kiểm tra giọng trước khi chạy job."
                           />
-                        </label>
-                        <div className="settings-field-grid__span-2" style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" }}>
+                          <label className="settings-label">
+                            <span>Nội dung</span>
+                            <textarea
+                              className="settings-input settings-textarea"
+                              rows={6}
+                              value={ttsPreviewText}
+                              onChange={(e) => setTtsPreviewText(e.target.value)}
+                              placeholder="Nhập câu tiếng Việt để nghe thử..."
+                            />
+                          </label>
                           <button
                             type="button"
-                            className="gradient-button"
+                            className="gradient-button settings-preview-btn"
                             disabled={ttsPreviewLoading}
                             onClick={() => void handlePreviewTts()}
-                            style={{ justifyContent: "center" }}
                           >
                             <Volume2 size={16} />
-                            {ttsPreviewLoading ? "Đang tạo audio..." : "Nghe thử"}
+                            {ttsPreviewLoading
+                              ? (activeTtsBackend === "omnivoice"
+                                ? "Đang tạo audio (lần đầu có thể chờ tải model)..."
+                                : "Đang tạo audio...")
+                              : "Nghe thử"}
                           </button>
                           {ttsPreviewUrl && (
-                            <audio controls autoPlay src={ttsPreviewUrl} style={{ height: "36px", flex: "1 1 240px" }} />
+                            <div className="settings-preview-player">
+                              <audio controls autoPlay src={ttsPreviewUrl} />
+                            </div>
                           )}
                         </div>
-                      </div>
-                    </section>
+                      </aside>
+                      <section className="settings-duration-advanced settings-tts-advanced">
+                        <SettingsSectionHead
+                          title="Khớp thời lượng nâng cao"
+                          description="Chỉ chỉnh khi lồng tiếng lệch timeline — mặc định đã bật khớp chính xác."
+                        />
+                        <p className="card-description card-description--compact">
+                          Áp dụng ở bước <strong>duration_repair</strong>. Chạy lại job từ bước đó hoặc TTS để cập nhật.
+                        </p>
+                        <SettingsCheckboxField
+                          label="Bật khớp thời lượng chính xác"
+                          hint="Khi bật, pipeline cố căn thời lượng từng đoạn TTS với slot gốc (kéo dài, rút ngắn hoặc thêm im lặng)."
+                          checked={settings.exact_timing_enabled ?? true}
+                          onChange={(checked) => setSettings({ ...settings, exact_timing_enabled: checked })}
+                        />
+                        <div className="settings-field-grid settings-field-grid--2">
+                          <label className="settings-label settings-field-grid__span-2">
+                            <SettingsFieldLabel
+                              label={`Tốc độ TTS toàn cục (${(settings.tts_global_speed ?? 1).toFixed(2)}×)`}
+                              hint="Nhân tốc độ phát audio TTS trước khi khớp timeline. Tăng nhẹ (vd. 1.05) nếu lồng tiếng vẫn dài hơn giọng gốc; giảm nếu quá nhanh."
+                            />
+                            <input
+                              className="settings-input"
+                              type="range"
+                              min={0.9}
+                              max={1.3}
+                              step={0.01}
+                              value={settings.tts_global_speed ?? 1}
+                              onChange={(e) => setSettings({ ...settings, tts_global_speed: Number(e.target.value) })}
+                              disabled={!settings.exact_timing_enabled}
+                            />
+                          </label>
+                          <label className="settings-label settings-field-grid__span-2">
+                            <SettingsFieldLabel
+                              label={`Tốc độ nói ${activeDubLanguage.label} ước lượng (${(settings.vietnamese_speaking_rate_wps ?? activeDubLanguage.speakingRate).toFixed(2)} từ/giây)`}
+                              hint="Dùng khi dịch để ước lượng độ dài câu. Tự hiệu chỉnh sau mỗi job TTS; chỉnh tay nếu giọng đọc nhanh/chậm hơn mặc định."
+                            />
+                            <input
+                              className="settings-input"
+                              type="range"
+                              min={2}
+                              max={5}
+                              step={0.05}
+                              value={settings.vietnamese_speaking_rate_wps ?? activeDubLanguage.speakingRate}
+                              onChange={(e) => setSettings({ ...settings, vietnamese_speaking_rate_wps: Number(e.target.value) })}
+                            />
+                          </label>
+                          <label className="settings-label">
+                            <SettingsFieldLabel
+                              label="Ngưỡng kéo dài TTS ngắn (giây)"
+                              hint="Chênh lệch tối thiểu giữa slot gốc và TTS hiện tại mới kích hoạt kéo dài/thêm từ. Tăng nếu repair làm audio dài hơn thực tế."
+                            />
+                            <input
+                              className="settings-input"
+                              type="number"
+                              min={0.2}
+                              max={5}
+                              step={0.1}
+                              value={settings.short_tts_lengthen_min_gap_sec ?? 1.5}
+                              onChange={(e) => setSettings({ ...settings, short_tts_lengthen_min_gap_sec: Number(e.target.value) })}
+                              disabled={!settings.exact_timing_enabled}
+                            />
+                          </label>
+                          <label className="settings-label">
+                            <SettingsFieldLabel
+                              label={`Tỷ lệ kéo dài tối đa (${settings.short_tts_lengthen_max_ratio ?? 1.6}×)`}
+                              hint="Giới hạn độ dài sau khi kéo dài TTS ngắn (vd. 1.6 = tối đa 160% độ dài hiện tại). Giảm nếu repair vẫn kéo dài quá mức."
+                            />
+                            <input
+                              className="settings-input"
+                              type="number"
+                              min={1.05}
+                              max={2}
+                              step={0.05}
+                              value={settings.short_tts_lengthen_max_ratio ?? 1.6}
+                              onChange={(e) => setSettings({ ...settings, short_tts_lengthen_max_ratio: Number(e.target.value) })}
+                              disabled={!settings.exact_timing_enabled}
+                            />
+                          </label>
+                        </div>
+                      </section>
+                    </div>
                   </div>
                 )}
 
                 {settingsTab === "subtitles" && (
-                  <div className="settings-tab-panel">
-                    <section className="settings-card settings-card--full">
-                      <div className="card-header-accent">
-                        <span className="accent-bar"></span>
-                        <h3>Phụ đề trên video</h3>
-                      </div>
-                      <p className="card-description card-description--compact">
-                        Chèn phụ đề tiếng Việt (bản dịch) trực tiếp vào video khi xuất thành phẩm.
-                      </p>
+                  <div className="settings-tab-panel" role="tabpanel">
+                    <SettingsSectionHead
+                      title="Phụ đề trên video"
+                      description="Chèn phụ đề tiếng Việt (bản dịch) trực tiếp vào video khi xuất thành phẩm."
+                    />
+                    <div className="settings-form-fields">
                       <label className="settings-label settings-label--inline">
                         <input
                           type="checkbox"
@@ -2635,11 +3258,12 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                           Phụ đề dùng bản dịch tiếng Việt theo từng phân đoạn. Chạy lại từ bước <strong>Xuất video thành phẩm</strong> để áp dụng thay đổi cho job đã hoàn thành.
                         </span>
                       </div>
-                    </section>
+                    </div>
                   </div>
                 )}
+              </form>
               </div>
-            </form>
+            </div>
           </>
         )}
       </main>
@@ -2729,7 +3353,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                   {rerunKeepSteps.length < PIPELINE_STEPS.length && (
                     <>
                       {" "}
-                      Điểm bắt đầu: <strong>{translateStepName(PIPELINE_STEPS[rerunKeepSteps.length])}</strong>
+                      Điểm bắt đầu: <strong>{translateStepName(PIPELINE_STEPS[rerunKeepSteps.length], settings.translation_target_language)}</strong>
                       {" · "}
                       Giữ {rerunKeepSteps.length} bước, chạy lại {PIPELINE_STEPS.length - rerunKeepSteps.length} bước
                     </>
@@ -2776,7 +3400,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                           }}
                         />
                         <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: "13px", color: "#fff" }}>{translateStepName(stepName)}</div>
+                          <div style={{ fontSize: "13px", color: "#fff" }}>{translateStepName(stepName, settings.translation_target_language)}</div>
                           <small style={{ color: "#747d90" }}>
                             {step ? translateStepStatus(step.status) : "Chưa có"} ·{" "}
                             {kept ? "Giữ cache" : isBoundary ? "Chạy lại từ đây" : "Sẽ chạy lại"}
@@ -2825,17 +3449,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                       </div>
                     </button>
                   ))}
-                </div>
-              </div>
-            )}
-
-            {selectedJob.status === "failed" && selectedJob.last_error_code && (
-              <div className="error" style={{ margin: "10px 0" }}>
-                <CircleAlert size={22} />
-                <div>
-                  <strong>{selectedJob.last_error_code}</strong>
-                  <p style={{ margin: "4px 0", fontSize: "13px" }}>{selectedJob.last_error_message}</p>
-                  <small style={{ color: "#ffbcc9" }}>Gợi ý hành động: Hãy kiểm tra cài đặt của bạn và tiếp tục tiến trình.</small>
                 </div>
               </div>
             )}
@@ -2916,7 +3529,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                        )}
                      </span>
                      <div style={{ flex: 1 }}>
-                       <strong style={{ fontSize: "14px" }}>{translateStepName(step.name)}</strong>
+                       <strong style={{ fontSize: "14px" }}>{translateStepName(step.name, settings.translation_target_language)}</strong>
                        <p style={{ margin: "2px 0 0", fontSize: "11px", color: "#747e90" }}>
                          Trạng thái: {translateStepStatus(step.status)} · Thời gian: {formatStepDuration(step.duration_ms, step.started_at, step.status)}
                        </p>
@@ -3011,16 +3624,82 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
 
       {/* Video Player Overlay */}
       {activeVideoUrl && (
-        <div className="overlay" onClick={() => setActiveVideoUrl(null)} style={{ display: "grid", placeItems: "center", background: "#000000e0" }}>
-          <div onClick={(e) => e.stopPropagation()} style={{ position: "relative", width: "90%", maxWidth: "800px", background: "#000", borderRadius: "14px", overflow: "hidden", boxShadow: "0 20px 50px rgba(0,0,0,0.5)" }}>
+        <div className="overlay video-overlay" onClick={() => setActiveVideoUrl(null)}>
+          <div className="video-overlay__panel" onClick={(e) => e.stopPropagation()}>
             <button
               onClick={() => setActiveVideoUrl(null)}
               style={{ position: "absolute", right: "12px", top: "12px", background: "#00000080", color: "#fff", border: "0", borderRadius: "50%", width: "32px", height: "32px", display: "grid", placeItems: "center", zIndex: 1 }}
             >
               <X size={18} />
             </button>
-            <video controls autoPlay src={activeVideoUrl} style={{ width: "100%", height: "auto", display: "block" }} />
+            <video className="video-overlay__player" controls autoPlay src={activeVideoUrl} />
           </div>
+        </div>
+      )}
+
+      {/* Errors modal */}
+      {errorsModalOpen && (
+        <div className="overlay errors-overlay" onClick={() => setErrorsModalOpen(false)}>
+          <section className="errors-panel" onClick={(event) => event.stopPropagation()}>
+            <div className="errors-head">
+              <div>
+                <p>Lỗi & thông báo</p>
+                <h2>{visibleNotices.length > 0 ? `${visibleNotices.length} mục cần xem` : "Không có lỗi"}</h2>
+                <small>
+                  {visibleNotices.length > 0
+                    ? "Các lỗi từ thao tác, backend, tiến trình và môi trường được gom tại đây."
+                    : "Ứng dụng đang hoạt động bình thường."}
+                </small>
+              </div>
+              <button type="button" aria-label="Đóng danh sách lỗi" onClick={() => setErrorsModalOpen(false)}>
+                <X />
+              </button>
+            </div>
+
+            {visibleNotices.length > 0 ? (
+              <>
+                <div className="errors-toolbar">
+                  <button type="button" className="errors-dismiss-all" onClick={dismissAllNotices}>
+                    Xóa tất cả
+                  </button>
+                </div>
+                <div className="errors-list">
+                  {visibleNotices.map((notice) => (
+                    <article key={notice.id} className={`errors-item errors-item--${notice.severity}`}>
+                      <div className="errors-item__icon" aria-hidden="true">
+                        {notice.severity === "warning" ? <AlertTriangle size={18} /> : <CircleAlert size={18} />}
+                      </div>
+                      <div className="errors-item__body">
+                        <div className="errors-item__meta">
+                          <strong>{notice.title}</strong>
+                          <span>{notice.source}</span>
+                        </div>
+                        <p>{notice.message}</p>
+                        {notice.action && (
+                          <button type="button" className="errors-item__action" onClick={() => void notice.action?.onClick()}>
+                            {notice.action.label}
+                          </button>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        className="errors-item__dismiss"
+                        aria-label={`Xóa: ${notice.title}`}
+                        onClick={() => dismissNotice(notice)}
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </article>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div className="errors-empty">
+                <CheckCircle2 size={28} />
+                <p>Không có lỗi hoặc cảnh báo nào.</p>
+              </div>
+            )}
+          </section>
         </div>
       )}
 
@@ -3061,7 +3740,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                 </div>
                 <div className="runtime-resource-grid">
                   <span>VRAM còn trống: {formatVram(runtime.gpu.free_vram_mb)}</span>
-                  <span>Tiến trình VoxCPM đang giữ client: {runtime.gpu.active_voxcpm_clients}</span>
+                  <span>Tiến trình OmniVoice đang giữ client: {runtime.gpu.active_omnivoice_clients}</span>
                   <span>PyTorch allocated: {formatVram(runtime.gpu.torch_allocated_mb)}</span>
                   <span>PyTorch peak: {formatVram(runtime.gpu.torch_peak_mb)}</span>
                 </div>

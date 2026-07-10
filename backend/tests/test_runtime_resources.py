@@ -15,12 +15,12 @@ class _DummyGpuManager:
 
 
 def test_release_vram_resources_runs_cleanup(monkeypatch) -> None:
-    from dv_backend.adapters import asr, voxcpm_client
+    from dv_backend.adapters import asr, omnivoice_client
     from dv_backend import gpu_manager
 
     calls: list[str] = []
 
-    monkeypatch.setattr(voxcpm_client, "release_all_clients", lambda: calls.append("clients"))
+    monkeypatch.setattr(omnivoice_client, "release_all_clients", lambda: calls.append("clients"))
     monkeypatch.setattr(asr, "reset_model_cache", lambda: calls.append("asr"))
     monkeypatch.setattr(gpu_manager, "global_gpu_manager", lambda: _DummyGpuManager())
     monkeypatch.setattr(runtime, "_terminate_gpu_helper_processes", lambda: ["llama-tts-server.exe (42)"])
@@ -30,7 +30,7 @@ def test_release_vram_resources_runs_cleanup(monkeypatch) -> None:
         "collect_runtime_gpu_status",
         lambda: runtime.RuntimeGpuStatus(
             cuda_supported=False,
-            active_voxcpm_clients=0,
+            active_omnivoice_clients=0,
             resident_models=[],
             helper_processes=[],
         ),
@@ -41,7 +41,7 @@ def test_release_vram_resources_runs_cleanup(monkeypatch) -> None:
     assert result.status == "ok"
     assert set(result.released) >= {
         "managed_job_processes",
-        "voxcpm_clients",
+        "omnivoice_clients",
         "qwen3_asr_cache",
         "gpu_manager_state",
         "gpu_helper_processes",

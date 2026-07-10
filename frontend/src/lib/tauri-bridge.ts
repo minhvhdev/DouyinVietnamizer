@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type BackendStatus =
-  | { kind: "portable_missing"; root: string; missing_items: string[] }
+  | { kind: "environment_missing"; root: string; missing_items: string[] }
   | { kind: "starting" }
   | { kind: "ready"; base_url: string }
   | { kind: "crashed"; stderr: string }
@@ -60,8 +60,8 @@ export async function waitForBackend(
     }
     const s = (await invoke("get_backend_status")) as BackendStatus;
     last = s;
-    if (s.kind === "ready") return s.base_url;
-    if (s.kind === "portable_missing" || s.kind === "crashed") {
+    if (s.kind === "ready" || s.kind === "already_running") return BACKEND_BASE;
+    if (s.kind === "environment_missing" || s.kind === "crashed") {
       throw s;
     }
     await new Promise((r) => setTimeout(r, interval));

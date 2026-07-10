@@ -39,10 +39,6 @@ import shutil  # noqa: E402
 
 import dv_backend.pipeline  # noqa: E402,F401  (imports side effects + ensure sys.modules entry)
 from dv_backend.adapters.tts import TtsSession  # noqa: E402
-from dv_backend.adapters.voxcpm_cache import (  # noqa: E402
-    VoxCPMCache,
-    cache_key,
-)
 from dv_backend.duration_safety import classify_stretch, tail_has_speech  # noqa: E402
 from dv_backend.gpu_manager import GpuModelManager  # noqa: E402
 from dv_backend.segmentation import split_segment_semantically  # noqa: E402
@@ -66,17 +62,13 @@ def write_wav(path: Path, *, duration: float = 0.5, sample_rate: int = 16000, ch
 
 
 class FakeAdapter:
-    def __init__(self, cache: VoxCPMCache | None = None) -> None:
-        self.cache = cache
+    def __init__(self) -> None:
         self.calls = 0
         self.closed = False
 
     def synthesize(self, text, output_path, **_kwargs):
         self.calls += 1
         write_wav(Path(output_path), duration=0.4)
-        if self.cache is not None:
-            key = cache_key(voice_id="auto", text=text, model="m", num_step=10)
-            self.cache.put(key, Path(output_path))
         return {"ok": True, "duration_sec": 0.4, "sample_rate": 24000}
 
     def close(self):
@@ -150,9 +142,8 @@ def _assertions() -> list[dict]:
 
 
 def _run_session_reuse_benchmark(out_dir: Path) -> dict:
-    settings = {"voxcpm_ref_audio": "", "tts_session_reuse_enabled": True}
-    cache = VoxCPMCache(out_dir / "cache")
-    adapter = FakeAdapter(cache=cache)
+    settings = {"omnivoice_ref_audio": "", "tts_session_reuse_enabled": True, "tts_backend": "omnivoice"}
+    adapter = FakeAdapter()
     manager = GpuModelManager()
     started = time.perf_counter()
     with TtsSession(
@@ -170,19 +161,15 @@ def _run_session_reuse_benchmark(out_dir: Path) -> dict:
         "wall_time_ms": wall_ms,
         "adapter_init_count": 1,
         "synthesis_count": 3,
-        "cache_hit_count": cache_hit_count,
         "lease_history": list(manager.lease_history),
     }
-
-
-cache_hit_count = 0
 
 
 def _real_environment_summary() -> dict:
     summary = {
         "ffmpeg_on_path": shutil.which("ffmpeg") is not None,
         "cuda_available": False,
-        "voxcpm_importable": False,
+        "omnivoice_importable": False,
         "qwen_asr_importable": False,
     }
     try:
@@ -193,11 +180,11 @@ def _real_environment_summary() -> dict:
     except Exception as error:
         summary["torch_error"] = str(error)
     try:
-        import voxcpm  # noqa: F401
+        import omnivoice  # noqa: F401
 
-        summary["voxcpm_importable"] = True
+        summary["omnivoice_importable"] = True
     except Exception as error:
-        summary["voxcpm_error"] = str(error)
+        summary["omnivoice_error"] = str(error)
     try:
         import qwen_asr  # noqa: F401
 
@@ -207,7 +194,7 @@ def _real_environment_summary() -> dict:
     summary["can_run_real_model_benchmark"] = bool(
         summary["ffmpeg_on_path"]
         and summary["cuda_available"]
-        and summary["voxcpm_importable"]
+        and summary["omnivoice_importable"]
         and summary["qwen_asr_importable"]
     )
     return summary

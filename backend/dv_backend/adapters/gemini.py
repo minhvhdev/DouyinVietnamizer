@@ -161,11 +161,11 @@ class GeminiTranslator:
                 for index, text in enumerate(texts)
             ]
             prompt = (
-                f"Translate these items from {source} to {target} for natural Vietnamese dubbing. "
+                f"Translate these items from {source} to {target} for natural {target} dubbing. "
                 "Return only a JSON array of translated strings in the same order. "
                 "Treat duration_budget_sec as the timing budget when present. "
                 "Treat source_speech_units as source-side speech context only, not as a literal word-by-word translation target. "
-                "When target_vi_syllables and target_vi_syllable_range are present, aim for that Vietnamese spoken length before TTS while keeping the sentence natural. "
+                "When target_vi_syllables and target_vi_syllable_range are present, aim for that target spoken length before TTS while keeping the sentence natural. "
                 "Prefer staying within target_vi_syllable_range without dropping names, numbers, core meaning, or causal relationships.\n"
                 f"{json.dumps(items, ensure_ascii=False)}"
             )
