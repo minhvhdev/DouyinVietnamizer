@@ -626,7 +626,6 @@ input.settings-input[type="color"] {
   }
 
   .sidebar-foot button,
-  .sidebar-foot .backend-status-row,
   .sidebar-foot .backend-status,
   .sidebar-foot .runtime {
     font-size: 0;
@@ -640,16 +639,13 @@ input.settings-input[type="color"] {
     margin: 0;
   }
 
-  .sidebar-foot button div,
   .sidebar-foot .backend-status div,
   .sidebar-foot .runtime div {
     display: none;
   }
 
-  .sidebar-foot .backend-status-check-btn {
-    width: 44px;
-    min-width: 44px;
-    min-height: 44px;
+  .sidebar-foot .backend-status > svg:last-child {
+    display: none;
   }
 
   .settings-readiness__engine {
@@ -1927,47 +1923,39 @@ input.settings-input[type="range"]::-moz-range-track {
   gap: 8px;
 }
 
-.backend-status-row {
-  display: flex;
-  gap: 6px;
-  align-items: stretch;
-}
-
 .backend-status {
-  flex: 1;
-  min-width: 0;
+  width: 100%;
   border: 1px solid #292f3a;
   border-radius: 12px;
   padding: 12px;
   display: flex;
   gap: 10px;
-  align-items: flex-start;
-  background: rgba(255, 255, 255, 0.02);
-}
-
-.backend-status-check-btn {
-  flex-shrink: 0;
-  width: 40px;
-  border: 1px solid #292f3a;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.02);
-  color: #a8afc0;
-  display: flex;
   align-items: center;
-  justify-content: center;
+  background: rgba(255, 255, 255, 0.02);
+  text-align: left;
+  color: inherit;
   cursor: pointer;
-  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+  transition: border-color 0.15s ease, background 0.15s ease;
 }
 
-.backend-status-check-btn:hover:not(:disabled) {
+.backend-status:hover:not(:disabled) {
   border-color: #3d4554;
-  color: #d8dde8;
   background: rgba(255, 255, 255, 0.05);
 }
 
-.backend-status-check-btn:disabled {
+.backend-status:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+.backend-status > svg:last-child {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: #a8afc0;
+}
+
+.backend-status:hover:not(:disabled) > svg:last-child {
+  color: #d8dde8;
 }
 
 .backend-status i {
@@ -1982,6 +1970,7 @@ input.settings-input[type="range"]::-moz-range-track {
   display: grid;
   gap: 2px;
   min-width: 0;
+  flex: 1;
 }
 
 .backend-status strong {

@@ -1795,43 +1795,36 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
               <small>{visibleNotices.length > 0 ? "Có thông báo cần xem" : "Không có thông báo"}</small>
             </div>
           </button>
-          <div className="backend-status-row">
-            <div
-              className={`backend-status backend-status--${backendConnection}`}
-              title={
-                backendConnection === "online"
-                  ? `Backend phản hồi ổn định. Lần kiểm tra gần nhất: ${formatBackendClock(backendCheckedAt)}`
-                  : `Backend ${backendConnectionLabel(backendConnection).toLowerCase()}`
-              }
-            >
-              <i />
-              <div>
-                <strong>
-                  <Server size={14} style={{ display: "inline", marginRight: 6, verticalAlign: "-2px" }} />
-                  Backend: {backendConnectionLabel(backendConnection)}
-                </strong>
-                <small>
-                  {backendConnection === "online"
-                    ? `OK lúc ${formatBackendClock(backendLastOkAt)}`
-                    : backendConnection === "restarting"
-                      ? (backendNotice ?? "Đang kết nối lại…")
-                      : backendCheckedAt
-                        ? `Mất kết nối · kiểm tra ${formatBackendClock(backendCheckedAt)}`
-                        : "Chưa kiểm tra"}
-                </small>
-              </div>
+          <button
+            type="button"
+            className={`backend-status backend-status--${backendConnection}`}
+            onClick={() => void checkBackendHealth()}
+            disabled={backendChecking || recoveringBackendRef.current}
+            title={
+              backendConnection === "online"
+                ? `Backend phản hồi ổn định. Lần kiểm tra gần nhất: ${formatBackendClock(backendCheckedAt)}`
+                : `Backend ${backendConnectionLabel(backendConnection).toLowerCase()} — bấm để kiểm tra lại`
+            }
+            aria-label="Kiểm tra backend"
+          >
+            <i />
+            <div>
+              <strong>
+                <Server size={14} style={{ display: "inline", marginRight: 6, verticalAlign: "-2px" }} />
+                Backend: {backendConnectionLabel(backendConnection)}
+              </strong>
+              <small>
+                {backendConnection === "online"
+                  ? `OK lúc ${formatBackendClock(backendLastOkAt)}`
+                  : backendConnection === "restarting"
+                    ? (backendNotice ?? "Đang kết nối lại…")
+                    : backendCheckedAt
+                      ? `Mất kết nối · kiểm tra ${formatBackendClock(backendCheckedAt)}`
+                      : "Chưa kiểm tra"}
+              </small>
             </div>
-            <button
-              type="button"
-              className="backend-status-check-btn"
-              onClick={() => void checkBackendHealth()}
-              disabled={backendChecking || recoveringBackendRef.current}
-              title="Kiểm tra backend"
-              aria-label="Kiểm tra backend"
-            >
-              <RefreshCw size={14} className={backendChecking ? "spin" : undefined} />
-            </button>
-          </div>
+            <RefreshCw size={14} className={backendChecking ? "spin" : undefined} />
+          </button>
           <button
             className={`runtime ${runtime?.status ?? (runtimeError ? "warning" : "loading")}`}
             onClick={openRuntimePanel}
