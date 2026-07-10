@@ -38,6 +38,8 @@ class OmniVoiceWorkerClient:
         num_step: int,
         speed: float,
         language_id: str | None,
+        audio_chunk_threshold: float,
+        audio_chunk_duration: float,
         max_batch: int = DEFAULT_MAX_BATCH,
         flush_ms: int = DEFAULT_FLUSH_MS,
     ) -> None:
@@ -47,6 +49,8 @@ class OmniVoiceWorkerClient:
         self.num_step = max(4, min(64, int(num_step)))
         self.speed = max(0.5, min(2.0, float(speed)))
         self.language_id = (language_id or "").strip() or None
+        self.audio_chunk_threshold = max(4.0, min(60.0, float(audio_chunk_threshold)))
+        self.audio_chunk_duration = max(4.0, min(30.0, float(audio_chunk_duration)))
         self.max_batch = max(1, int(max_batch))
         self.flush_ms = max(20, int(flush_ms))
         self._proc: subprocess.Popen | None = None
@@ -321,6 +325,8 @@ class OmniVoiceWorkerClient:
             "anchor_text": anchor_text,
             "instruct": instruct,
             "language_id": self.language_id,
+            "audio_chunk_threshold": self.audio_chunk_threshold,
+            "audio_chunk_duration": self.audio_chunk_duration,
         }
         with self._pending_lock:
             self._pending[request_id] = response_q
@@ -429,6 +435,8 @@ def acquire_client(
     num_step: int,
     speed: float,
     language_id: str | None = None,
+    audio_chunk_threshold: float = 30.0,
+    audio_chunk_duration: float = 15.0,
     max_batch: int = DEFAULT_MAX_BATCH,
     flush_ms: int = DEFAULT_FLUSH_MS,
 ) -> OmniVoiceWorkerClient:
@@ -436,7 +444,8 @@ def acquire_client(
     flush_ms = max(20, int(flush_ms or DEFAULT_FLUSH_MS))
     key = (
         f"{model}|{device}|{int(num_step)}|{float(speed)}|"
-        f"{language_id or ''}|batch={max_batch}|flush={flush_ms}"
+        f"{language_id or ''}|chunk={float(audio_chunk_threshold)}|{float(audio_chunk_duration)}|"
+        f"batch={max_batch}|flush={flush_ms}"
     )
     with _client_lock:
         client = _clients.get(key)
@@ -448,6 +457,8 @@ def acquire_client(
                 num_step=num_step,
                 speed=speed,
                 language_id=language_id,
+                audio_chunk_threshold=audio_chunk_threshold,
+                audio_chunk_duration=audio_chunk_duration,
                 max_batch=max_batch,
                 flush_ms=flush_ms,
             )

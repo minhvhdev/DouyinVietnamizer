@@ -575,28 +575,24 @@ def create_tts_adapter(settings: dict, *, data_dir: Path | None = None, runner: 
         )
     if backend == "omnivoice":
         from ..omnivoice_env import OMNIVOICE_DEFAULT_MODEL
-        from .omnivoice_tts import OmniVoiceTtsAdapter
+        from .omnivoice_tts import (
+            OMNIVOICE_DEFAULT_CHUNK_DURATION_SEC,
+            OMNIVOICE_DEFAULT_CHUNK_THRESHOLD_SEC,
+            OmniVoiceTtsAdapter,
+        )
 
         try:
             speed = float(settings.get("omnivoice_speed", 1.0) or 1.0)
         except (TypeError, ValueError):
             speed = 1.0
-        try:
-            chunk_threshold = float(settings.get("omnivoice_audio_chunk_threshold", 30.0) or 30.0)
-        except (TypeError, ValueError):
-            chunk_threshold = 30.0
-        try:
-            chunk_duration = float(settings.get("omnivoice_audio_chunk_duration", 15.0) or 15.0)
-        except (TypeError, ValueError):
-            chunk_duration = 15.0
         return OmniVoiceTtsAdapter(
             model=str(settings.get("omnivoice_model", OMNIVOICE_DEFAULT_MODEL) or OMNIVOICE_DEFAULT_MODEL),
             device=resolve_omnivoice_device(str(settings.get("omnivoice_device", "cuda:0") or "cuda:0")),
             num_step=int(settings.get("omnivoice_num_steps", 32) or 32),
             speed=max(0.5, min(1.5, speed)),
             language_id=str(settings.get("omnivoice_language_id") or "").strip() or None,
-            audio_chunk_threshold=chunk_threshold,
-            audio_chunk_duration=chunk_duration,
+            audio_chunk_threshold=OMNIVOICE_DEFAULT_CHUNK_THRESHOLD_SEC,
+            audio_chunk_duration=OMNIVOICE_DEFAULT_CHUNK_DURATION_SEC,
             data_dir=data_dir,
             runner=runner,
         )

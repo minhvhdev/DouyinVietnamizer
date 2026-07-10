@@ -131,6 +131,7 @@ class SettingsService:
                     (key, json.dumps(value), now),
                 )
             self._migrate_legacy_pending_gemini_key(now)
+            self._migrate_legacy_omnivoice_chunk_defaults(now)
 
 
 
@@ -168,6 +169,32 @@ class SettingsService:
         self.database.connection.execute(
             "DELETE FROM settings WHERE key IN ('gemini_api_key_add', 'gemini_api_key_remove', 'gemini_api_key_update')"
         )
+
+    def _migrate_legacy_omnivoice_chunk_defaults(self, now: str) -> None:
+        """Reset pre-OmniVoice chunk tuning values to official demo defaults."""
+        legacy_pairs = {
+            ("omnivoice_audio_chunk_threshold", 8.0): 30.0,
+            ("omnivoice_audio_chunk_duration", 10.0): 15.0,
+        }
+        for (key, legacy_value), default_value in legacy_pairs.items():
+            row = self.database.connection.execute(
+                "SELECT value FROM settings WHERE key = ?",
+                (key,),
+            ).fetchone()
+            if row is None:
+                continue
+            try:
+                current = float(json.loads(row["value"]))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if abs(current - legacy_value) < 1e-6:
+                self.database.connection.execute(
+                    """
+                    INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                    """,
+                    (key, json.dumps(default_value), now),
+                )
 
     def get_raw_all(self) -> dict[str, Any]:
         rows = self.database.connection.execute("SELECT key, value FROM settings").fetchall()
@@ -231,8 +258,6 @@ class SettingsService:
             edge_locale = str(dub_language_config(normalized)["edge_locale"]).lower()
             if not edge_voice or not edge_voice.lower().startswith(edge_locale):
                 values["edge_tts_voice"] = defaults["edge_tts_voice"]
-            if "omnivoice_language_id" not in values:
-                values["omnivoice_language_id"] = defaults["omnivoice_language_id"]
 
         if values.get("openai_api_base") is not None:
             values["openai_api_base"] = normalize_openai_api_base(str(values["openai_api_base"]))

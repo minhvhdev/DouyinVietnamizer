@@ -67,6 +67,8 @@ class OmniVoiceTtsAdapter:
             num_step=self.num_step,
             speed=self.speed,
             language_id=self.language_id,
+            audio_chunk_threshold=self.audio_chunk_threshold,
+            audio_chunk_duration=self.audio_chunk_duration,
         )
         self._client.register_with_runner(self._runner)
 
