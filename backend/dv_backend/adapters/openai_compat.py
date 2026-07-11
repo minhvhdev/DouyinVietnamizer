@@ -10,6 +10,7 @@ from ..errors import AppError
 from ..models import ErrorInfo
 
 DEFAULT_OPENAI_API_BASE = "https://api.openai.com/v1"
+OPENAI_CHAT_TIMEOUT_SEC = 600
 
 
 def normalize_openai_api_base(api_base: str) -> str:
@@ -49,7 +50,7 @@ def call_openai_chat(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=90) as response:
+        with urllib.request.urlopen(request, timeout=OPENAI_CHAT_TIMEOUT_SEC) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as cause:
         body = cause.read().decode("utf-8", errors="replace")
