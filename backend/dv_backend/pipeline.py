@@ -778,6 +778,31 @@ def _release_asr_gpu_models(settings: dict | None = None) -> None:
         logger.debug("ASR GPU lease eviction failed", exc_info=True)
 
 
+def _release_tts_gpu_resources(settings: dict | None = None) -> None:
+    """Shutdown OmniVoice workers before subtitle ASR so Qwen can use VRAM."""
+    try:
+        from .adapters.omnivoice_client import release_all_clients
+
+        release_all_clients()
+    except Exception:
+        logger.debug("TTS worker release failed", exc_info=True)
+    try:
+        device = resolve_inference_device(str((settings or {}).get("omnivoice_device", "cuda:0") or "cuda:0"))
+        global_gpu_manager().evict("tts", device, reason="tts_step_complete")
+    except Exception:
+        logger.debug("TTS GPU lease eviction failed", exc_info=True)
+    try:
+        import gc
+
+        import torch
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        logger.debug("CUDA cache cleanup after TTS release failed", exc_info=True)
+
+
 def vad_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
     job_dir = config.data_dir / "jobs" / job_id
     audio_16k = job_dir / "artifacts" / "audio_16k.wav"
@@ -1638,6 +1663,31 @@ def _build_atempo_chain(speed_factor: float) -> str:
     return ",".join(filters)
 
 
+def _apply_global_speed_if_needed(
+    *,
+    ffmpeg_path: Path,
+    input_path: Path,
+    output_dir: Path,
+    index: int,
+    global_speed: float,
+    job_id: str,
+    runner,
+) -> tuple[Path, float]:
+    if abs(global_speed - 1.0) <= 0.001:
+        return input_path, get_wav_duration(input_path)
+    speed_file = output_dir / f"tts_speed_{index}.wav"
+    speed_file.unlink(missing_ok=True)
+    _run_ffmpeg_audio_filter(
+        ffmpeg_path,
+        input_path,
+        speed_file,
+        filter_expr=_build_atempo_chain(global_speed),
+        job_id=job_id,
+        runner=runner,
+    )
+    return speed_file, get_wav_duration(speed_file)
+
+
 def _run_ffmpeg_audio_filter(
     ffmpeg_path: Path,
     input_path: Path,
@@ -1905,7 +1955,7 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
     settings = {r["key"]: json.loads(r["value"]) for r in rows}
     exact_enabled, tolerance_sec, max_stretch = _normalize_exact_timing_settings(settings)
     max_safe_stretch = float(settings.get("exact_timing_max_safe_stretch", 1.25) or 1.25)
-    global_speed = max(0.9, float(settings.get("tts_global_speed", 1.0) or 1.0))
+    global_speed = max(1.0, min(2.5, float(settings.get("tts_global_speed", 1.0) or 1.0)))
     rewrite_prefix = _timing_rewrite_method_prefix(settings)
     dub_lang_label = dub_language_label(dub_language_from_settings(settings), english=True)
 
@@ -1937,11 +1987,27 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
             tail_speech_detected = False
 
             if not exact_enabled and tts_dur <= budget + 0.1:
-                shutil.copy(orig_file, repaired_file)
-                s["repaired_method"] = "none"
-                s["repaired_duration"] = round(tts_dur, 2)
+                input_for_fit = orig_file
+                if abs(global_speed - 1.0) > 0.001:
+                    speed_started = time.perf_counter()
+                    input_for_fit, repaired_duration_value = _apply_global_speed_if_needed(
+                        ffmpeg_path=ffmpeg_path,
+                        input_path=input_for_fit,
+                        output_dir=tts_dir,
+                        index=idx,
+                        global_speed=global_speed,
+                        job_id=job_id,
+                        runner=runner,
+                    )
+                    atempo_ms += round((time.perf_counter() - speed_started) * 1000)
+                    fit_methods.append(f"global_speed_{round(global_speed, 2)}x")
+                else:
+                    repaired_duration_value = tts_dur
+                shutil.copy(input_for_fit, repaired_file)
+                s["repaired_method"] = "+".join(fit_methods) if fit_methods else "none"
+                s["repaired_duration"] = round(repaired_duration_value, 2)
                 s["duration_repair_risk"] = duration_repair_risk
-                s["final_timing_error_ms"] = round((tts_dur - budget) * 1000) if budget > 0 else 0
+                s["final_timing_error_ms"] = round((repaired_duration_value - budget) * 1000) if budget > 0 else 0
                 s["repair_attempts"] = repair_attempts
                 s["tail_speech_detected"] = False
                 s["time_stretch_factor"] = 1.0
@@ -1949,22 +2015,6 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
 
             input_for_fit = orig_file
             current_duration = get_wav_duration(input_for_fit)
-            if abs(global_speed - 1.0) > 0.001:
-                speed_file = tts_dir / f"tts_speed_{idx}.wav"
-                speed_file.unlink(missing_ok=True)
-                speed_started = time.perf_counter()
-                _run_ffmpeg_audio_filter(
-                    ffmpeg_path,
-                    input_for_fit,
-                    speed_file,
-                    filter_expr=_build_atempo_chain(global_speed),
-                    job_id=job_id,
-                    runner=runner,
-                )
-                atempo_ms += round((time.perf_counter() - speed_started) * 1000)
-                input_for_fit = speed_file
-                current_duration = get_wav_duration(speed_file)
-                fit_methods.append(f"global_speed_{round(global_speed, 2)}x")
             repair_target = _repair_target_duration(s, budget, tolerance_sec)
             s["repair_target_duration"] = round(repair_target, 2) if repair_target > 0 else 0.0
             if repair_target > 0 and current_duration > repair_target + tolerance_sec:
@@ -2007,7 +2057,26 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                 except Exception:
                     quality_warning = f"{rewrite_prefix}_shorten_failed"
 
+            def _maybe_apply_global_speed() -> None:
+                nonlocal input_for_fit, current_duration, atempo_ms
+                global_speed_method = f"global_speed_{round(global_speed, 2)}x"
+                if abs(global_speed - 1.0) <= 0.001 or global_speed_method in fit_methods:
+                    return
+                speed_started = time.perf_counter()
+                input_for_fit, current_duration = _apply_global_speed_if_needed(
+                    ffmpeg_path=ffmpeg_path,
+                    input_path=input_for_fit,
+                    output_dir=tts_dir,
+                    index=idx,
+                    global_speed=global_speed,
+                    job_id=job_id,
+                    runner=runner,
+                )
+                atempo_ms += round((time.perf_counter() - speed_started) * 1000)
+                fit_methods.append(global_speed_method)
+
             if exact_enabled and repair_target > 0 and current_duration > repair_target + tolerance_sec:
+                _maybe_apply_global_speed()
                 raw_factor = current_duration / repair_target
                 speed_factor = min(max_stretch, max(1.0, raw_factor))
                 stretch_decision = classify_stretch(raw_factor, max_safe=max_safe_stretch, explicit_allow_danger=True)
@@ -2035,6 +2104,7 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
             if exact_enabled and repair_target > 0 and abs(current_duration - repair_target) > tolerance_sec:
                 target_dur = max(0.05, float(repair_target))
                 if current_duration > target_dur:
+                    _maybe_apply_global_speed()
                     tail_speech_detected = _wav_tail_has_speech(input_for_fit)
                     if tail_speech_detected:
                         quality_warning = "tail_speech_detected_skip_hard_trim"
@@ -2106,6 +2176,8 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                         except Exception:
                             quality_warning = f"{rewrite_prefix}_lengthen_failed"
 
+                    _maybe_apply_global_speed()
+
                     if current_duration < target_dur - tolerance_sec:
                         remaining_gap = target_dur - current_duration
                         if remaining_gap > lengthen_gap_threshold and not any(
@@ -2128,6 +2200,8 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                         current_duration = get_wav_duration(exact_file)
                         fit_methods.append("tail_silence_pad")
                         repair_attempts += 1
+            else:
+                _maybe_apply_global_speed()
 
             repaired_file.unlink(missing_ok=True)
             shutil.copy(input_for_fit, repaired_file)
@@ -2172,6 +2246,7 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
         "segments": segments,
     }
     save_checkpoint(config.data_dir, job_id, "duration_repair", checkpoint_data)
+    _release_tts_gpu_resources(settings)
     return checkpoint_data
 
 
@@ -2375,14 +2450,24 @@ def render_step(job_id: str, config: AppConfig, database: Database, runner) -> d
             if str(segment.get("translation") or "").strip()
         ]
         if segments:
+            _release_tts_gpu_resources(settings)
             width, height = probe_video_dimensions(ffmpeg_path, original_mp4)
+            project_root = Path(__file__).resolve().parents[2]
+            vendor_dir = Path(os.environ.get("DV_VENDOR_DIR", project_root / "vendor"))
+            configure_gpu_manager(settings)
             write_ass_file(
                 ass_path,
                 segments,
                 settings,
                 play_res_x=width,
                 play_res_y=height,
+                job_dir=job_dir,
+                vendor_dir=vendor_dir,
+                ffmpeg_path=ffmpeg_path,
+                transcribe_fn=transcribe_audio,
+                tts_asr_align=True,
             )
+            _release_asr_gpu_models(settings)
             if subtitles_filter_available(ffmpeg_path):
                 video_filters.append(ffmpeg_subtitles_filter(ass_path))
                 subtitle_burn_in = True

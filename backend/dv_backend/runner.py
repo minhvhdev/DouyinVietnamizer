@@ -77,33 +77,43 @@ class JobRunner:
             self.database.connection.execute(
                 """
                 UPDATE jobs
-                SET status = 'failed', last_error_code = 'CANCELLED',
-                    last_error_message = 'Job cancelled by user.', updated_at = ?
+                SET status = 'interrupted',
+                    last_error_code = NULL,
+                    last_error_message = NULL,
+                    updated_at = ?
                 WHERE id = ?
                 """,
                 (now, job_id),
             )
-            running_steps = self.database.connection.execute(
-                "SELECT name, started_at FROM job_steps WHERE job_id = ? AND status = 'running'",
+            self.database.connection.execute(
+                """
+                UPDATE job_steps
+                SET status = 'pending',
+                    started_at = NULL,
+                    completed_at = NULL,
+                    duration_ms = NULL,
+                    error_code = NULL,
+                    error_message = NULL
+                WHERE job_id = ? AND status = 'running'
+                """,
                 (job_id,),
-            ).fetchall()
-            for step in running_steps:
-                self.database.connection.execute(
-                    """
-                    UPDATE job_steps
-                    SET status = 'failed', error_code = 'CANCELLED',
-                        error_message = 'Cancelled by user.', completed_at = ?, duration_ms = ?
-                    WHERE job_id = ? AND name = ?
-                    """,
-                    (now, elapsed_ms_since(step["started_at"]), job_id, step["name"]),
-                )
+            )
 
     def start_job(self, job_id: str) -> None:
         with self.lock:
             if job_id in self.cancelled_jobs:
                 self.cancelled_jobs.remove(job_id)
 
-            if job_id in self.threads and self.threads[job_id].is_alive():
+            existing_thread = self.threads.get(job_id)
+            if existing_thread is not None and existing_thread.is_alive():
+                row = self.database.connection.execute(
+                    "SELECT status FROM jobs WHERE id = ?",
+                    (job_id,),
+                ).fetchone()
+                if row and row["status"] == "running":
+                    return
+                if job_id not in self.pending_job_ids:
+                    self.pending_job_ids.append(job_id)
                 return
 
             if job_id in self.pending_job_ids:
@@ -213,6 +223,9 @@ class JobRunner:
                         )
                     return
 
+                if e.info.code == "JOB_CANCELLED" or self.is_cancelled(job_id):
+                    return
+
                 now_end = utc_now()
                 duration_ms = round((time.perf_counter() - step_started) * 1000)
                 with self.database.connection:
@@ -230,6 +243,8 @@ class JobRunner:
                     )
                 return
             except Exception as e:
+                if self.is_cancelled(job_id):
+                    return
                 traceback.print_exc()
                 now_end = utc_now()
                 duration_ms = round((time.perf_counter() - step_started) * 1000)
@@ -250,6 +265,12 @@ class JobRunner:
                 return
 
         if not self.is_cancelled(job_id):
+            row = self.database.connection.execute(
+                "SELECT status FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if not row or row["status"] != "running":
+                return
             now_end = utc_now()
             with self.database.connection:
                 self.database.connection.execute(

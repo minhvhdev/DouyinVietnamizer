@@ -57,8 +57,6 @@ def test_create_tts_adapter_selects_omnivoice() -> None:
 
             "omnivoice_num_steps": 16,
 
-            "omnivoice_speed": 1.1,
-
             "omnivoice_language_id": "vi",
 
         }
@@ -69,7 +67,7 @@ def test_create_tts_adapter_selects_omnivoice() -> None:
 
     assert adapter.num_step == 16
 
-    assert adapter.speed == 1.1
+    assert adapter.speed == 1.0
 
     assert adapter.language_id == "vi"
 

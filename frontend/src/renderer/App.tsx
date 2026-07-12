@@ -619,7 +619,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     google_tts_voice: "vi-VN-Standard-A",
     google_tts_speaking_rate: 1,
     omnivoice_num_steps: 32,
-    omnivoice_speed: 1,
     omnivoice_language_id: "",
     omnivoice_ref_text: "",
     omnivoice_instruct: "",
@@ -1362,6 +1361,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     if (pendingOpenAiKey) {
       savePayload.openai_api_key = pendingOpenAiKey;
     }
+    delete savePayload.omnivoice_speed;
     return { savePayload, pendingGeminiKey, pendingGoogleTtsKey, pendingOpenAiKey };
   }
 
@@ -1527,7 +1527,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
           omnivoice_instruct: settings.omnivoice_instruct,
           omnivoice_auto_voice: settings.omnivoice_auto_voice,
           omnivoice_num_steps: settings.omnivoice_num_steps,
-          omnivoice_speed: settings.omnivoice_speed,
           omnivoice_language_id: settings.omnivoice_language_id,
         },
       });
@@ -2851,18 +2850,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                               }
                             />
                           </label>
-                          <label className="settings-label">
-                            <span>Tốc độ đọc ({settings.omnivoice_speed ?? 1}x)</span>
-                            <input
-                              className="settings-input"
-                              type="range"
-                              min={0.75}
-                              max={1.5}
-                              step={0.05}
-                              value={settings.omnivoice_speed ?? 1}
-                              onChange={(e) => setSettings({ ...settings, omnivoice_speed: Number(e.target.value) })}
-                            />
-                          </label>
                           <label className="settings-label settings-label--inline settings-field-grid__span-2">
                             <input
                               type="checkbox"
@@ -3075,13 +3062,13 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                           <label className="settings-label settings-field-grid__span-2">
                             <SettingsFieldLabel
                               label={`Tốc độ TTS toàn cục (${(settings.tts_global_speed ?? 1).toFixed(2)}×)`}
-                              hint="Nhân tốc độ phát audio TTS trước khi khớp timeline. Tăng nhẹ (vd. 1.05) nếu lồng tiếng vẫn dài hơn giọng gốc; giảm nếu quá nhanh."
+                              hint="Nhân tốc độ đọc audio TTS sau khi chỉnh nội dung (kéo dài/rút gọn). Cần chạy lại job từ bước Sửa độ dài TTS để có hiệu lực. Tăng (vd. 1.5–2.5×) nếu lồng tiếng vẫn chậm hơn giọng gốc."
                             />
                             <input
                               className="settings-input"
                               type="range"
-                              min={0.9}
-                              max={1.3}
+                              min={1}
+                              max={2.5}
                               step={0.01}
                               value={settings.tts_global_speed ?? 1}
                               onChange={(e) => setSettings({ ...settings, tts_global_speed: Number(e.target.value) })}

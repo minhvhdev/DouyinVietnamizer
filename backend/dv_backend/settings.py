@@ -47,7 +47,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "omnivoice_instruct": "",
     "omnivoice_auto_voice": True,
     "omnivoice_num_steps": 32,
-    "omnivoice_speed": 1.0,
     "omnivoice_language_id": "",
     "omnivoice_audio_chunk_threshold": 30.0,
     "omnivoice_audio_chunk_duration": 15.0,
@@ -206,6 +205,7 @@ class SettingsService:
         values.pop("gemini_api_key_remove", None)
         values.pop("gemini_api_key_update", None)
         values.pop("cookies_browser", None)
+        values.pop("omnivoice_speed", None)
         values["gemini_api_keys"] = [
             {
                 "id": item["id"],
@@ -228,6 +228,7 @@ class SettingsService:
 
     def update(self, values: dict[str, Any]) -> dict[str, Any]:
         values.pop("cookies_browser", None)
+        values.pop("omnivoice_speed", None)
 
         translation_backend = values.get("translation_backend")
         if translation_backend is not None:
@@ -384,7 +385,7 @@ class SettingsService:
                 speed = float(values["tts_global_speed"])
             except (TypeError, ValueError) as error:
                 raise ValueError("tts_global_speed must be a number.") from error
-            values["tts_global_speed"] = max(0.9, min(1.3, speed))
+            values["tts_global_speed"] = max(1.0, min(2.5, speed))
 
         if values.get("vietnamese_speaking_rate_wps") is not None:
             try:
@@ -526,13 +527,6 @@ class SettingsService:
             except (TypeError, ValueError) as error:
                 raise ValueError("omnivoice_num_steps must be an integer.") from error
             values["omnivoice_num_steps"] = max(4, min(64, steps))
-
-        if values.get("omnivoice_speed") is not None:
-            try:
-                speed = float(values["omnivoice_speed"])
-            except (TypeError, ValueError) as error:
-                raise ValueError("omnivoice_speed must be a number.") from error
-            values["omnivoice_speed"] = max(0.5, min(2.0, speed))
 
         if values.get("omnivoice_language_id") is not None:
             values["omnivoice_language_id"] = str(values.get("omnivoice_language_id") or "").strip()

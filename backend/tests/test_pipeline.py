@@ -913,6 +913,66 @@ def test_duration_repair_lengthens_when_gap_exceeds_one_second(
     assert result["segments"][0]["translation"] == "Ngắn hơn một chút nhé."
 
 
+@patch("dv_backend.pipeline.TtsSession")
+@patch("dv_backend.pipeline.lengthen_translation_for_timing")
+@patch("dv_backend.pipeline.get_wav_duration")
+@patch("dv_backend.pipeline.run_subprocess_with_cancel")
+@patch("dv_backend.pipeline.resolve_tool_path")
+def test_duration_repair_applies_global_speed_after_lengthen(
+    mock_resolve,
+    mock_run,
+    mock_dur,
+    mock_lengthen,
+    mock_tts_session,
+    test_env,
+):
+    config, database, _job_service, runner = test_env
+    with database.connection:
+        database.connection.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("tts_global_speed", json.dumps(2.5), "now"),
+        )
+    mock_resolve.return_value = Path("dummy-ffmpeg")
+    save_checkpoint(config.data_dir, "job-global-speed", "tts", {
+        "segments": [
+            {
+                "index": 0,
+                "start": 0.0,
+                "end": 4.0,
+                "translation": "Ngắn.",
+                "duration_budget": 4.0,
+                "tts_duration": 1.0,
+            }
+        ]
+    })
+    tts_dir = config.data_dir / "jobs" / "job-global-speed" / "artifacts" / "tts"
+    write_dummy_wav(tts_dir / "tts_0.wav", duration=1.0)
+    mock_lengthen.return_value = ("Ngắn hơn một chút nhé.", 4)
+    mock_dur.side_effect = [1.0, 3.5, 1.4, 1.4, 3.5, 3.5]
+    mock_run.side_effect = lambda cmd, *_args, **_kwargs: (
+        write_dummy_wav(Path(cmd[-1]), duration=1.4 if "tts_speed_0" in str(cmd[-1]) else 3.5)
+        or MagicMock(stdout="", stderr="", returncode=0)
+    )
+    session = MagicMock()
+    mock_tts_session.return_value.__enter__.return_value = session
+
+    result = pipeline.duration_repair_step("job-global-speed", config, database, runner)
+
+    assert "global_speed_2.5x" in result["segments"][0]["repaired_method"]
+    speed_calls = [
+        call for call in mock_run.call_args_list
+        if str(call.args[0][-1]).endswith("tts_speed_0.wav")
+    ]
+    assert speed_calls
+    filter_arg = next(
+        (part for part in speed_calls[0].args[0] if str(part).startswith("atempo=")),
+        "",
+    )
+    assert "atempo=2.0" in filter_arg
+    session.synthesize.assert_called_once()
+    assert mock_run.call_args_list.index(speed_calls[0]) > 0
+
+
 def test_tail_silence_pad_filter_only_appends_silence_at_end() -> None:
     expr = pipeline._tail_silence_pad_filter(1.0, 2.0)
     assert "adelay=" not in expr

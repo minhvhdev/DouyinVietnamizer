@@ -382,7 +382,12 @@ class JobService:
             if tts_dir.is_dir():
                 shutil.rmtree(tts_dir, ignore_errors=True)
 
-        if reset.intersection({"mix", "render"}):
+        if reset.intersection({"duration_repair", "mix", "render"}):
+            subtitle_asr = artifacts / "subtitle_asr"
+            if subtitle_asr.is_dir():
+                shutil.rmtree(subtitle_asr, ignore_errors=True)
+
+        if "mix" in reset:
             for name in ("narration.wav", "mixed.wav", "normalized.wav"):
                 path = artifacts / name
                 if path.is_file():
@@ -391,7 +396,16 @@ class JobService:
                     except OSError:
                         pass
 
-        if "render" in reset:
+        if "render" in reset and "mix" not in reset:
+            for name in ("normalized.wav",):
+                path = artifacts / name
+                if path.is_file():
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+
+        if reset.intersection({"mix", "render"}):
             output_dir = job_dir / "output"
             for name in ("dubbed.mp4", "vietnamese_narration.wav", "subtitles.ass"):
                 path = output_dir / name

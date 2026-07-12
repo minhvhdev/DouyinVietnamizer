@@ -120,6 +120,15 @@ def test_pipeline_optimization_settings_are_validated(tmp_path: Path) -> None:
         settings.update({"asr_alignment_mode": "maximum"})
 
 
+def test_tts_global_speed_is_clamped_to_one_through_two(tmp_path: Path) -> None:
+    settings = service(tmp_path)
+
+    assert settings.update({"tts_global_speed": 0.85})["tts_global_speed"] == 1.0
+    assert settings.update({"tts_global_speed": 2.5})["tts_global_speed"] == 2.5
+    assert settings.update({"tts_global_speed": 3.0})["tts_global_speed"] == 2.5
+    assert settings.update({"tts_global_speed": 1.75})["tts_global_speed"] == 1.75
+
+
 def test_gpu_settings_are_normalized(tmp_path: Path) -> None:
     settings = service(tmp_path)
     updated = settings.update({

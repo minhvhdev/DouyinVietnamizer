@@ -38,6 +38,14 @@ def test_segment_subtitle_end_prefers_repaired_duration() -> None:
     assert segment_subtitle_end(segment) == 2.5
 
 
+def test_segment_subtitle_uses_placement_start() -> None:
+    segment = {"start": 2.0, "placement_start": 1.5, "repaired_duration": 2.0}
+    assert segment_subtitle_end(segment) == 3.5
+    cues = build_subtitle_cues([{**segment, "translation": "Xin chào bạn."}])
+    assert cues[0]["start"] == 1.5
+    assert cues[0]["end"] == 3.5
+
+
 def test_build_ass_content_contains_dialogue() -> None:
     content = build_ass_content(
         [

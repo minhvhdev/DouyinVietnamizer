@@ -229,3 +229,50 @@ def test_start_job_queues_when_another_is_active(tmp_path: Path) -> None:
     assert runner.active_job_id is None
     assert runner.pending_job_ids == []
 
+
+def test_start_job_after_cancel_queues_until_thread_finishes(tmp_path: Path) -> None:
+    config = AppConfig(tmp_path)
+    config.ensure_directories()
+    database = Database(config.database_path)
+    database.migrate()
+    service = JobService(database, tmp_path)
+    job = _create_job(service, tmp_path)
+    runner = JobRunner(config, database)
+
+    execute_count = {"value": 0}
+    first_run_started = threading.Event()
+    unblock_first_run = threading.Event()
+    second_run_started = threading.Event()
+
+    def tracked_execute(job_id: str) -> None:
+        execute_count["value"] += 1
+        if execute_count["value"] == 1:
+            first_run_started.set()
+            unblock_first_run.wait(timeout=2)
+            return
+        second_run_started.set()
+        with database.connection:
+            database.connection.execute(
+                "UPDATE jobs SET status = 'completed', current_step = NULL WHERE id = ?",
+                (job_id,),
+            )
+
+    with patch.object(runner, "_execute_job", side_effect=tracked_execute):
+        runner.start_job(job.id)
+        assert first_run_started.wait(timeout=1)
+
+        runner.cancel_job(job.id)
+        assert service.get(job.id).status == "interrupted"
+        service.prepare_job_for_resume(job.id)
+        runner.start_job(job.id)
+        assert runner.pending_job_ids == [job.id]
+
+        unblock_first_run.set()
+        runner.threads[job.id].join(timeout=2)
+
+    assert second_run_started.wait(timeout=1)
+    runner.threads[job.id].join(timeout=2)
+    assert execute_count["value"] == 2
+    assert runner.pending_job_ids == []
+    assert runner.active_job_id is None
+

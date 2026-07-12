@@ -3,6 +3,13 @@ import re
 import subprocess
 from pathlib import Path
 
+from ..subtitle_timing import (
+    build_subtitle_cues as build_timed_subtitle_cues,
+    segment_subtitle_end,
+    segment_subtitle_start,
+    split_translation_sentences,
+)
+
 SUPPORTED_SUBTITLE_POSITIONS = {"bottom", "center", "top"}
 DEFAULT_SUBTITLE_FONT_SIZE = 48
 DEFAULT_SUBTITLE_FONT_COLOR = "#FFFFFF"
@@ -104,52 +111,25 @@ def format_ass_time(seconds: float) -> str:
     return f"{hours}:{minutes:02d}:{whole_secs:02d}.{centis:02d}"
 
 
-def segment_subtitle_end(segment: dict) -> float:
-    start = float(segment["start"])
-    repaired_duration = segment.get("repaired_duration")
-    if repaired_duration is not None:
-        return start + float(repaired_duration)
-    if segment.get("end") is not None:
-        return float(segment["end"])
-    return start + float(segment.get("duration_budget", 1.0))
-
-
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…。！？])\s+")
-
-
-def split_translation_sentences(text: str) -> list[str]:
-    cleaned = re.sub(r"\s+", " ", (text or "").strip())
-    if not cleaned:
-        return []
-    parts = [part.strip() for part in _SENTENCE_SPLIT_RE.split(cleaned) if part.strip()]
-    return parts or [cleaned]
-
-
-def build_subtitle_cues(segments: list[dict]) -> list[dict]:
-    cues: list[dict] = []
-    for segment in segments:
-        translation = str(segment.get("translation") or "").strip()
-        if not translation:
-            continue
-
-        sentences = split_translation_sentences(translation)
-        start = float(segment["start"])
-        end = segment_subtitle_end(segment)
-        duration = max(0.2, end - start)
-
-        if len(sentences) == 1:
-            cues.append({"start": start, "end": end, "text": sentences[0]})
-            continue
-
-        weights = [max(1, len(sentence.replace(" ", ""))) for sentence in sentences]
-        total_weight = sum(weights)
-        cursor = start
-        for index, sentence in enumerate(sentences):
-            portion = duration * weights[index] / total_weight
-            cue_end = end if index == len(sentences) - 1 else cursor + portion
-            cues.append({"start": cursor, "end": cue_end, "text": sentence})
-            cursor = cue_end
-    return cues
+def build_subtitle_cues(
+    segments: list[dict],
+    *,
+    job_dir: Path | None = None,
+    settings: dict | None = None,
+    vendor_dir: Path | None = None,
+    ffmpeg_path: Path | None = None,
+    transcribe_fn=None,
+    tts_asr_align: bool = False,
+) -> list[dict]:
+    return build_timed_subtitle_cues(
+        segments,
+        job_dir=job_dir,
+        settings=settings,
+        vendor_dir=vendor_dir,
+        ffmpeg_path=ffmpeg_path,
+        transcribe_fn=transcribe_fn,
+        tts_asr_align=tts_asr_align,
+    )
 
 
 def ass_box_tags(outline_padding: int, back_colour: str) -> str:
@@ -171,6 +151,12 @@ def build_ass_content(
     edge_margin: int,
     play_res_x: int,
     play_res_y: int,
+    job_dir: Path | None = None,
+    settings: dict | None = None,
+    vendor_dir: Path | None = None,
+    ffmpeg_path: Path | None = None,
+    transcribe_fn=None,
+    tts_asr_align: bool = False,
 ) -> str:
     position = normalize_position(position)
     font_size = normalize_font_size(font_size)
@@ -214,7 +200,15 @@ def build_ass_content(
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
 
-    for cue in build_subtitle_cues(segments):
+    for cue in build_subtitle_cues(
+        segments,
+        job_dir=job_dir,
+        settings=settings,
+        vendor_dir=vendor_dir,
+        ffmpeg_path=ffmpeg_path,
+        transcribe_fn=transcribe_fn,
+        tts_asr_align=tts_asr_align,
+    ):
         start = format_ass_time(float(cue["start"]))
         end = format_ass_time(float(cue["end"]))
         lines.append(
@@ -232,6 +226,11 @@ def write_ass_file(
     *,
     play_res_x: int,
     play_res_y: int,
+    job_dir: Path | None = None,
+    vendor_dir: Path | None = None,
+    ffmpeg_path: Path | None = None,
+    transcribe_fn=None,
+    tts_asr_align: bool = False,
 ) -> Path:
     content = build_ass_content(
         segments,
@@ -250,6 +249,12 @@ def write_ass_file(
         edge_margin=settings.get("subtitle_edge_margin", DEFAULT_SUBTITLE_EDGE_MARGIN),
         play_res_x=play_res_x,
         play_res_y=play_res_y,
+        job_dir=job_dir,
+        settings=settings,
+        vendor_dir=vendor_dir,
+        ffmpeg_path=ffmpeg_path,
+        transcribe_fn=transcribe_fn,
+        tts_asr_align=tts_asr_align,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(content, encoding="utf-8-sig")

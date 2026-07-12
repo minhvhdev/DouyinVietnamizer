@@ -1,0 +1,187 @@
+from pathlib import Path
+
+from dv_backend.subtitle_timing import (
+    allocate_proportional_cues,
+    build_subtitle_cues,
+    map_chunks_to_asr_timeline,
+    resolve_overlapping_cues,
+    segment_subtitle_end,
+    segment_subtitle_start,
+    split_for_subtitle_display,
+    split_translation_sentences,
+)
+
+
+def test_split_translation_sentences_without_trailing_space() -> None:
+    assert split_translation_sentences("Câu một. Câu hai! Câu ba?") == [
+        "Câu một.",
+        "Câu hai!",
+        "Câu ba?",
+    ]
+
+
+def test_split_for_subtitle_display_splits_commas_when_no_periods() -> None:
+    chunks = split_for_subtitle_display(
+        "Anh ấy đi ra thật nhanh, nhìn lại phía sau một lần nữa, "
+        "rồi bước tiếp về phía con phố đông đúc phía trước"
+    )
+    assert len(chunks) >= 2
+    assert all(len(chunk) <= 58 for chunk in chunks)
+
+
+def test_build_subtitle_cues_shows_one_sentence_at_a_time() -> None:
+    cues = build_subtitle_cues(
+        [
+            {
+                "start": 1.0,
+                "placement_start": 1.0,
+                "repaired_duration": 9.0,
+                "translation": "Câu thứ nhất. Câu thứ hai! Câu thứ ba?",
+            }
+        ]
+    )
+    assert len(cues) == 3
+    assert cues[0]["text"] == "Câu thứ nhất."
+    assert cues[1]["text"] == "Câu thứ hai!"
+    assert cues[2]["text"] == "Câu thứ ba?"
+    assert cues[0]["start"] == 1.0
+    assert abs(cues[0]["end"] - cues[1]["start"]) < 0.001
+    assert abs(cues[1]["end"] - cues[2]["start"]) < 0.001
+    assert abs(cues[2]["end"] - 10.0) < 0.001
+
+
+def test_map_chunks_to_asr_timeline_uses_unit_boundaries() -> None:
+    cues = map_chunks_to_asr_timeline(
+        ["Ngắn.", "Dài hơn nhiều."],
+        [
+            {"text": "Ngắn.", "start": 0.0, "end": 1.0},
+            {"text": "Dài", "start": 1.0, "end": 2.0},
+            {"text": "hơn", "start": 2.0, "end": 3.0},
+            {"text": "nhiều.", "start": 3.0, "end": 4.0},
+        ],
+        window_start=5.0,
+        window_duration=4.0,
+    )
+    assert cues is not None
+    assert len(cues) == 2
+    assert cues[0]["start"] == 5.0
+    assert cues[0]["end"] == 6.0
+    assert cues[1]["start"] == 6.0
+    assert cues[1]["end"] == 9.0
+
+
+def test_resolve_overlapping_cues_trims_previous_end() -> None:
+    resolved = resolve_overlapping_cues(
+        [
+            {"start": 1.0, "end": 4.0, "text": "A"},
+            {"start": 3.5, "end": 6.0, "text": "B"},
+        ]
+    )
+    assert resolved[0]["end"] == 3.5
+    assert resolved[1]["start"] == 3.5
+
+
+def test_subtitle_playback_window_matches_mix_cap() -> None:
+    segments = [
+        {
+            "index": 0,
+            "start": 85.6,
+            "placement_start": 85.6,
+            "repaired_duration": 84.12,
+            "translation": "Câu một. Câu hai.",
+        },
+        {
+            "index": 1,
+            "start": 144.72,
+            "placement_start": 144.72,
+            "repaired_duration": 7.74,
+            "translation": "Câu ba.",
+        },
+    ]
+    cues = build_subtitle_cues(segments)
+    assert cues[0]["start"] == 85.6
+    assert cues[-2]["end"] <= 144.72 + 0.05
+    assert all(cue["end"] - cue["start"] >= 0.24 for cue in cues)
+
+
+def test_enforce_monotonic_cues_rescales_overlapping_asr_chunks() -> None:
+    from dv_backend.subtitle_timing import enforce_monotonic_cues
+
+    normalized = enforce_monotonic_cues(
+        [
+            {"start": 10.0, "end": 10.2, "text": "A"},
+            {"start": 10.1, "end": 10.3, "text": "B"},
+            {"start": 10.15, "end": 10.35, "text": "C"},
+        ],
+        window_start=10.0,
+        window_end=13.0,
+    )
+    assert len(normalized) == 3
+    assert normalized[0]["start"] == 10.0
+    assert normalized[-1]["end"] == 13.0
+    assert normalized[1]["start"] >= normalized[0]["end"] - 0.001
+    assert all(cue["end"] - cue["start"] >= 0.24 for cue in normalized)
+
+
+def test_split_for_subtitle_display_skips_dot_chunks() -> None:
+    chunks = split_for_subtitle_display("Nghe chưa? Ngươi dám.")
+    assert "." not in chunks
+
+
+def test_asr_quality_gate_falls_back_when_many_min_duration_cues() -> None:
+    from dv_backend.subtitle_timing import _asr_cues_are_usable
+
+    cues = [{"start": 0.0, "end": 0.25, "text": f"C{i}."} for i in range(8)]
+    assert not _asr_cues_are_usable(cues, window_duration=10.0, chunk_count=8)
+    assert _asr_cues_are_usable(
+        [{"start": 0.0, "end": 2.0, "text": "A"}, {"start": 2.0, "end": 4.0, "text": "B"}],
+        window_duration=4.0,
+        chunk_count=2,
+    )
+
+
+def test_clip_aligned_units_caps_timestamps_to_wav_duration() -> None:
+    from dv_backend.subtitle_timing import _clip_aligned_units
+
+    clipped = _clip_aligned_units(
+        [
+            {"text": "A", "start": 0.0, "end": 5.0},
+            {"text": "B", "start": 8.0, "end": 104.0},
+        ],
+        max_duration=10.0,
+    )
+    assert clipped[0]["end"] == 5.0
+    assert clipped[1]["start"] == 8.0
+    assert clipped[1]["end"] == 10.0
+
+
+def test_resolve_subtitle_speech_window_uses_aligned_units(tmp_path: Path) -> None:
+    import wave
+
+    from dv_backend.subtitle_timing import resolve_subtitle_speech_window
+
+    wav_path = tmp_path / "clip.wav"
+    with wave.open(str(wav_path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(16000)
+        handle.writeframes(b"\x00\x00" * 16000 * 60)
+
+    start, end = resolve_subtitle_speech_window(
+        window_start=10.0,
+        window_end=70.0,
+        wav_path=wav_path,
+        ffmpeg_path=None,
+        aligned_units=[
+            {"text": "A", "start": 0.0, "end": 20.0},
+            {"text": "B", "start": 20.0, "end": 25.0},
+        ],
+    )
+    assert start == 10.0
+    assert abs(end - 35.0) < 0.01
+
+
+def test_allocate_proportional_cues_weights_longer_sentence() -> None:
+    cues = allocate_proportional_cues(["Ngắn.", "Dài hơn nhiều so với câu trước."], 1.0, 10.0)
+    assert len(cues) == 2
+    assert (cues[1]["end"] - cues[1]["start"]) > (cues[0]["end"] - cues[0]["start"])

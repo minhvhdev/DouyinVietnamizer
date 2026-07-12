@@ -336,8 +336,7 @@ class TtsSession:
             model = str(self.settings.get("omnivoice_model", "") or OMNIVOICE_DEFAULT_MODEL)
             device = resolve_omnivoice_device(str(self.settings.get("omnivoice_device", "cuda:0") or "cuda:0"))
             steps = self.settings.get("omnivoice_num_steps", 32)
-            speed = self.settings.get("omnivoice_speed", 1.0)
-            return f"{model}|{device}|{int(steps or 0)}|{float(speed or 1.0)}"
+            return f"{model}|{device}|{int(steps or 0)}|1.0"
         raise AppError(
             422,
             ErrorInfo(
@@ -581,15 +580,11 @@ def create_tts_adapter(settings: dict, *, data_dir: Path | None = None, runner: 
             OmniVoiceTtsAdapter,
         )
 
-        try:
-            speed = float(settings.get("omnivoice_speed", 1.0) or 1.0)
-        except (TypeError, ValueError):
-            speed = 1.0
         return OmniVoiceTtsAdapter(
             model=str(settings.get("omnivoice_model", OMNIVOICE_DEFAULT_MODEL) or OMNIVOICE_DEFAULT_MODEL),
             device=resolve_omnivoice_device(str(settings.get("omnivoice_device", "cuda:0") or "cuda:0")),
             num_step=int(settings.get("omnivoice_num_steps", 32) or 32),
-            speed=max(0.5, min(1.5, speed)),
+            speed=1.0,
             language_id=str(settings.get("omnivoice_language_id") or "").strip() or None,
             audio_chunk_threshold=OMNIVOICE_DEFAULT_CHUNK_THRESHOLD_SEC,
             audio_chunk_duration=OMNIVOICE_DEFAULT_CHUNK_DURATION_SEC,
