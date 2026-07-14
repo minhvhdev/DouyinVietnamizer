@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import urllib.error
 import urllib.request
@@ -391,3 +392,76 @@ class OpenAiCompatTranslator:
                 ),
             )
         return translated
+
+    def translate_candidates(
+        self,
+        segments: list[dict[str, Any]],
+        texts: list[str],
+        source: str,
+        target: str,
+        *,
+        timing_profiles: list[dict[str, Any]] | None = None,
+        speaking_rate_wps: float = 3.2,
+        candidate_count: int = 3,
+    ) -> list[list[dict[str, Any]]]:
+        from ..translation_candidate_llm import (
+            build_candidate_items,
+            build_candidate_translation_prompt,
+            parse_candidate_batches_failsoft,
+        )
+
+        if not self.api_key or not self.model:
+            raise AppError(
+                400,
+                ErrorInfo(
+                    code="MISSING_OPENAI_TRANSLATION_MODEL",
+                    message="OpenAPI translation is not configured.",
+                    action="Add API key and model in Settings.",
+                ),
+            )
+
+        profiles = timing_profiles or [{} for _ in texts]
+        items = build_candidate_items(
+            segments,
+            texts,
+            timing_profiles=profiles,
+            speaking_rate_wps=speaking_rate_wps,
+        )
+        prompt = build_candidate_translation_prompt(
+            items,
+            source=source,
+            target=target,
+            candidate_count=candidate_count,
+        )
+        try:
+            response = self.request(
+                self.api_base,
+                self.api_key,
+                self.model,
+                [{"role": "user", "content": prompt}],
+                json_mode=True,
+            )
+            batches, parse_warning = parse_candidate_batches_failsoft(
+                response_text(response),
+                expected_count=len(texts),
+                fallback_texts=texts,
+            )
+            if parse_warning:
+                logging.getLogger(__name__).warning("OpenAI candidate parse fallback: %s", parse_warning)
+            if not any(batch for batch in batches):
+                raise ValueError("OpenAPI returned empty candidate batches.")
+            return batches
+        except AppError:
+            raise
+        except Exception as cause:
+            code, message, action = classify_openai_failure(cause)
+            raise AppError(
+                502,
+                ErrorInfo(
+                    code=code,
+                    message=message,
+                    action=action,
+                    detail=str(cause),
+                    retryable=True,
+                ),
+            ) from cause

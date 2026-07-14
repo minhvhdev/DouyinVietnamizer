@@ -50,6 +50,28 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "omnivoice_language_id": "",
     "omnivoice_audio_chunk_threshold": 30.0,
     "omnivoice_audio_chunk_duration": 15.0,
+    "omnivoice_external_chunking_enabled": False,
+    "omnivoice_chunk_fidelity_fallback_full_segment": True,
+    "omnivoice_chunk_retry_on_fidelity_failure": False,
+    "omnivoice_chunk_target_chars": 180,
+    "omnivoice_chunk_max_chars": 220,
+    "omnivoice_chunk_min_chars": 40,
+    "omnivoice_long_text_threshold": 240,
+    "omnivoice_very_long_text_threshold": 500,
+    "omnivoice_pause_comma_ms": 140,
+    "omnivoice_pause_sentence_ms": 260,
+    "omnivoice_pause_hard_ms": 50,
+    "omnivoice_chunk_max_retries": 2,
+    "omnivoice_chunk_retry_max_chars_1": 220,
+    "omnivoice_chunk_retry_max_chars_2": 140,
+    "omnivoice_chunk_retry_max_chars_3": 90,
+    "omnivoice_fidelity_check_enabled": True,
+    "tts_fidelity_retry_max_attempts": 1,
+    "omnivoice_fidelity_check_min_chars": 240,
+    "omnivoice_fidelity_check_all_segments": True,
+    "omnivoice_fidelity_good_threshold": 0.85,
+    "omnivoice_fidelity_review_threshold": 0.70,
+    "omnivoice_fidelity_critical_threshold": 0.55,
     "mix_mode": "background_only",
     "gemini_api_keys": [],
     "gemini_key_cursor": 0,
@@ -65,6 +87,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "exact_timing_tolerance_ms": 40,
     "exact_timing_max_stretch": 1.2,
     "exact_timing_max_safe_stretch": 1.25,
+    "edge_tts_overflow_speed_max": 1.15,
+    "edge_tts_overflow_speed_hard_max": 1.2,
     "short_tts_lengthen_min_gap_sec": 1.5,
     "short_tts_lengthen_max_ratio": 1.6,
     "tts_global_speed": 1.0,
@@ -85,6 +109,22 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "vad_energy_filter_enabled": True,
     "vad_energy_min_vocal_ratio": 1.15,
     "vietnamese_speaking_rate_wps": 3.2,
+    "timing_safety_buffer_ms": 120,
+    "timing_min_fill_ratio": 0.55,
+    "duration_trim_max_ratio": 0.15,
+    "duration_trim_max_ms": 600,
+    "release_gate_blocking_enabled": True,
+    "timing_candidate_translation_enabled": True,
+    "timing_translation_candidate_count": 3,
+    "timing_max_tts_attempts": 3,
+    "timing_max_candidate_tts_attempts": 2,
+    "timing_max_llm_rewrite_attempts": 1,
+    "timing_preferred_tempo_min": 0.94,
+    "timing_preferred_tempo_max": 1.08,
+    "timing_warning_tempo_min": 0.90,
+    "timing_warning_tempo_max": 1.12,
+    "voice_duration_profile_enabled": True,
+    "voice_auto_calibration_mode": "off",
     "tts_session_reuse_enabled": True,
     "tts_micro_batch_enabled": True,
     "vad_adaptive_enabled": False,
@@ -95,6 +135,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "tts_conversion_strategy": "lazy_mix",
     "telemetry_max_file_mb": 16,
     "subtitles_enabled": True,
+    "subtitle_max_chars_per_line": 40,
+    "subtitle_max_lines_per_cue": 2,
+    "subtitle_min_cue_duration_ms": 700,
+    "subtitle_max_cue_duration_ms": 5500,
+    "subtitle_inter_cue_gap_ms": 50,
     "subtitle_font_size": DEFAULT_SUBTITLE_FONT_SIZE,
     "subtitle_font_color": DEFAULT_SUBTITLE_FONT_COLOR,
     "subtitle_background_color": DEFAULT_SUBTITLE_BACKGROUND_COLOR,
@@ -394,6 +439,20 @@ class SettingsService:
                 raise ValueError("vietnamese_speaking_rate_wps must be a number.") from error
             values["vietnamese_speaking_rate_wps"] = max(2.0, min(5.0, rate))
 
+        if values.get("timing_safety_buffer_ms") is not None:
+            try:
+                buffer_ms = float(values["timing_safety_buffer_ms"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("timing_safety_buffer_ms must be a number.") from error
+            values["timing_safety_buffer_ms"] = max(0.0, min(500.0, buffer_ms))
+
+        if values.get("timing_min_fill_ratio") is not None:
+            try:
+                fill_ratio = float(values["timing_min_fill_ratio"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("timing_min_fill_ratio must be a number.") from error
+            values["timing_min_fill_ratio"] = max(0.0, min(1.0, fill_ratio))
+
         if values.get("vad_energy_min_vocal_ratio") is not None:
             try:
                 ratio = float(values["vad_energy_min_vocal_ratio"])
@@ -452,6 +511,20 @@ class SettingsService:
             except (TypeError, ValueError) as error:
                 raise ValueError("telemetry_max_file_mb must be a number.") from error
             values["telemetry_max_file_mb"] = max(0.0, min(1024.0, max_mb))
+
+        for key, minimum, maximum in (
+            ("subtitle_max_chars_per_line", 12, 120),
+            ("subtitle_max_lines_per_cue", 1, 4),
+            ("subtitle_min_cue_duration_ms", 200, 4000),
+            ("subtitle_max_cue_duration_ms", 1500, 15000),
+            ("subtitle_inter_cue_gap_ms", 0, 1000),
+        ):
+            if values.get(key) is not None:
+                try:
+                    parsed = int(values[key])
+                except (TypeError, ValueError) as error:
+                    raise ValueError(f"{key} must be an integer.") from error
+                values[key] = max(minimum, min(maximum, parsed))
 
         subtitle_position = values.get("subtitle_position")
         if subtitle_position is not None:

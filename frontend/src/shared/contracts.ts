@@ -32,6 +32,29 @@ export type ClonedVoice = {
   transcript_error?: string | null;
   transcribed: boolean;
   created_at: string;
+  voice_status?: string;
+  duration_profile_status?: string;
+  duration_profile_key?: string | null;
+  duration_profile_quality?: string | null;
+  duration_profile_sample_count?: number;
+  last_calibrated_at?: string | null;
+  active_calibration_job_id?: string | null;
+};
+
+export type VoiceCalibrationStatus = {
+  voice_id: string;
+  job_id?: string;
+  status: string;
+  mode?: string;
+  completed?: number;
+  total?: number;
+  accepted?: number;
+  rejected?: number;
+  estimated_profile_quality?: string;
+  validation_median_error_ms?: number | null;
+  syllables_per_second?: number | null;
+  duration_profile_quality?: string | null;
+  duration_profile_sample_count?: number;
 };
 
 export type OutputItem = {
@@ -69,6 +92,11 @@ export type JobsApi = {
   createClonedVoice(name: string, file: File, backend?: "omnivoice", refText?: string): Promise<ClonedVoice>;
   deleteClonedVoice(voiceId: string, backend?: "omnivoice"): Promise<{ status: string }>;
   testClonedVoice(voiceId: string, text: string, mode?: "reference" | "ultimate", backend?: "omnivoice"): Promise<Blob>;
+  startVoiceCalibration(voiceId: string, mode?: "quick" | "standard" | "full"): Promise<VoiceCalibrationStatus>;
+  getVoiceCalibration(voiceId: string): Promise<VoiceCalibrationStatus>;
+  cancelVoiceCalibration(voiceId: string): Promise<{ status: string; job_id?: string; voice_id: string }>;
+  resumeVoiceCalibration(voiceId: string): Promise<VoiceCalibrationStatus>;
+  resetVoiceDurationProfile(voiceId: string): Promise<{ status: string; voice_id: string }>;
   previewPresetVoice(voice: string, text: string): Promise<Blob>;
   listTtsVoices(backend: string, locale?: string): Promise<Array<{ id: string; name: string; gender?: string; kind?: string }>>;
   listOpenAiModels(options?: { baseUrl?: string; apiKey?: string }): Promise<Array<{ id: string; name: string }>>;

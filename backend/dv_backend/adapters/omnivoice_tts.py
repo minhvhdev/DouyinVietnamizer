@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from typing import Any
 
 from ..errors import AppError
 from ..models import ErrorInfo
-from ..omnivoice_env import OMNIVOICE_DEFAULT_MODEL
+from ..omnivoice_chunk_synthesis import synthesize_short_or_chunked
 from .omnivoice_infer import _strip_surrogates
 from .tts import parse_tts_voice_string
 
@@ -19,7 +21,7 @@ class OmniVoiceTtsAdapter:
     def __init__(
         self,
         *,
-        model: str = OMNIVOICE_DEFAULT_MODEL,
+        model: str,
         device: str = "cuda:0",
         num_step: int = 32,
         speed: float = 1.0,
@@ -28,8 +30,11 @@ class OmniVoiceTtsAdapter:
         audio_chunk_duration: float = OMNIVOICE_DEFAULT_CHUNK_DURATION_SEC,
         data_dir: Path | None = None,
         runner: object | None = None,
+        settings: dict[str, Any] | None = None,
         _client: object | None = None,
     ) -> None:
+        from ..omnivoice_env import OMNIVOICE_DEFAULT_MODEL
+
         self.model = (model or OMNIVOICE_DEFAULT_MODEL).strip() or OMNIVOICE_DEFAULT_MODEL
         self.device = (device or "cuda:0").strip() or "cuda:0"
         self.num_step = max(4, min(64, int(num_step)))
@@ -39,6 +44,7 @@ class OmniVoiceTtsAdapter:
         self.audio_chunk_duration = max(4.0, min(30.0, float(audio_chunk_duration)))
         self._data_dir = Path(data_dir) if data_dir is not None else None
         self._runner = runner
+        self._settings = dict(settings or {})
         self._client = None
         self._injected_client = _client
 
@@ -126,6 +132,13 @@ class OmniVoiceTtsAdapter:
     def close(self) -> None:
         return None
 
+    def _default_vendor_dir(self) -> Path | None:
+        env = os.environ.get("DV_VENDOR_DIR", "").strip()
+        if env:
+            return Path(env)
+        candidate = Path(__file__).resolve().parents[2] / "vendor"
+        return candidate if candidate.is_dir() else None
+
     def synthesize(
         self,
         text: str,
@@ -136,6 +149,10 @@ class OmniVoiceTtsAdapter:
         anchor_text: str | None = None,
         clone: bool = False,
         clone_mode: str | None = None,
+        segment: dict | None = None,
+        language: str = "vi",
+        transcribe_fn=None,
+        vendor_dir: Path | None = None,
     ) -> None:
         _ = clone, clone_mode, ref_text
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -150,12 +167,25 @@ class OmniVoiceTtsAdapter:
                 ),
             )
         try:
-            self._synthesize_single(
-                cleaned,
-                output_path,
-                voice=voice,
-                ref_text=None,
-                anchor_text=anchor_text,
+            def _synthesize_chunk(chunk_text: str, chunk_path: Path) -> None:
+                self._synthesize_single(
+                    chunk_text,
+                    chunk_path,
+                    voice=voice,
+                    ref_text=None,
+                    anchor_text=anchor_text,
+                )
+
+            vendor_dir = self._default_vendor_dir()
+            synthesize_short_or_chunked(
+                text=cleaned,
+                output_path=output_path,
+                synthesize_fn=_synthesize_chunk,
+                settings=self._settings,
+                segment=segment,
+                language=language,
+                transcribe_fn=transcribe_fn,
+                vendor_dir=vendor_dir,
             )
         except AppError:
             raise

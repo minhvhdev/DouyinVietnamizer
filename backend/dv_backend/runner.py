@@ -72,6 +72,12 @@ class JobRunner:
                     proc.kill()
                 except Exception:
                     pass
+        try:
+            from .gpu_lease import clear_gpu_lease_state
+
+            clear_gpu_lease_state(reason=f"cancel_job:{job_id}")
+        except Exception:
+            pass
         now = utc_now()
         with self.database.connection:
             self.database.connection.execute(
@@ -220,6 +226,30 @@ class JobRunner:
                         self.database.connection.execute(
                             "UPDATE jobs SET status = 'waiting_for_selection', updated_at = ? WHERE id = ?",
                             (now_end, job_id),
+                        )
+                    return
+
+                if e.info.code == "RELEASE_GATE_BLOCKED":
+                    now_end = utc_now()
+                    with self.database.connection:
+                        # Keep this step pending so the operator can fix flagged segments and
+                        # resume; the gate is re-evaluated on the next run.
+                        self.database.connection.execute(
+                            """
+                            UPDATE job_steps
+                            SET status = 'pending', started_at = NULL, completed_at = NULL,
+                                duration_ms = NULL, error_code = ?, error_message = ?
+                            WHERE job_id = ? AND name = ?
+                            """,
+                            (e.info.code, e.info.message, job_id, step_name),
+                        )
+                        self.database.connection.execute(
+                            "UPDATE jobs SET status = 'needs_review', current_step = ?, last_error_code = ?, last_error_message = ?, updated_at = ? WHERE id = ?",
+                            (step_name, e.info.code, e.info.message, now_end, job_id),
+                        )
+                        self.database.connection.execute(
+                            "INSERT INTO events (level, code, message, job_id, created_at) VALUES ('warning', ?, ?, ?, ?)",
+                            (e.info.code, f"Step '{step_name}' halted: {e.info.message}", job_id, now_end),
                         )
                     return
 

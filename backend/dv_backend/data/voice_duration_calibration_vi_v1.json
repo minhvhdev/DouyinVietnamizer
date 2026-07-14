@@ -1,0 +1,1517 @@
+{
+  "version": "vi_duration_v1",
+  "language": "vi",
+  "description": "Vietnamese voice duration calibration sentences v1",
+  "samples": [
+    {
+      "id": "vi_short_utterance_001",
+      "text": "Xin chào.",
+      "category": "short_utterance",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "short"
+      ]
+    },
+    {
+      "id": "vi_short_utterance_002",
+      "text": "Cảm ơn nhé.",
+      "category": "short_utterance",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "short"
+      ]
+    },
+    {
+      "id": "vi_short_utterance_003",
+      "text": "Đúng rồi.",
+      "category": "short_utterance",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "short"
+      ]
+    },
+    {
+      "id": "vi_short_utterance_004",
+      "text": "Không sao đâu.",
+      "category": "short_utterance",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "short"
+      ]
+    },
+    {
+      "id": "vi_short_utterance_005",
+      "text": "Tuyệt vời!",
+      "category": "short_utterance",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "short"
+      ]
+    },
+    {
+      "id": "vi_short_utterance_006",
+      "text": "Chào bạn.",
+      "category": "short_utterance",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "short"
+      ]
+    },
+    {
+      "id": "vi_short_utterance_007",
+      "text": "Đi thôi.",
+      "category": "short_utterance",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "short"
+      ]
+    },
+    {
+      "id": "vi_short_utterance_008",
+      "text": "Ngon quá.",
+      "category": "short_utterance",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "short"
+      ]
+    },
+    {
+      "id": "vi_short_utterance_009",
+      "text": "Hay đấy.",
+      "category": "short_utterance",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "short"
+      ]
+    },
+    {
+      "id": "vi_short_utterance_010",
+      "text": "Ồ, vậy à.",
+      "category": "short_utterance",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "short"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_001",
+      "text": "Hôm nay chúng ta sẽ thử một món ăn mới.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_002",
+      "text": "Video này chia sẻ cách nấu nhanh cho bữa tối.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_003",
+      "text": "Mình vừa phát hiện một quán nhỏ rất ngon.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_004",
+      "text": "Các bạn nhớ bật phụ đề nếu cần nhé.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_005",
+      "text": "Thử làm theo từng bước thì dễ hơn nhiều.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_006",
+      "text": "Món này hợp với cơm nóng hoặc bánh mì.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_007",
+      "text": "Mình dùng nồi chiên không dầu cho nhanh.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_008",
+      "text": "Gia vị chỉ cần muối, tiêu và một chút tỏi.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_009",
+      "text": "Nếu thích cay thì thêm ớt tươi.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_010",
+      "text": "Món ăn này phù hợp cho cả gia đình.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_011",
+      "text": "Bạn có thể thay thế bằng nguyên liệu sẵn có.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_012",
+      "text": "Mình sẽ hướng dẫn cách chọn thịt tươi.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_013",
+      "text": "Đừng quên rửa rau thật kỹ trước khi xào.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_014",
+      "text": "Chảo nóng rồi mới cho dầu vào nhé.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_015",
+      "text": "Xào nhanh tay để rau giữ được độ giòn.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_016",
+      "text": "Thành phẩm nhìn đẹp và mùi rất thơm.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_017",
+      "text": "Món này ăn nóng sẽ ngon hơn.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_018",
+      "text": "Bạn thử làm và gửi phản hồi cho mình.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_019",
+      "text": "Cảm ơn mọi người đã xem hết video.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_020",
+      "text": "Hẹn gặp lại ở clip tiếp theo nhé.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_021",
+      "text": "Mình sẽ quay thêm phần tráng miệng.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_022",
+      "text": "Công thức này mình học từ một đầu bếp.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_023",
+      "text": "Chỉ mất khoảng mười lăm phút là xong.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_024",
+      "text": "Bạn có thể nhân đôi khẩu phần nếu cần.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_025",
+      "text": "Món ăn vừa miệng, không quá nặng mùi.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_026",
+      "text": "Nếu bận, hãy chuẩn bị sẵn nguyên liệu từ tối.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_027",
+      "text": "Mình thích phong cách nấu đơn giản, sạch sẽ.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_028",
+      "text": "Video này phù hợp cho người mới bắt đầu.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_029",
+      "text": "Chúc bạn nấu ăn vui vẻ và thành công.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_normal_sentence_030",
+      "text": "Đừng quên theo dõi kênh để xem thêm món ngon.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "vi_long_sentence_001",
+      "text": "Sau khi thử nhiều cách khác nhau, mình nhận ra rằng việc ướp thịt ít nhất ba mươi phút giúp món ăn thấm gia vị và mềm hơn hẳn so với nấu gấp.",
+      "category": "long_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "long"
+      ]
+    },
+    {
+      "id": "vi_long_sentence_002",
+      "text": "Trong video hôm nay, mình sẽ chia sẻ toàn bộ quy trình từ khâu chọn nguyên liệu, sơ chế, nấu và trình bày sao cho vừa đẹp mắt vừa giữ được hương vị tự nhiên.",
+      "category": "long_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "long"
+      ]
+    },
+    {
+      "id": "vi_long_sentence_003",
+      "text": "Nếu bạn không có lò nướng, có thể dùng chảo chống dính và đậy nắp lửa nhỏ khoảng mười phút để thịt chín đều mà vẫn mềm bên trong.",
+      "category": "long_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "long"
+      ]
+    },
+    {
+      "id": "vi_long_sentence_004",
+      "text": "Một mẹo nhỏ là cho một chút đường khi xào để cân bằng vị chua của cà chua, giúp món ăn hài hòa hơn mà không cần thêm nhiều muối.",
+      "category": "long_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "long"
+      ]
+    },
+    {
+      "id": "vi_long_sentence_005",
+      "text": "Khi quay clip mukbang, mình thường nói chậm hơn một chút để khán giả kịp theo dõi từng bước và cảm nhận được kết cấu của món ăn.",
+      "category": "long_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "long"
+      ]
+    },
+    {
+      "id": "vi_long_sentence_006",
+      "text": "Bạn có thể thay thế sữa tươi bằng kem cooking nếu muốn sốt đặc hơn, nhưng nhớ hạ lửa để tránh bị vón cục khi sốt sôi quá mạnh.",
+      "category": "long_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "long"
+      ]
+    },
+    {
+      "id": "vi_long_sentence_007",
+      "text": "Phần topping mình làm riêng để khi ăn kết hợp sẽ tạo cảm giác giòn tan, còn phần nước sốt thì nên đun sánh nhẹ trước khi rưới lên.",
+      "category": "long_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "long"
+      ]
+    },
+    {
+      "id": "vi_long_sentence_008",
+      "text": "Với những ai ăn kiêng, bạn có thể giảm dầu và tăng rau củ, vẫn giữ được hương vị nhờ gia vị tỏi, gừng và một ít nước mắm.",
+      "category": "long_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "long"
+      ]
+    },
+    {
+      "id": "vi_long_sentence_009",
+      "text": "Sau cùng, mình luôn nếm thử trước khi tắt bếp để điều chỉnh vị mặn, ngọt, chua cho phù hợp khẩu vị từng gia đình.",
+      "category": "long_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "long"
+      ]
+    },
+    {
+      "id": "vi_long_sentence_010",
+      "text": "Clip này dài hơn bình thường vì mình muốn giải thích rõ từng bước để bạn có thể làm lại ngay tại nhà mà không bị thiếu chi tiết quan trọng.",
+      "category": "long_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "long"
+      ]
+    },
+    {
+      "id": "vi_comma_pause_001",
+      "text": "Trước hết, rửa sạch nguyên liệu.",
+      "category": "comma_pause",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "comma"
+      ]
+    },
+    {
+      "id": "vi_comma_pause_002",
+      "text": "Sau đó, thái thịt thành miếng vừa ăn.",
+      "category": "comma_pause",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "comma"
+      ]
+    },
+    {
+      "id": "vi_comma_pause_003",
+      "text": "Cho dầu vào chảo, đợi nóng rồi xào tỏi.",
+      "category": "comma_pause",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "comma"
+      ]
+    },
+    {
+      "id": "vi_comma_pause_004",
+      "text": "Khi thịt săn lại, thêm cà chua và ớt.",
+      "category": "comma_pause",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "comma"
+      ]
+    },
+    {
+      "id": "vi_comma_pause_005",
+      "text": "Cuối cùng, nêm nếm và tắt bếp.",
+      "category": "comma_pause",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "comma"
+      ]
+    },
+    {
+      "id": "vi_comma_pause_006",
+      "text": "Nếu thích, bạn có thể thêm hành lá.",
+      "category": "comma_pause",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "comma"
+      ]
+    },
+    {
+      "id": "vi_comma_pause_007",
+      "text": "Món này, theo mình, ăn kèm cơm là hợp nhất.",
+      "category": "comma_pause",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "comma"
+      ]
+    },
+    {
+      "id": "vi_comma_pause_008",
+      "text": "Trong lúc chờ, hãy chuẩn bị bát đĩa sạch.",
+      "category": "comma_pause",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "comma"
+      ]
+    },
+    {
+      "id": "vi_comma_pause_009",
+      "text": "Với món nước, nên đun sôi trước khi cho rau.",
+      "category": "comma_pause",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "comma"
+      ]
+    },
+    {
+      "id": "vi_comma_pause_010",
+      "text": "Khi ăn, thử kết hợp sốt và topping riêng.",
+      "category": "comma_pause",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "comma"
+      ]
+    },
+    {
+      "id": "vi_question_001",
+      "text": "Bạn đã thử món này chưa?",
+      "category": "question",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "question"
+      ]
+    },
+    {
+      "id": "vi_question_002",
+      "text": "Sao hôm nay bạn muốn nấu gì?",
+      "category": "question",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "question"
+      ]
+    },
+    {
+      "id": "vi_question_003",
+      "text": "Có cần mình giảm cay không?",
+      "category": "question",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "question"
+      ]
+    },
+    {
+      "id": "vi_question_004",
+      "text": "Bạn thích ăn nhiều sốt hay ít sốt?",
+      "category": "question",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "question"
+      ]
+    },
+    {
+      "id": "vi_question_005",
+      "text": "Món này có hợp khẩu vị bạn không?",
+      "category": "question",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "question"
+      ]
+    },
+    {
+      "id": "vi_question_006",
+      "text": "Bạn muốn mình quay thêm phần nào?",
+      "category": "question",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "question"
+      ]
+    },
+    {
+      "id": "vi_question_007",
+      "text": "Có ai ở nhà ăn chay không?",
+      "category": "question",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "question"
+      ]
+    },
+    {
+      "id": "vi_question_008",
+      "text": "Bạn có muốn thay thế bằng gà không?",
+      "category": "question",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "question"
+      ]
+    },
+    {
+      "id": "vi_question_009",
+      "text": "Hôm nay bạn nấu một mình hay cả nhà?",
+      "category": "question",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "question"
+      ]
+    },
+    {
+      "id": "vi_question_010",
+      "text": "Clip tiếp theo bạn muốn xem món gì?",
+      "category": "question",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "question"
+      ]
+    },
+    {
+      "id": "vi_exclamation_001",
+      "text": "Ngon quá luôn!",
+      "category": "exclamation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "exclamation"
+      ]
+    },
+    {
+      "id": "vi_exclamation_002",
+      "text": "Trời ơi, thơm lắm!",
+      "category": "exclamation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "exclamation"
+      ]
+    },
+    {
+      "id": "vi_exclamation_003",
+      "text": "Đỉnh thật sự!",
+      "category": "exclamation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "exclamation"
+      ]
+    },
+    {
+      "id": "vi_exclamation_004",
+      "text": "Món này xuất sắc!",
+      "category": "exclamation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "exclamation"
+      ]
+    },
+    {
+      "id": "vi_exclamation_005",
+      "text": "Wow, nhìn hấp dẫn ghê!",
+      "category": "exclamation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "exclamation"
+      ]
+    },
+    {
+      "id": "vi_exclamation_006",
+      "text": "Tuyệt vời quá đi!",
+      "category": "exclamation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "exclamation"
+      ]
+    },
+    {
+      "id": "vi_exclamation_007",
+      "text": "Không thể tin được!",
+      "category": "exclamation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "exclamation"
+      ]
+    },
+    {
+      "id": "vi_exclamation_008",
+      "text": "Siêu ngon!",
+      "category": "exclamation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "exclamation"
+      ]
+    },
+    {
+      "id": "vi_exclamation_009",
+      "text": "Mình mê món này rồi!",
+      "category": "exclamation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "exclamation"
+      ]
+    },
+    {
+      "id": "vi_exclamation_010",
+      "text": "Chuẩn luôn!",
+      "category": "exclamation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "exclamation"
+      ]
+    },
+    {
+      "id": "vi_numbers_001",
+      "text": "Mình dùng 2 quả trứng.",
+      "category": "numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "numbers"
+      ]
+    },
+    {
+      "id": "vi_numbers_002",
+      "text": "Cho 3 tép tỏi băm nhỏ.",
+      "category": "numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "numbers"
+      ]
+    },
+    {
+      "id": "vi_numbers_003",
+      "text": "Nấu khoảng 5 phút là chín.",
+      "category": "numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "numbers"
+      ]
+    },
+    {
+      "id": "vi_numbers_004",
+      "text": "Thêm 1 muỗng dầu ăn.",
+      "category": "numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "numbers"
+      ]
+    },
+    {
+      "id": "vi_numbers_005",
+      "text": "Rắc 2 gram tiêu xay.",
+      "category": "numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "numbers"
+      ]
+    },
+    {
+      "id": "vi_numbers_006",
+      "text": "Cắt thành 4 phần bằng nhau.",
+      "category": "numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "numbers"
+      ]
+    },
+    {
+      "id": "vi_numbers_007",
+      "text": "Hâm 30 giây trong lò vi sóng.",
+      "category": "numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "numbers"
+      ]
+    },
+    {
+      "id": "vi_numbers_008",
+      "text": "Ướp thịt trong 20 phút.",
+      "category": "numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "numbers"
+      ]
+    },
+    {
+      "id": "vi_numbers_009",
+      "text": "Xào ở lửa số 6.",
+      "category": "numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "numbers"
+      ]
+    },
+    {
+      "id": "vi_numbers_010",
+      "text": "Chia món thành 6 suất ăn.",
+      "category": "numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "numbers"
+      ]
+    },
+    {
+      "id": "vi_decimal_numbers_001",
+      "text": "Cho 1,5 muỗng đường.",
+      "category": "decimal_numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "decimal"
+      ]
+    },
+    {
+      "id": "vi_decimal_numbers_002",
+      "text": "Dùng 2,5 ml nước mắm.",
+      "category": "decimal_numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "decimal"
+      ]
+    },
+    {
+      "id": "vi_decimal_numbers_003",
+      "text": "Nhiệt độ khoảng 180,5 độ C.",
+      "category": "decimal_numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "decimal"
+      ]
+    },
+    {
+      "id": "vi_decimal_numbers_004",
+      "text": "Cân 0,5 kg thịt ba chỉ.",
+      "category": "decimal_numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "decimal"
+      ]
+    },
+    {
+      "id": "vi_decimal_numbers_005",
+      "text": "Pha 1,2 lít nước dùng.",
+      "category": "decimal_numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "decimal"
+      ]
+    },
+    {
+      "id": "vi_decimal_numbers_006",
+      "text": "Giảm 0,3 muỗng muối nếu nhạt.",
+      "category": "decimal_numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "decimal"
+      ]
+    },
+    {
+      "id": "vi_percentages_001",
+      "text": "Giảm 20% lượng dầu so với thường ngày.",
+      "category": "percentages",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "percentages"
+      ]
+    },
+    {
+      "id": "vi_percentages_002",
+      "text": "Tăng 15% rau củ cho bữa ăn nhẹ.",
+      "category": "percentages",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "percentages"
+      ]
+    },
+    {
+      "id": "vi_percentages_003",
+      "text": "Giảm 30% đường nếu bạn ăn kiêng.",
+      "category": "percentages",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "percentages"
+      ]
+    },
+    {
+      "id": "vi_percentages_004",
+      "text": "Thêm 10% sốt để đậm vị hơn.",
+      "category": "percentages",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "percentages"
+      ]
+    },
+    {
+      "id": "vi_percentages_005",
+      "text": "Giảm 25% thời gian nấu khi dùng nồi áp suất.",
+      "category": "percentages",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "percentages"
+      ]
+    },
+    {
+      "id": "vi_currency_001",
+      "text": "Món này chỉ khoảng 45.000 đồng.",
+      "category": "currency",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "currency"
+      ]
+    },
+    {
+      "id": "vi_currency_002",
+      "text": "Set ăn trưa giá 120.000 VND.",
+      "category": "currency",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "currency"
+      ]
+    },
+    {
+      "id": "vi_currency_003",
+      "text": "Một phần khoảng 3 USD.",
+      "category": "currency",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "currency"
+      ]
+    },
+    {
+      "id": "vi_currency_004",
+      "text": "Ship nội thành từ 15.000 đ.",
+      "category": "currency",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "currency"
+      ]
+    },
+    {
+      "id": "vi_currency_005",
+      "text": "Combo tiết kiệm 89.000 đồng.",
+      "category": "currency",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "currency"
+      ]
+    },
+    {
+      "id": "vi_dates_001",
+      "text": "Ngày 12 tháng 7 năm 2026 mình quay clip này.",
+      "category": "dates",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "dates"
+      ]
+    },
+    {
+      "id": "vi_dates_002",
+      "text": "Hẹn livestream tối 20/08 nhé.",
+      "category": "dates",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "dates"
+      ]
+    },
+    {
+      "id": "vi_dates_003",
+      "text": "Món đặc biệt chỉ bán đến 31-12.",
+      "category": "dates",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "dates"
+      ]
+    },
+    {
+      "id": "vi_dates_004",
+      "text": "Kỷ niệm 2 năm kênh nấu ăn.",
+      "category": "dates",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "dates"
+      ]
+    },
+    {
+      "id": "vi_dates_005",
+      "text": "Deal chỉ áp dụng từ 01/09 đến 15/09.",
+      "category": "dates",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "dates"
+      ]
+    },
+    {
+      "id": "vi_acronyms_001",
+      "text": "Món này phù hợp cho chế độ KETO.",
+      "category": "acronyms",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "acronyms"
+      ]
+    },
+    {
+      "id": "vi_acronyms_002",
+      "text": "Bạn có thể dùng API để đặt hàng.",
+      "category": "acronyms",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "acronyms"
+      ]
+    },
+    {
+      "id": "vi_acronyms_003",
+      "text": "Theo chuẩn ISO về an toàn thực phẩm.",
+      "category": "acronyms",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "acronyms"
+      ]
+    },
+    {
+      "id": "vi_acronyms_004",
+      "text": "Clip quay bằng OBS và mic USB.",
+      "category": "acronyms",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "acronyms"
+      ]
+    },
+    {
+      "id": "vi_acronyms_005",
+      "text": "Mình test trên CPU và GPU RTX.",
+      "category": "acronyms",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "acronyms"
+      ]
+    },
+    {
+      "id": "vi_latin_words_001",
+      "text": "Món pasta sốt kem thơm và béo.",
+      "category": "latin_words",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "latin"
+      ]
+    },
+    {
+      "id": "vi_latin_words_002",
+      "text": "Salad trộn olive oil và parmesan.",
+      "category": "latin_words",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "latin"
+      ]
+    },
+    {
+      "id": "vi_latin_words_003",
+      "text": "Bánh tiramisu làm tại nhà.",
+      "category": "latin_words",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "latin"
+      ]
+    },
+    {
+      "id": "vi_latin_words_004",
+      "text": "Menu có burger và french fries.",
+      "category": "latin_words",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "latin"
+      ]
+    },
+    {
+      "id": "vi_latin_words_005",
+      "text": "Latte nóng uống kèm bánh croissant.",
+      "category": "latin_words",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "latin"
+      ]
+    },
+    {
+      "id": "vi_product_models_001",
+      "text": "Mình dùng nồi Instant Pot Duo.",
+      "category": "product_models",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "product"
+      ]
+    },
+    {
+      "id": "vi_product_models_002",
+      "text": "Quay bằng iPhone 15 Pro Max.",
+      "category": "product_models",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "product"
+      ]
+    },
+    {
+      "id": "vi_product_models_003",
+      "text": "Mic Shure SM7B thu âm rõ.",
+      "category": "product_models",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "product"
+      ]
+    },
+    {
+      "id": "vi_product_models_004",
+      "text": "Tủ lạnh Samsung Inverter tiết kiệm điện.",
+      "category": "product_models",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "product"
+      ]
+    },
+    {
+      "id": "vi_product_models_005",
+      "text": "Máy xay Philips HR3655 xay mịn nhanh.",
+      "category": "product_models",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "product"
+      ]
+    },
+    {
+      "id": "vi_proper_names_001",
+      "text": "Hôm nay mình đi ăn ở quán Phở Hà Nội.",
+      "category": "proper_names",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "proper"
+      ]
+    },
+    {
+      "id": "vi_proper_names_002",
+      "text": "Chợ Bến Thành sáng nay đông khách lắm.",
+      "category": "proper_names",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "proper"
+      ]
+    },
+    {
+      "id": "vi_proper_names_003",
+      "text": "Món bún chả Hương Liên vẫn rất nổi tiếng.",
+      "category": "proper_names",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "proper"
+      ]
+    },
+    {
+      "id": "vi_proper_names_004",
+      "text": "Cafe Highlands gần nhà mình mở cửa sớm.",
+      "category": "proper_names",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "proper"
+      ]
+    },
+    {
+      "id": "vi_proper_names_005",
+      "text": "Đường Nguyễn Huệ tối nay có lễ hội ánh sáng.",
+      "category": "proper_names",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "proper"
+      ]
+    },
+    {
+      "id": "vi_parentheses_001",
+      "text": "Cho thêm hành (nếu thích) trước khi tắt bếp.",
+      "category": "parentheses",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "parentheses"
+      ]
+    },
+    {
+      "id": "vi_parentheses_002",
+      "text": "Giảm muối (khoảng nửa muỗng) nếu dùng nước mắm.",
+      "category": "parentheses",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "parentheses"
+      ]
+    },
+    {
+      "id": "vi_parentheses_003",
+      "text": "Hâm lại (30–45 giây) trước khi ăn.",
+      "category": "parentheses",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "parentheses"
+      ]
+    },
+    {
+      "id": "vi_parentheses_004",
+      "text": "Thay thế sữa (bằng kem cooking) nếu muốn sánh.",
+      "category": "parentheses",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "parentheses"
+      ]
+    },
+    {
+      "id": "vi_parentheses_005",
+      "text": "Rắc tiêu (vừa đủ) để tăng hương thơm.",
+      "category": "parentheses",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "parentheses"
+      ]
+    },
+    {
+      "id": "vi_dash_001",
+      "text": "Món này vừa nhanh — vừa ngon.",
+      "category": "dash",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "dash"
+      ]
+    },
+    {
+      "id": "vi_dash_002",
+      "text": "Chọn thịt tươi — không có mùi hôi.",
+      "category": "dash",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "dash"
+      ]
+    },
+    {
+      "id": "vi_dash_003",
+      "text": "Ăn nóng — sẽ ngon hơn nhiều.",
+      "category": "dash",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "dash"
+      ]
+    },
+    {
+      "id": "vi_dash_004",
+      "text": "Xào lửa lớn — rau giữ màu xanh.",
+      "category": "dash",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "dash"
+      ]
+    },
+    {
+      "id": "vi_dash_005",
+      "text": "Sốt sánh — không quá loãng.",
+      "category": "dash",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "dash"
+      ]
+    },
+    {
+      "id": "vi_ellipsis_001",
+      "text": "Đợi chút nhé… mình sẽ nếm thử.",
+      "category": "ellipsis",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "ellipsis"
+      ]
+    },
+    {
+      "id": "vi_ellipsis_002",
+      "text": "Hmm… vị này hơi nhạt.",
+      "category": "ellipsis",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "ellipsis"
+      ]
+    },
+    {
+      "id": "vi_ellipsis_003",
+      "text": "Chờ thêm vài phút… sắp chín rồi.",
+      "category": "ellipsis",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "ellipsis"
+      ]
+    },
+    {
+      "id": "vi_ellipsis_004",
+      "text": "Mùi thơm quá… không chờ nổi.",
+      "category": "ellipsis",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "ellipsis"
+      ]
+    },
+    {
+      "id": "vi_ellipsis_005",
+      "text": "Thêm một chút nữa… vừa miệng rồi.",
+      "category": "ellipsis",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "ellipsis"
+      ]
+    },
+    {
+      "id": "vi_mixed_punctuation_001",
+      "text": "Ngon quá — bạn thử liền đi!",
+      "category": "mixed_punctuation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "mixed"
+      ]
+    },
+    {
+      "id": "vi_mixed_punctuation_002",
+      "text": "Giá 59.000đ (ship free)… deal tốt nhé?",
+      "category": "mixed_punctuation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "mixed"
+      ]
+    },
+    {
+      "id": "vi_mixed_punctuation_003",
+      "text": "API + OBS: quay nhanh, edit gọn!",
+      "category": "mixed_punctuation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "mixed"
+      ]
+    },
+    {
+      "id": "vi_mixed_punctuation_004",
+      "text": "Phở Hà Nội — 8/10 điểm (theo mình)!",
+      "category": "mixed_punctuation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "mixed"
+      ]
+    },
+    {
+      "id": "vi_mixed_punctuation_005",
+      "text": "KETO 20%? Không sao… vẫn ngon!",
+      "category": "mixed_punctuation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "mixed"
+      ]
+    }
+  ]
+}

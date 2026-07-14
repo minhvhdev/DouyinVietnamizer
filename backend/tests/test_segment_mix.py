@@ -21,20 +21,32 @@ def test_annotate_segment_mix_caps_prevents_overlap() -> None:
     annotate_segment_mix_caps(entries)
     assert entries[0]["max_duration"] == 2.975
     assert entries[1]["max_duration"] is None
+    assert entries[0]["mix_would_clip_sec"] == 0.525
 
 
-def test_build_narration_segment_filter_trims_and_fades() -> None:
+def test_build_narration_segment_filter_does_not_hard_clip_by_default() -> None:
     expr = build_narration_segment_filter(
         1,
         placement_start=2.5,
         clip_duration=3.6,
         max_duration=3.0,
     )
-    assert "atrim=0:3.000" in expr
+    assert "atrim=" not in expr
     assert "afade=t=in" in expr
     assert "afade=t=out" in expr
     assert "adelay=2500" in expr
     assert expr.endswith("[seg1]")
+
+
+def test_build_narration_segment_filter_legacy_hard_clip_opt_in() -> None:
+    expr = build_narration_segment_filter(
+        1,
+        placement_start=2.5,
+        clip_duration=3.6,
+        max_duration=3.0,
+        allow_hard_clip=True,
+    )
+    assert "atrim=0:3.000" in expr
 
 
 def test_build_narration_amix_filter_uses_dropout_transition() -> None:

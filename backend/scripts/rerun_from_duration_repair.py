@@ -17,7 +17,7 @@ def main() -> int:
     parser.add_argument(
         "--from-step",
         default="duration_repair",
-        choices=["duration_repair", "mix", "render"],
+        choices=["duration_repair", "align_final_dub", "mix", "render"],
         help="First pipeline step to rerun.",
     )
     args = parser.parse_args()

@@ -30,7 +30,7 @@ import {
   Server,
 } from "lucide-react";
 
-import type { ClonedVoice, Job, JobsApi, OutputItem, ReleaseVramResult, RuntimeCheck, RuntimeReport } from "../shared/contracts";
+import type { ClonedVoice, Job, JobsApi, OutputItem, ReleaseVramResult, RuntimeCheck, RuntimeReport, VoiceCalibrationStatus } from "../shared/contracts";
 import { api as defaultApi } from "../shared/api";
 import { invokeOpenFolder, invokeRestart, probeBackendHealth, subscribeBackendEvents, waitForBackend, type BackendConnectionState, type BackendStatus, BACKEND_BASE } from "../lib/tauri-bridge";
 import "./styles.css";
@@ -46,6 +46,7 @@ const PIPELINE_STEPS = [
   "translate",
   "tts",
   "duration_repair",
+  "align_final_dub",
   "mix",
   "render",
   "qc",
@@ -312,6 +313,7 @@ const translateStepName = (name: string, dubLanguage?: string) => {
     case "translate": return "Dịch thuật";
     case "tts": return `Lồng tiếng ${dubLang.label} (TTS)`;
     case "duration_repair": return "Khớp độ dài âm thanh";
+    case "align_final_dub": return "Căn timing lồng tiếng";
     case "mix": return "Trộn nhạc nền & giọng nói";
     case "render": return "Xuất video thành phẩm";
     case "qc": return "Kiểm định chất lượng (QC)";
@@ -608,6 +610,11 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     subtitle_background_padding: 12,
     subtitle_edge_margin: 80,
     subtitle_position: "bottom",
+    subtitle_max_chars_per_line: 40,
+    subtitle_max_lines_per_cue: 2,
+    subtitle_min_cue_duration_ms: 700,
+    subtitle_max_cue_duration_ms: 5500,
+    subtitle_inter_cue_gap_ms: 50,
     gemini_api_keys: [],
     gemini_translation_model: "gemini-2.5-flash",
     openai_api_base: "https://api.openai.com/v1",
@@ -656,6 +663,9 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   const [testText, setTestText] = useState<Record<string, string>>({});
   const [testSynthesizing, setTestSynthesizing] = useState<Record<string, boolean>>({});
   const [testAudioUrls, setTestAudioUrls] = useState<Record<string, string>>({});
+  const [calibrationStatusByVoice, setCalibrationStatusByVoice] = useState<Record<string, VoiceCalibrationStatus>>({});
+  const [calibrationBusy, setCalibrationBusy] = useState<Record<string, boolean>>({});
+  const [calibrationDialogVoiceId, setCalibrationDialogVoiceId] = useState<string | null>(null);
   const activeTtsBackend = settings.tts_backend ?? "omnivoice";
   const activeCloneBackend: CloneBackend = "omnivoice";
   const clonedVoices = clonedVoicesByBackend[activeCloneBackend] ?? [];
@@ -944,6 +954,111 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     }
   }
 
+  function formatDurationProfileStatus(voice: ClonedVoice, live?: VoiceCalibrationStatus): string {
+    const status = live?.status || voice.duration_profile_status || "not_started";
+    if (status === "running" || status === "queued") {
+      const completed = live?.completed ?? 0;
+      const total = live?.total ?? 0;
+      return total > 0 ? `Đang hiệu chỉnh ${completed}/${total}` : "Đang hiệu chỉnh";
+    }
+    if (status === "ready") {
+      const count = voice.duration_profile_sample_count || live?.accepted || 0;
+      return `Sẵn sàng — ${count} mẫu`;
+    }
+    if (status === "partial") {
+      const count = voice.duration_profile_sample_count || live?.accepted || 0;
+      return `Một phần — ${count} mẫu`;
+    }
+    if (status === "failed") return "Lỗi hiệu chỉnh";
+    if (status === "stale") return "Cần chạy lại";
+    if (status === "cancelled") return "Đã hủy hiệu chỉnh";
+    return "Chưa hiệu chỉnh";
+  }
+
+  async function refreshCalibrationStatus(voiceId: string) {
+    try {
+      const status = await api.getVoiceCalibration(voiceId);
+      setCalibrationStatusByVoice((prev) => ({ ...prev, [voiceId]: status }));
+      return status;
+    } catch {
+      return null;
+    }
+  }
+
+  async function handleStartCalibration(voiceId: string, mode: "quick" | "standard" | "full") {
+    setCalibrationBusy((prev) => ({ ...prev, [voiceId]: true }));
+    setVoiceError(null);
+    try {
+      const status = await api.startVoiceCalibration(voiceId, mode);
+      setCalibrationStatusByVoice((prev) => ({ ...prev, [voiceId]: status }));
+      setCalibrationDialogVoiceId(null);
+      await refreshClonedVoices(cloningBackend);
+    } catch (cause) {
+      setVoiceError(cause instanceof Error ? cause.message : "Không thể bắt đầu hiệu chỉnh");
+    } finally {
+      setCalibrationBusy((prev) => ({ ...prev, [voiceId]: false }));
+    }
+  }
+
+  async function handleCancelCalibration(voiceId: string) {
+    setCalibrationBusy((prev) => ({ ...prev, [voiceId]: true }));
+    try {
+      await api.cancelVoiceCalibration(voiceId);
+      await refreshCalibrationStatus(voiceId);
+      await refreshClonedVoices(cloningBackend);
+    } catch (cause) {
+      setVoiceError(cause instanceof Error ? cause.message : "Không thể hủy hiệu chỉnh");
+    } finally {
+      setCalibrationBusy((prev) => ({ ...prev, [voiceId]: false }));
+    }
+  }
+
+  async function handleResumeCalibration(voiceId: string) {
+    setCalibrationBusy((prev) => ({ ...prev, [voiceId]: true }));
+    try {
+      const status = await api.resumeVoiceCalibration(voiceId);
+      setCalibrationStatusByVoice((prev) => ({ ...prev, [voiceId]: status }));
+      await refreshClonedVoices(cloningBackend);
+    } catch (cause) {
+      setVoiceError(cause instanceof Error ? cause.message : "Không thể tiếp tục hiệu chỉnh");
+    } finally {
+      setCalibrationBusy((prev) => ({ ...prev, [voiceId]: false }));
+    }
+  }
+
+  async function handleResetDurationProfile(voiceId: string) {
+    if (!confirm("Đặt lại profile tốc độ đọc? Giọng clone vẫn giữ nguyên.")) return;
+    try {
+      await api.resetVoiceDurationProfile(voiceId);
+      await refreshClonedVoices(cloningBackend);
+      setCalibrationStatusByVoice((prev) => {
+        const next = { ...prev };
+        delete next[voiceId];
+        return next;
+      });
+    } catch (cause) {
+      setVoiceError(cause instanceof Error ? cause.message : "Không thể đặt lại profile");
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab !== "cloning") return;
+    const running = cloningVoices.filter((voice) =>
+      ["running", "queued"].includes(voice.duration_profile_status || calibrationStatusByVoice[voice.id]?.status || "")
+    );
+    if (running.length === 0) return;
+    const timer = window.setInterval(() => {
+      running.forEach((voice) => {
+        void refreshCalibrationStatus(voice.id).then((status) => {
+          if (status && ["ready", "partial", "failed", "cancelled"].includes(status.status)) {
+            void refreshClonedVoices(cloningBackend);
+          }
+        });
+      });
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [activeTab, cloningBackend, cloningVoices, calibrationStatusByVoice]);
+
   async function handleUploadVoice(e: FormEvent) {
     e.preventDefault();
     if (!voiceName || !voiceFile) {
@@ -967,6 +1082,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
       setVoiceNotice(
         `Đã lưu giọng OmniVoice với ref_text ${(created.transcript ?? "").length} ký tự. Sẵn sàng clone.`,
       );
+      setCalibrationDialogVoiceId(created.id);
       setVoiceName("");
       setVoiceFile(null);
       setVoiceRefText("");
@@ -2102,6 +2218,51 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                               </span>
                             </div>
 
+                            <div style={{ display: "flex", flexDirection: "column", gap: "8px", background: "rgba(90, 120, 255, 0.05)", border: "1px solid rgba(120, 140, 255, 0.15)", borderRadius: "8px", padding: "10px" }}>
+                              <span style={{ fontSize: "11px", color: "#a79aff", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.03em" }}>Hiệu chỉnh tốc độ đọc</span>
+                              <span style={{ fontSize: "12px", color: "#b6c0d0" }}>
+                                Tạo profile tốc độ riêng cho giọng này để dự đoán thời lượng lồng tiếng chính xác hơn.
+                              </span>
+                              <div style={{ fontSize: "12px", color: "#dbe7ff" }}>
+                                Trạng thái: {formatDurationProfileStatus(voice, calibrationStatusByVoice[voice.id])}
+                              </div>
+                              {(["running", "queued"].includes(voice.duration_profile_status || calibrationStatusByVoice[voice.id]?.status || "")) && (
+                                <div style={{ fontSize: "12px", color: "#cbd5e1" }}>
+                                  Đang hiệu chỉnh: {calibrationStatusByVoice[voice.id]?.completed ?? 0} / {calibrationStatusByVoice[voice.id]?.total ?? "?"}
+                                  {" · "}
+                                  Mẫu hợp lệ: {calibrationStatusByVoice[voice.id]?.accepted ?? 0}
+                                  {" · "}
+                                  Mẫu bỏ qua: {calibrationStatusByVoice[voice.id]?.rejected ?? 0}
+                                </div>
+                              )}
+                              {(voice.duration_profile_status === "ready" || voice.duration_profile_status === "partial") && (
+                                <div style={{ fontSize: "12px", color: "#9be7b1" }}>
+                                  Sai số dự đoán trung vị: {calibrationStatusByVoice[voice.id]?.validation_median_error_ms ?? "—"} ms
+                                </div>
+                              )}
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                                {!["running", "queued"].includes(voice.duration_profile_status || "") && (
+                                  <>
+                                    <button type="button" className="key-action-btn save-btn" disabled={calibrationBusy[voice.id]} onClick={() => handleStartCalibration(voice.id, "quick")}>Nhanh (~20)</button>
+                                    <button type="button" className="key-action-btn save-btn" disabled={calibrationBusy[voice.id]} onClick={() => handleStartCalibration(voice.id, "standard")}>Chuẩn (~50)</button>
+                                    <button type="button" className="key-action-btn save-btn" disabled={calibrationBusy[voice.id]} onClick={() => handleStartCalibration(voice.id, "full")}>Đầy đủ (~100)</button>
+                                  </>
+                                )}
+                                {["running", "queued"].includes(voice.duration_profile_status || calibrationStatusByVoice[voice.id]?.status || "") && (
+                                  <button type="button" className="key-action-btn delete-btn" disabled={calibrationBusy[voice.id]} onClick={() => handleCancelCalibration(voice.id)}>Hủy</button>
+                                )}
+                                {["cancelled", "failed"].includes(voice.duration_profile_status || "") && (
+                                  <button type="button" className="key-action-btn save-btn" disabled={calibrationBusy[voice.id]} onClick={() => handleResumeCalibration(voice.id)}>Tiếp tục</button>
+                                )}
+                                {(voice.duration_profile_status === "ready" || voice.duration_profile_status === "partial") && (
+                                  <>
+                                    <button type="button" className="key-action-btn save-btn" disabled={calibrationBusy[voice.id]} onClick={() => handleStartCalibration(voice.id, "full")}>Cải thiện profile</button>
+                                    <button type="button" className="key-action-btn delete-btn" onClick={() => handleResetDurationProfile(voice.id)}>Đặt lại profile</button>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+
                             {/* Play reference audio */}
                             <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
                               <span style={{ fontSize: "12px", color: "#8b949e" }}>Âm thanh mẫu:</span>
@@ -2155,6 +2316,22 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                 </section>
               </div>
             </div>
+
+            {calibrationDialogVoiceId && (
+              <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }}>
+                <div className="settings-card" style={{ width: "min(520px, 92vw)", padding: "20px" }}>
+                  <h3 style={{ marginTop: 0 }}>Voice clone thành công</h3>
+                  <p className="card-description">
+                    Bạn có muốn chạy hiệu chỉnh tốc độ đọc (Standard ~50 câu) để dự đoán thời lượng lồng tiếng tốt hơn ngay từ job đầu tiên?
+                  </p>
+                  <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+                    <button type="button" className="gradient-button" onClick={() => handleStartCalibration(calibrationDialogVoiceId, "standard")}>Bắt đầu Chuẩn</button>
+                    <button type="button" className="key-action-btn save-btn" onClick={() => handleStartCalibration(calibrationDialogVoiceId, "quick")}>Nhanh</button>
+                    <button type="button" className="key-action-btn delete-btn" onClick={() => setCalibrationDialogVoiceId(null)}>Bỏ qua</button>
+                  </div>
+                </div>
+              </div>
+            )}
           </>
         )}
 
@@ -3232,6 +3409,75 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                           </label>
                         )}
                       </div>
+                      <SettingsSectionHead
+                        title="Chia dòng phụ đề"
+                        description="Cắt phụ đề theo câu/cụm và đồng bộ với nhịp nói của audio lồng tiếng, tránh hiển thị quá nhiều chữ một lúc."
+                      />
+                      <div className="settings-field-grid settings-field-grid--2">
+                        <label className="settings-label">
+                          <span>Số ký tự tối đa mỗi dòng</span>
+                          <input
+                            className="settings-input"
+                            type="number"
+                            min={12}
+                            max={120}
+                            value={settings.subtitle_max_chars_per_line ?? 40}
+                            onChange={(e) => setSettings({ ...settings, subtitle_max_chars_per_line: Number(e.target.value) })}
+                            disabled={!settings.subtitles_enabled}
+                          />
+                        </label>
+                        <label className="settings-label">
+                          <span>Số dòng tối đa mỗi lần hiển thị</span>
+                          <input
+                            className="settings-input"
+                            type="number"
+                            min={1}
+                            max={4}
+                            value={settings.subtitle_max_lines_per_cue ?? 2}
+                            onChange={(e) => setSettings({ ...settings, subtitle_max_lines_per_cue: Number(e.target.value) })}
+                            disabled={!settings.subtitles_enabled}
+                          />
+                        </label>
+                        <label className="settings-label">
+                          <span>Thời lượng tối thiểu mỗi cue (ms)</span>
+                          <input
+                            className="settings-input"
+                            type="number"
+                            min={200}
+                            max={4000}
+                            step={50}
+                            value={settings.subtitle_min_cue_duration_ms ?? 700}
+                            onChange={(e) => setSettings({ ...settings, subtitle_min_cue_duration_ms: Number(e.target.value) })}
+                            disabled={!settings.subtitles_enabled}
+                          />
+                        </label>
+                        <label className="settings-label">
+                          <span>Thời lượng tối đa mỗi cue (ms)</span>
+                          <input
+                            className="settings-input"
+                            type="number"
+                            min={1500}
+                            max={15000}
+                            step={100}
+                            value={settings.subtitle_max_cue_duration_ms ?? 5500}
+                            onChange={(e) => setSettings({ ...settings, subtitle_max_cue_duration_ms: Number(e.target.value) })}
+                            disabled={!settings.subtitles_enabled}
+                          />
+                        </label>
+                        <label className="settings-label settings-field-grid__span-2">
+                          <span>Khoảng cách tối thiểu giữa 2 cue (ms)</span>
+                          <input
+                            className="settings-input"
+                            type="number"
+                            min={0}
+                            max={1000}
+                            step={10}
+                            value={settings.subtitle_inter_cue_gap_ms ?? 50}
+                            onChange={(e) => setSettings({ ...settings, subtitle_inter_cue_gap_ms: Number(e.target.value) })}
+                            disabled={!settings.subtitles_enabled}
+                          />
+                        </label>
+                      </div>
                       <div className="alert-info-box info">
                         <CircleAlert size={14} style={{ flexShrink: 0, marginTop: "2px" }} />
                         <span>
@@ -3542,8 +3788,37 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                        </div>
                      )}
                      <div style={{ fontSize: "13.5px", color: "#fff", fontWeight: 500, lineHeight: 1.4 }}>
-                       Dịch (Việt): {seg.translation}
+                       Dịch (Việt): {seg.tts_spoken_text || seg.translation}
                      </div>
+                     {(seg.timing_status && seg.timing_status !== "OK") && (
+                       <div style={{ fontSize: "11px", color: seg.timing_status === "OVERFLOW" ? "#ff8f8f" : "#ffb347" }}>
+                         Timing: {seg.timing_status}
+                         {seg.timing_overflow_sec > 0.05 ? ` · overflow ${Number(seg.timing_overflow_sec).toFixed(2)}s` : ""}
+                         {seg.placement_drift_sec ? ` · drift ${Number(seg.placement_drift_sec).toFixed(2)}s` : ""}
+                         {seg.soft_speed_factor ? ` · speed ${Number(seg.soft_speed_factor).toFixed(2)}x` : ""}
+                       </div>
+                     )}
+                     {(seg.tts_chunk_count != null && seg.tts_chunk_count > 0) && (
+                       <div style={{ fontSize: "11px", color: "#9aa3b5", display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                         <span>TTS: {seg.tts_chunk_count} chunk{seg.tts_chunk_count > 1 ? "s" : ""}</span>
+                         {seg.tts_text_similarity != null && (
+                           <span>Fidelity: {Math.round(Number(seg.tts_text_similarity) * 100)}%</span>
+                         )}
+                         {seg.tts_fidelity_status && seg.tts_fidelity_status !== "not_checked" && (
+                           <span>
+                             Trạng thái: {
+                               seg.tts_fidelity_status === "good" ? "Tốt"
+                               : seg.tts_fidelity_status === "review" ? "Cần kiểm tra"
+                               : seg.tts_fidelity_status === "poor" ? "Cần kiểm tra"
+                               : "Lỗi"
+                             }
+                           </span>
+                         )}
+                         {(seg.tts_fidelity_status === "poor" || seg.tts_fidelity_status === "failed" || seg.tts_fidelity_status === "review") && (
+                           <span style={{ color: "#ffb347" }}>Audio có thể chưa đọc đầy đủ bản dịch.</span>
+                         )}
+                       </div>
+                     )}
                      {seg.speaker_id != null && (
                        <span style={{ fontSize: "11px", color: "#00d1b2" }}>
                          · Speaker {seg.speaker_id}

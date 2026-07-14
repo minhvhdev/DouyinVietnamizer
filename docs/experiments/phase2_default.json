@@ -1,0 +1,15 @@
+{
+  "name": "phase2_default",
+  "fixed_settings": {},
+  "baseline_settings": {
+    "timing_candidate_translation_enabled": false,
+    "voice_duration_profile_enabled": false
+  },
+  "experiment_settings": {
+    "timing_candidate_translation_enabled": true,
+    "timing_translation_candidate_count": 3,
+    "timing_max_candidate_tts_attempts": 2,
+    "timing_max_tts_attempts": 3,
+    "voice_duration_profile_enabled": true
+  }
+}

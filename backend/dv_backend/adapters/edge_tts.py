@@ -2,6 +2,7 @@ import asyncio
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from ..errors import AppError
@@ -127,11 +128,29 @@ def _mp3_to_wav(mp3_path: Path, wav_path: Path) -> None:
         )
 
 
-async def _synthesize_edge_chunk(text: str, voice: str, mp3_path: Path) -> None:
+async def _synthesize_edge_chunk(
+    text: str,
+    voice: str,
+    mp3_path: Path,
+    *,
+    max_attempts: int = 4,
+) -> None:
     import edge_tts
 
-    communicate = edge_tts.Communicate(text, voice)
-    await communicate.save(str(mp3_path))
+    last_exc: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            communicate = edge_tts.Communicate(text, voice)
+            await communicate.save(str(mp3_path))
+            if mp3_path.is_file() and mp3_path.stat().st_size > 0:
+                return
+            last_exc = RuntimeError("Edge TTS returned an empty MP3 file.")
+        except Exception as exc:
+            last_exc = exc
+        if attempt + 1 < max_attempts:
+            await asyncio.sleep(0.75 * (2**attempt))
+    if last_exc is not None:
+        raise last_exc
 
 
 def _concat_wavs(parts: list[Path], output_path: Path) -> None:
@@ -220,6 +239,8 @@ class EdgeTtsAdapter:
         wav_parts: list[Path] = []
         try:
             for index, chunk in enumerate(chunks):
+                if index > 0:
+                    time.sleep(0.15)
                 with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_mp3:
                     mp3_path = Path(tmp_mp3.name)
                 wav_part = output_path.with_name(f"{output_path.stem}.part{index:03d}.wav")

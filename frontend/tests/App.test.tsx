@@ -1,4 +1,4 @@
-﻿import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 
 import { App } from "../src/renderer/App";
@@ -57,6 +57,11 @@ const baseApi: JobsApi = {
   listClonedVoices: vi.fn().mockResolvedValue([]),
   createClonedVoice: vi.fn().mockResolvedValue({ id: "voice-1", name: "Voice 1", wav_filename: "v1.wav", wav_path: "", transcript: "", transcribed: false, created_at: "" }),
   deleteClonedVoice: vi.fn().mockResolvedValue({ status: "deleted" }),
+  startVoiceCalibration: vi.fn().mockResolvedValue({ voice_id: "voice-1", status: "idle" }),
+  getVoiceCalibration: vi.fn().mockResolvedValue({ voice_id: "voice-1", status: "idle" }),
+  cancelVoiceCalibration: vi.fn().mockResolvedValue({ status: "cancelled", voice_id: "voice-1" }),
+  resumeVoiceCalibration: vi.fn().mockResolvedValue({ voice_id: "voice-1", status: "idle" }),
+  resetVoiceDurationProfile: vi.fn().mockResolvedValue({ status: "reset", voice_id: "voice-1" }),
   testClonedVoice: vi.fn().mockResolvedValue(new Blob()),
   previewPresetVoice: vi.fn().mockResolvedValue(new Blob()),
   listTtsVoices: vi.fn().mockResolvedValue([

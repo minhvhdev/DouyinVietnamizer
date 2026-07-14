@@ -1,4 +1,4 @@
-import type { Job, JobFolder, JobsApi, RuntimeReport } from "./contracts";
+import type { Job, JobFolder, JobsApi, RuntimeReport, VoiceCalibrationStatus } from "./contracts";
 
 const baseUrl = import.meta.env.VITE_BACKEND_URL ?? "http://127.0.0.1:8765";
 
@@ -84,6 +84,18 @@ export const api: JobsApi = {
     }
     return response.blob();
   },
+  startVoiceCalibration: (voiceId, mode = "standard") =>
+    request<VoiceCalibrationStatus>(`/api/cloned-voices/${voiceId}/calibration`, {
+      method: "POST",
+      body: JSON.stringify({ mode }),
+    }),
+  getVoiceCalibration: (voiceId) => request<VoiceCalibrationStatus>(`/api/cloned-voices/${voiceId}/calibration`),
+  cancelVoiceCalibration: (voiceId) =>
+    request(`/api/cloned-voices/${voiceId}/calibration/cancel`, { method: "POST" }),
+  resumeVoiceCalibration: (voiceId) =>
+    request<VoiceCalibrationStatus>(`/api/cloned-voices/${voiceId}/calibration/resume`, { method: "POST" }),
+  resetVoiceDurationProfile: (voiceId) =>
+    request(`/api/cloned-voices/${voiceId}/duration-profile`, { method: "DELETE" }),
   previewPresetVoice: async (voice, text) => {
     const response = await fetch(`${baseUrl}/api/voices/preview`, {
       method: "POST",

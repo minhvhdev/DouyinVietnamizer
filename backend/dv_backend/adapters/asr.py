@@ -10,8 +10,9 @@ from ..models import ErrorInfo
 DEFAULT_ASR_MODEL = "Qwen/Qwen3-ASR-1.7B"
 DEFAULT_ALIGNER_MODEL = "Qwen/Qwen3-ForcedAligner-0.6B"
 SENTENCE_PUNCTUATION = set("。！？；.!?;")
-MAX_ASR_SEGMENT_SECONDS = 12.0
-MAX_ASR_SEGMENT_CHARS = 72
+CHINESE_CLAUSE_PUNCTUATION = set("，、")
+MAX_ASR_SEGMENT_SECONDS = 6.0
+MAX_ASR_SEGMENT_CHARS = 36
 
 _model_lock = threading.Lock()
 _model_instance: Any = None
@@ -126,8 +127,13 @@ def _group_time_stamps(time_stamps: list[Any]) -> list[dict[str, float | str]]:
         current_text += text
         duration = (current_end - current_start) if current_start is not None else 0.0
         punct_in_token = any(character in text for character in SENTENCE_PUNCTUATION)
+        clause_in_token = any(character in text for character in CHINESE_CLAUSE_PUNCTUATION)
         hit_limit = duration >= MAX_ASR_SEGMENT_SECONDS or len(current_text) >= MAX_ASR_SEGMENT_CHARS
-        should_flush = punct_in_token or hit_limit
+        soft_clause_flush = clause_in_token and (
+            duration >= max(3.0, MAX_ASR_SEGMENT_SECONDS * 0.5)
+            or len(current_text) >= max(18, MAX_ASR_SEGMENT_CHARS // 2)
+        )
+        should_flush = punct_in_token or hit_limit or soft_clause_flush
         if not should_flush:
             continue
 

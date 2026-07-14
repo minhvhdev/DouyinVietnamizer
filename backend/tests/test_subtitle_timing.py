@@ -185,3 +185,103 @@ def test_allocate_proportional_cues_weights_longer_sentence() -> None:
     cues = allocate_proportional_cues(["Ngắn.", "Dài hơn nhiều so với câu trước."], 1.0, 10.0)
     assert len(cues) == 2
     assert (cues[1]["end"] - cues[1]["start"]) > (cues[0]["end"] - cues[0]["start"])
+
+
+def _dub_word(text: str, start: float, end: float) -> dict:
+    return {
+        "text": text,
+        "start": start,
+        "end": end,
+        "absolute_start": start,
+        "absolute_end": end,
+    }
+
+
+def test_dub_words_short_sentence_single_cue() -> None:
+    from dv_backend.subtitle_timing import build_cues_from_dub_words
+
+    segment = {
+        "index": 0,
+        "placement_start": 0.0,
+        "dub_words": [
+            _dub_word("Xin", 0.0, 0.4),
+            _dub_word("chào", 0.4, 0.9),
+            _dub_word("bạn.", 0.9, 1.4),
+        ],
+    }
+    cues = build_cues_from_dub_words(segment, settings={}, language="vi")
+    assert len(cues) == 1
+    assert cues[0]["text"] == "Xin chào bạn."
+
+
+def test_dub_words_long_line_splits_into_multiple_cues() -> None:
+    from dv_backend.subtitle_timing import build_cues_from_dub_words
+
+    words = [_dub_word(f"word{i:02d}", i * 0.4, i * 0.4 + 0.35) for i in range(12)]
+    segment = {"index": 0, "placement_start": 0.0, "dub_words": words}
+    # Tight per-line limit forces multiple cues even inside one uninterrupted phrase.
+    settings = {"subtitle_max_chars_per_line": 20, "subtitle_max_lines_per_cue": 1}
+    cues = build_cues_from_dub_words(segment, settings=settings, language="vi")
+    assert len(cues) >= 2
+    assert all(len(cue["text"]) <= 20 for cue in cues)
+
+
+def test_dub_words_min_cue_duration_respected() -> None:
+    from dv_backend.subtitle_timing import build_cues_from_dub_words
+
+    segment = {
+        "index": 0,
+        "placement_start": 0.0,
+        "dub_words": [_dub_word("Ừ.", 0.0, 0.1)],
+    }
+    settings = {"subtitle_min_cue_duration_ms": 800}
+    cues = build_cues_from_dub_words(segment, settings=settings, language="vi")
+    assert len(cues) == 1
+    assert (cues[0]["end"] - cues[0]["start"]) >= 0.8 - 1e-6
+
+
+def test_fallback_without_dub_words_respects_max_chars_setting() -> None:
+    long_text = (
+        "Đây là một câu rất dài không có dấu chấm ở giữa nên phải được chia nhỏ "
+        "thành nhiều dòng phụ đề khác nhau để dễ đọc hơn trên màn hình"
+    )
+    cues = build_subtitle_cues(
+        [
+            {
+                "index": 0,
+                "start": 0.0,
+                "placement_start": 0.0,
+                "repaired_duration": 12.0,
+                "translation": long_text,
+            }
+        ],
+        settings={"subtitle_max_chars_per_line": 24, "subtitle_max_lines_per_cue": 1},
+    )
+    assert len(cues) >= 2
+    assert all(len(cue["text"]) <= 24 for cue in cues)
+
+
+def test_thai_dub_words_join_without_spaces() -> None:
+    from dv_backend.subtitle_timing import build_cues_from_dub_words
+
+    segment = {
+        "index": 0,
+        "placement_start": 0.0,
+        "dub_words": [
+            _dub_word("สวัสดี", 0.0, 0.5),
+            _dub_word("ครับ", 0.5, 1.0),
+        ],
+    }
+    cues = build_cues_from_dub_words(segment, settings={}, language="th")
+    assert len(cues) == 1
+    # Thai must not be joined with ASCII spaces.
+    assert " " not in cues[0]["text"]
+    assert cues[0]["text"] == "สวัสดีครับ"
+
+
+def test_thai_display_split_uses_character_limit() -> None:
+    thai_text = "สวัสดีครับทุกคนวันนี้เรามาพูดคุยเรื่องการพากย์เสียงภาษาไทยกันนะครับ"
+    chunks = split_for_subtitle_display(thai_text, max_chars=15, language="th")
+    assert len(chunks) >= 2
+    assert all(len(chunk) <= 15 for chunk in chunks)
+    assert all(" " not in chunk for chunk in chunks)

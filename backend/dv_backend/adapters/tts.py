@@ -40,6 +40,16 @@ def sanitize_tts_text(text: str) -> str:
     )
 
 
+def prepare_spoken_text_for_tts(text: str, *, speech_duration: float | None = None) -> str:
+    """Normalize text immediately before TTS synthesis."""
+    cleaned = sanitize_tts_text(text).strip()
+    compact = re.sub(r"\s+", "", cleaned)
+    is_short = (speech_duration is not None and speech_duration < 1.2) or len(compact) < 10
+    if is_short:
+        cleaned = re.sub(r"^\.{2,}\s*", "", cleaned).strip()
+    return cleaned
+
+
 def split_tts_text(text: str, *, max_chars: int = MAX_TTS_CHARS) -> list[str]:
     cleaned = re.sub(r"\s+", " ", sanitize_tts_text(text).strip())
     if not cleaned:
@@ -337,12 +347,14 @@ class TtsSession:
             device = resolve_omnivoice_device(str(self.settings.get("omnivoice_device", "cuda:0") or "cuda:0"))
             steps = self.settings.get("omnivoice_num_steps", 32)
             return f"{model}|{device}|{int(steps or 0)}|1.0"
+        if is_cloud_tts_backend(self.backend):
+            return f"{self.backend}|{self.voice}"
         raise AppError(
             422,
             ErrorInfo(
                 code="UNSUPPORTED_TTS_BACKEND",
                 message=f"Unsupported TTS backend for session: {self.backend}",
-                action="Use omnivoice or a cloud TTS backend.",
+                action="Use omnivoice, edge_tts, google_tts, or gemini_tts.",
             ),
         )
 
@@ -414,6 +426,7 @@ class TtsSession:
                         clone=self.clone,
                         clone_mode=self.clone_mode,
                         anchor_text=self.anchor_text,
+                        segment=segment,
                     )
                     return
                 except AppError as error:
@@ -432,6 +445,7 @@ class TtsSession:
                     clone=self.clone,
                     clone_mode=self.clone_mode,
                     anchor_text=self.anchor_text,
+                    segment=segment,
                 )
                 return
             except AppError as error:
@@ -454,6 +468,7 @@ class TtsSession:
                 "clone": self.clone,
                 "clone_mode": self.clone_mode,
                 "anchor_text": self.anchor_text,
+                "segment": item.get("segment") or {},
             }
             for item in items
         ]
@@ -475,6 +490,7 @@ class TtsSession:
                                 clone=item["clone"],
                                 clone_mode=item["clone_mode"],
                                 anchor_text=item["anchor_text"],
+                                segment=item.get("segment") or {},
                             )
                     return
                 except AppError as error:
@@ -499,6 +515,7 @@ class TtsSession:
                             clone=item["clone"],
                             clone_mode=item["clone_mode"],
                             anchor_text=item["anchor_text"],
+                            segment=item.get("segment") or {},
                         )
                 return
             except AppError as error:
@@ -590,6 +607,7 @@ def create_tts_adapter(settings: dict, *, data_dir: Path | None = None, runner: 
             audio_chunk_duration=OMNIVOICE_DEFAULT_CHUNK_DURATION_SEC,
             data_dir=data_dir,
             runner=runner,
+            settings=settings,
         )
     raise AppError(
         422,

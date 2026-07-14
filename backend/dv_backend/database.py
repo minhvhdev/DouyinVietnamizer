@@ -88,7 +88,46 @@ class Database:
         if "transcript" not in voice_columns:
             self.connection.execute("ALTER TABLE cloned_voices ADD COLUMN transcript TEXT")
         self._migrate_cloned_voices_backend_schema()
+        self._migrate_cloned_voices_profile_schema()
+        self._migrate_voice_calibration_jobs_schema()
         self.connection.commit()
+
+    def _migrate_cloned_voices_profile_schema(self) -> None:
+        voice_columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(cloned_voices)").fetchall()
+        }
+        additions = {
+            "voice_status": "TEXT NOT NULL DEFAULT 'ready'",
+            "duration_profile_status": "TEXT NOT NULL DEFAULT 'not_started'",
+            "duration_profile_key": "TEXT",
+            "duration_profile_quality": "TEXT",
+            "duration_profile_sample_count": "INTEGER NOT NULL DEFAULT 0",
+            "last_calibrated_at": "TEXT",
+            "active_calibration_job_id": "TEXT",
+        }
+        for column, ddl in additions.items():
+            if column not in voice_columns:
+                self.connection.execute(f"ALTER TABLE cloned_voices ADD COLUMN {column} {ddl}")
+
+    def _migrate_voice_calibration_jobs_schema(self) -> None:
+        self.connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS voice_calibration_jobs (
+                job_id TEXT PRIMARY KEY,
+                voice_id TEXT NOT NULL,
+                voice_identity_key TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                sample_total INTEGER NOT NULL DEFAULT 0,
+                sample_completed INTEGER NOT NULL DEFAULT 0,
+                sample_accepted INTEGER NOT NULL DEFAULT 0,
+                sample_rejected INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
 
     def _migrate_cloned_voices_backend_schema(self) -> None:
         voice_columns = {

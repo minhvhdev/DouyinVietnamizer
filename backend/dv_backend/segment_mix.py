@@ -28,7 +28,7 @@ def scaled_segment_fades(
 
 
 def annotate_segment_mix_caps(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Cap each segment so it cannot bleed into the next placement slot."""
+    """Annotate next-slot room for telemetry; does not imply hard clipping."""
     ordered = sorted(entries, key=lambda item: float(item["placement_start"]))
     for index, entry in enumerate(ordered):
         if index + 1 < len(ordered):
@@ -36,12 +36,24 @@ def annotate_segment_mix_caps(entries: list[dict[str, Any]]) -> list[dict[str, A
             entry["max_duration"] = max(0.05, gap - SEGMENT_BOUNDARY_MARGIN_SEC)
         else:
             entry["max_duration"] = None
+        clip = max(0.05, float(entry.get("clip_duration") or 0.0))
+        cap = entry.get("max_duration")
+        if cap is not None and clip > float(cap) + 0.001:
+            entry["mix_would_clip_sec"] = round(clip - float(cap), 3)
+        else:
+            entry["mix_would_clip_sec"] = 0.0
     return ordered
 
 
-def effective_clip_duration(clip_duration: float, max_duration: float | None) -> float:
+def effective_clip_duration(
+    clip_duration: float,
+    max_duration: float | None,
+    *,
+    allow_hard_clip: bool = False,
+) -> float:
+    """Return playable duration. Hard clip only when explicitly allowed (legacy)."""
     duration = max(0.05, float(clip_duration))
-    if max_duration is not None:
+    if allow_hard_clip and max_duration is not None:
         duration = min(duration, max(0.05, float(max_duration)))
     return duration
 
@@ -52,9 +64,18 @@ def build_narration_segment_filter(
     placement_start: float,
     clip_duration: float,
     max_duration: float | None,
+    allow_hard_clip: bool = False,
 ) -> str:
-    """Build per-segment resample/trim/fade/delay chain for narration mixing."""
-    effective = effective_clip_duration(clip_duration, max_duration)
+    """Build per-segment resample/fade/delay chain for narration mixing.
+
+    Default policy (ChatGPT TL): never silently atrim voiced audio to fit the next slot.
+    Soft placement / speed / compact must resolve overflow before mix.
+    """
+    effective = effective_clip_duration(
+        clip_duration,
+        max_duration,
+        allow_hard_clip=allow_hard_clip,
+    )
     fade_in, fade_out, fade_out_start = scaled_segment_fades(effective)
     delay_ms = max(0, round(float(placement_start) * 1000))
     label = f"seg{input_index}"
@@ -63,7 +84,11 @@ def build_narration_segment_filter(
         "aresample=48000",
         "aformat=sample_fmts=s16:channel_layouts=stereo",
     ]
-    if max_duration is not None and float(clip_duration) > effective + 0.001:
+    if (
+        allow_hard_clip
+        and max_duration is not None
+        and float(clip_duration) > effective + 0.001
+    ):
         filters.append(f"atrim=0:{effective:.3f}")
     filters.extend(
         [

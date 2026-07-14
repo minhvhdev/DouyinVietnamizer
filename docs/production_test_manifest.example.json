@@ -1,0 +1,52 @@
+{
+  "videos": [
+    {
+      "id": "fast_dialogue",
+      "source": "path-or-url-to-video",
+      "category": "fast_speech",
+      "expected_features": ["continuous_dialogue", "short_gaps"]
+    },
+    {
+      "id": "long_pauses",
+      "source": "path-or-url-to-video",
+      "category": "long_pauses",
+      "expected_features": ["internal_pauses", "trailing_silence"]
+    },
+    {
+      "id": "numbers_entities",
+      "source": "path-or-url-to-video",
+      "category": "numbers_and_entities",
+      "expected_features": ["percentages", "proper_nouns", "model_names"]
+    },
+    {
+      "id": "long_translation",
+      "source": "path-or-url-to-video",
+      "category": "long_translation",
+      "expected_features": ["long_target_lines", "rewrite_candidates"]
+    },
+    {
+      "id": "short_utterances",
+      "source": "path-or-url-to-video",
+      "category": "short_utterances",
+      "expected_features": ["sub_second_speech", "interjections"]
+    },
+    {
+      "id": "music_heavy",
+      "source": "path-or-url-to-video",
+      "category": "music_heavy",
+      "expected_features": ["background_music", "vad_noise"]
+    },
+    {
+      "id": "multiple_speakers",
+      "source": "path-or-url-to-video",
+      "category": "multiple_speakers",
+      "expected_features": ["speaker_overlap"]
+    },
+    {
+      "id": "quiet_voice",
+      "source": "path-or-url-to-video",
+      "category": "quiet_voice",
+      "expected_features": ["low_snr", "speech_envelope_confidence"]
+    }
+  ]
+}

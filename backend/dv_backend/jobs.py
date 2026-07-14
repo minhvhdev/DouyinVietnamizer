@@ -270,7 +270,7 @@ class JobService:
                     duration_ms = NULL,
                     error_code = NULL,
                     error_message = NULL
-                WHERE job_id = ? AND status = 'failed'
+                WHERE job_id = ? AND status IN ('failed', 'running')
                 """,
                 (job_id,),
             )
@@ -382,7 +382,7 @@ class JobService:
             if tts_dir.is_dir():
                 shutil.rmtree(tts_dir, ignore_errors=True)
 
-        if reset.intersection({"duration_repair", "mix", "render"}):
+        if reset.intersection({"duration_repair", "align_final_dub", "mix", "render"}):
             subtitle_asr = artifacts / "subtitle_asr"
             if subtitle_asr.is_dir():
                 shutil.rmtree(subtitle_asr, ignore_errors=True)

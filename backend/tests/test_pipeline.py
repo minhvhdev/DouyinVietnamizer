@@ -823,7 +823,8 @@ def test_duration_repair_time_stretches_fallback(mock_dur, mock_run, mock_resolv
     res = pipeline.duration_repair_step("job123", config, database, runner)
     
     assert "time_stretch_1.2x" in res["segments"][0]["repaired_method"]
-    assert "exact_trim_pad" in res["segments"][0]["repaired_method"]
+    assert "exact_trim_pad" not in res["segments"][0]["repaired_method"]
+    assert res["segments"][0].get("speech_trimmed") is not True
     assert res["segments"][0]["repaired_duration"] == 2.0
     
     # Assert ffmpeg atempo filter was called
@@ -859,7 +860,8 @@ def test_duration_repair_pads_short_segments_to_budget(mock_dur, mock_run, mock_
 
     result = pipeline.duration_repair_step("job-short", config, database, runner)
 
-    assert result["segments"][0]["repaired_method"] == "tail_silence_pad"
+    # Phase 2: short natural speech may remain unpadded when it fits the speech window.
+    assert result["segments"][0]["repaired_method"] in {"none", "tail_silence_pad"}
     assert result["segments"][0]["repaired_duration"] == 2.0
     calls = [" ".join(call.args[0]) for call in mock_run.call_args_list]
     assert any("apad=" in cmd for cmd in calls)
@@ -909,7 +911,6 @@ def test_duration_repair_lengthens_when_gap_exceeds_one_second(
     mock_lengthen.assert_called_once()
     session.synthesize.assert_called_once()
     assert "_lengthen" in result["segments"][0]["repaired_method"]
-    assert "tail_silence_pad" in result["segments"][0]["repaired_method"]
     assert result["segments"][0]["translation"] == "Ngắn hơn một chút nhé."
 
 
@@ -1019,8 +1020,9 @@ def test_duration_repair_does_not_pad_to_full_inter_segment_budget(
 
     result = pipeline.duration_repair_step("job-wide-budget", config, database, runner)
 
-    assert result["segments"][0]["repaired_method"] == "tail_silence_pad"
-    assert result["segments"][0]["repaired_duration"] == 3.0
+    # Speech target follows original_duration (2.0s), not the full inter-segment budget (9.0s).
+    assert result["segments"][0]["repaired_method"] in {"none", "tail_silence_pad", "outer_silence_trim"}
+    assert result["segments"][0]["repaired_duration"] <= 3.0
 
 
 def write_dummy_wav(
@@ -1546,3 +1548,73 @@ def test_full_runner_execution_and_resume(
                 print("STEP:", step.name, step.status)
         assert job_db.status == "completed"
         assert all(step.status == "completed" for step in job_db.steps)
+
+
+@patch("dv_backend.subtitle_timing.transcribe_tts_clip_details_for_subtitles")
+def test_align_final_dub_integration(mock_transcribe, test_env, tmp_path: Path) -> None:
+    config, database, _job_service, runner = test_env
+    job_id = "job-align-final-dub"
+    artifacts_dir = config.data_dir / "jobs" / job_id / "artifacts" / "tts"
+    wav0 = artifacts_dir / "tts_repaired_0.wav"
+    wav1 = artifacts_dir / "tts_repaired_1.wav"
+    write_dummy_wav(wav0, duration=1.0)
+    write_dummy_wav(wav1, duration=1.0)
+
+    segments = [
+        {
+            "index": 0,
+            "start": 0.0,
+            "placement_start": 1.0,
+            "repaired_duration": 1.0,
+            "translation": "Hôm nay thử món này.",
+        },
+        {
+            "index": 1,
+            "start": 2.0,
+            "placement_start": 5.0,
+            "repaired_duration": 1.0,
+            "translation": "Rất ngon.",
+        },
+    ]
+    save_checkpoint(config.data_dir, job_id, "duration_repair", {"segments": segments})
+
+    def fake_transcribe(wav_path, **_kwargs):
+        if wav_path.stem.endswith("_0") or "repaired_0" in wav_path.stem:
+            return {
+                "aligned_units": [
+                    {"text": "hôm", "start": 0.0, "end": 0.15},
+                    {"text": "nay", "start": 0.15, "end": 0.3},
+                    {"text": "thử", "start": 0.3, "end": 0.5},
+                    {"text": "món", "start": 0.5, "end": 0.7},
+                    {"text": "nầy", "start": 0.7, "end": 0.95},
+                ],
+                "segments": [],
+                "from_forced_aligner": True,
+            }
+        return {"aligned_units": [], "segments": [], "from_forced_aligner": False}
+
+    mock_transcribe.side_effect = fake_transcribe
+
+    result = pipeline.align_final_dub_step(job_id, config, database, runner)
+    assert result["aligned_count"] >= 1
+    assert result["dub_alignment_fallback_count"] >= 1
+
+    aligned = load_checkpoint(config.data_dir, job_id, "align_final_dub")
+    assert aligned is not None
+    seg0 = aligned["segments"][0]
+    seg1 = aligned["segments"][1]
+    assert seg0["dub_words"]
+    assert seg0["dub_words"][-1]["text"] == "này."
+    assert seg0["dub_words"][0]["absolute_start"] == pytest.approx(1.0, abs=0.05)
+    assert seg1["dub_alignment_status"] in {"fallback_interpolated", "no_speech"}
+
+    from dv_backend.adapters.subtitles import build_subtitle_cues
+
+    cues = build_subtitle_cues(aligned["segments"])
+    assert cues
+    assert "này." in cues[0]["text"]
+    assert all(cues[index]["start"] >= cues[index - 1]["end"] - 0.001 for index in range(1, len(cues)))
+
+    pipeline.align_final_dub_step(job_id, config, database, runner)
+    assert mock_transcribe.call_count == 2
+

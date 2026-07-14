@@ -1,4 +1,5 @@
 import array
+import hashlib
 import json
 import logging
 import html
@@ -21,7 +22,7 @@ from .models import ErrorInfo
 from .checkpoints import load_checkpoint, save_checkpoint
 from .vendor import VendorManifest, VendorResolver, prefer_macos_ffmpeg_full
 from .adapters.translation import GoogleFreeTranslator
-from .adapters.tts import TTS_VOICE_INSTRUCT_PREFIX, TtsSession, create_tts_adapter
+from .adapters.tts import TTS_VOICE_INSTRUCT_PREFIX, TtsSession, create_tts_adapter, prepare_spoken_text_for_tts
 from .adapters.asr import configure_gpu_manager, reset_model_cache, transcribe_audio
 from .adapters.vad_feedback import filter_asr_false_positives
 from .adapters.vad_energy import filter_low_vocal_energy_segments
@@ -36,7 +37,39 @@ from .gpu_manager import global_gpu_manager
 from .hardware import resolve_inference_device
 from .audio_probe import get_audio_duration
 from .duration_safety import classify_stretch, tail_has_speech
-from .segmentation import MAX_SEGMENT_SPLIT_SECONDS, merge_incomplete_sentence_segments, split_long_segments_with_alignment
+from .duration_fit_policy import (
+    acceptable_duration_fit,
+    classify_duration_fit,
+    classify_stretch_with_policy,
+    clamp_automatic_tempo,
+    policy_from_settings,
+    should_lengthen_for_timing,
+    should_shorten_for_timing,
+    tempo_factor_for_duration,
+    timing_profile_from_segment,
+)
+from .timing_profile import attach_timing_profiles
+from .translation_candidates import translate_segments_with_candidates
+from .tts_candidate_retry import synthesize_with_candidate_retry, timing_attempt_limits
+from .tts_cache import (
+    build_tts_cache_identity,
+    cache_key_from_identity,
+    segment_wav_cache_valid,
+    write_tts_sidecar,
+)
+from .tts_speech_analysis import attach_speech_metrics, measure_speech_envelope
+from .timing_qc_metrics import compute_timing_qc_metrics
+from .release_quality_gate import evaluate_release_gate
+from .tts_attempt_budget import budget_from_settings
+from .voice_duration_profile import update_voice_profile_from_sample
+from .voice_profile_policy import effective_voice_profile
+from .segmentation import (
+    MAX_SEGMENT_SPLIT_SECONDS,
+    consolidate_short_segments,
+    merge_incomplete_sentence_segments,
+    split_long_segments_with_alignment,
+    split_segments_by_alignment_pauses,
+)
 from .sparse_asr import (
     build_sparse_chunks,
     build_stitched_timeline,
@@ -46,7 +79,14 @@ from .sparse_asr import (
     should_use_sparse_asr,
     stitched_timeline_duration,
 )
-from .timing_placement import compute_placement_starts
+from .timing_conflict_repair import repair_conflict_clusters
+from .tts_provenance import resolve_voiced_tts_path, spoken_text
+from .timing_placement import (
+    compute_placement_starts,
+    enforce_zero_overlap_placements,
+    schedule_soft_placements,
+    segments_with_voiced_overlap,
+)
 from .segment_mix import (
     annotate_segment_mix_caps,
     build_narration_amix_filter,
@@ -56,10 +96,18 @@ from .telemetry import TelemetrySink
 from .dubbing_languages import default_speaking_rate_wps, dub_language_from_settings, dub_language_label
 from .translation_duration import annotate_translation_duration, build_translation_timing_guidance, duration_prompt_suffix
 from .adapters.subtitles import (
+    build_subtitle_cues,
     ffmpeg_subtitles_filter,
     probe_video_dimensions,
     subtitles_filter_available,
     write_ass_file,
+)
+from .final_dub_alignment import (
+    align_job_segments_final_dub,
+    compute_subtitle_qc_metrics,
+    refresh_all_segment_dub_word_timestamps,
+    segment_has_usable_dub_words,
+    summarize_alignment_results,
 )
 from .adapters.gemini import (
     GeminiKeyPool,
@@ -967,6 +1015,9 @@ def asr_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
     telemetry = TelemetrySink(config.data_dir, job_id)
     started = time.perf_counter()
     try:
+        from .gpu_lease import clear_gpu_lease_state
+
+        clear_gpu_lease_state(reason=f"asr_step:{job_id}")
         alignment_mode = str(settings.get("asr_alignment_mode", "accurate") or "accurate").strip().lower()
         if alignment_mode not in {"fast", "balanced", "accurate"}:
             alignment_mode = "accurate"
@@ -1275,6 +1326,21 @@ def normalize_segments_step(job_id: str, config: AppConfig, database: Database, 
 
     raw_segments = merge_incomplete_sentence_segments(raw_segments)
 
+    raw_segments = split_long_segments_with_alignment(
+        raw_segments,
+        vad_cp.get("speech_regions", []),
+        asr_cp.get("aligned_units", []) or [],
+    )
+    raw_segments = _split_long_asr_segments_with_vad(
+        raw_segments,
+        vad_cp.get("speech_regions", []),
+    )
+    raw_segments = split_segments_by_alignment_pauses(
+        raw_segments,
+        asr_cp.get("aligned_units", []) or [],
+    )
+    raw_segments = consolidate_short_segments(raw_segments)
+
     total_duration = vad_cp.get("total_duration", 0.0)
     
     segments = []
@@ -1351,6 +1417,86 @@ def normalize_segments_step(job_id: str, config: AppConfig, database: Database, 
     }
     save_checkpoint(config.data_dir, job_id, "normalize_segments", checkpoint_data)
     return checkpoint_data
+
+
+def _translate_candidates_batch(
+    settings: dict,
+    database: Database,
+    segments: list[dict],
+    texts: list[str],
+    *,
+    source_lang: str,
+    target_lang: str,
+    timing_profiles: list[dict],
+    speaking_rate: float,
+) -> list[list[dict]]:
+    candidate_count = int(settings.get("timing_translation_candidate_count", 3) or 3)
+    backend = settings.get("translation_backend", "google_free")
+    if backend == "gemini":
+        key_pool = GeminiKeyPool(
+            settings.get("gemini_api_keys", []),
+            cursor=int(settings.get("gemini_key_cursor", 0)),
+        )
+        translator = GeminiTranslator(
+            key_pool,
+            model=settings.get("gemini_translation_model", "gemini-2.5-flash"),
+        )
+        batches = translator.translate_candidates(
+            segments,
+            texts,
+            source_lang,
+            target_lang,
+            timing_profiles=timing_profiles,
+            speaking_rate_wps=speaking_rate,
+            candidate_count=candidate_count,
+        )
+        save_setting(database, "gemini_key_cursor", translator.key_pool.cursor)
+        return batches
+    if backend == "openai":
+        translator = OpenAiCompatTranslator(
+            api_base=str(settings.get("openai_api_base") or ""),
+            api_key=str(settings.get("openai_api_key") or ""),
+            model=str(settings.get("openai_translation_model") or ""),
+        )
+        return translator.translate_candidates(
+            segments,
+            texts,
+            source_lang,
+            target_lang,
+            timing_profiles=timing_profiles,
+            speaking_rate_wps=speaking_rate,
+            candidate_count=candidate_count,
+        )
+    return []
+
+
+def _tts_text_fingerprint(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _tts_cache_identity_for_segment(settings: dict, text: str, *, language: str) -> dict:
+    return build_tts_cache_identity(settings, text=str(text or ""), language=language)
+
+
+def _tts_cache_key(settings: dict, text: str, *, language: str) -> str:
+    return cache_key_from_identity(_tts_cache_identity_for_segment(settings, text, language=language))
+
+
+def _timing_aware_tts_enabled(settings: dict) -> bool:
+    return bool(settings.get("timing_candidate_translation_enabled", False))
+
+
+def _segment_speech_duration(segment: dict, wav_path: Path | None = None) -> float:
+    speech = segment.get("tts_speech_duration")
+    if speech is not None and float(speech) > 0:
+        return float(speech)
+    if wav_path is not None and wav_path.is_file():
+        envelope = measure_speech_envelope(wav_path)
+        attach_speech_metrics(segment, envelope)
+        if envelope.speech_duration > 0:
+            return float(envelope.speech_duration)
+        return float(envelope.raw_wav_duration or 0.0)
+    return float(segment.get("tts_duration") or 0.0)
 
 
 def _translate_texts(
@@ -1508,31 +1654,81 @@ def translate_step(job_id: str, config: AppConfig, database: Database, runner) -
         save_checkpoint(config.data_dir, job_id, "translate", checkpoint_data)
         return checkpoint_data
 
+    attach_timing_profiles(segments, total_duration=norm_cp.get("total_duration"), settings=settings)
     texts = [segment["text"] for segment in segments]
     duration_budgets = [_preferred_timing_budget(segment, settings) for segment in segments]
     speaking_rate = _speaking_rate_wps(settings)
     aligned_units = asr_cp.get("aligned_units", []) or []
-    timing_guidance = [
-        build_translation_timing_guidance(
-            {**segment, "repair_target_duration": budget},
+    timing_guidance = []
+    for segment, budget in zip(segments, duration_budgets, strict=True):
+        profile = segment.get("timing_profile") or {}
+        speech_target = float(profile.get("speech_target_duration") or budget or 0.0)
+        segment["repair_target_duration"] = round(speech_target, 2) if speech_target > 0 else 0.0
+        guidance = build_translation_timing_guidance(
+            {**segment, "repair_target_duration": speech_target},
             aligned_units=_aligned_units_for_segment(segment, aligned_units),
             speaking_rate_wps=speaking_rate,
         )
-        for segment, budget in zip(segments, duration_budgets, strict=True)
-    ]
-    for segment, budget, guidance in zip(segments, duration_budgets, timing_guidance, strict=True):
-        segment["repair_target_duration"] = round(float(budget), 2) if budget > 0 else 0.0
         segment.update(guidance)
-    translated = _translate_texts(
+        segment["timing_guidance"] = guidance
+        timing_guidance.append(guidance)
+
+    timing_profiles = [segment.get("timing_profile") or {} for segment in segments]
+
+    def _translate_fn(
+        settings_arg,
+        database_arg,
+        texts_arg,
+        *,
+        source_lang: str,
+        target_lang: str,
+        duration_budgets: list[float] | None = None,
+        timing_guidance: list[dict] | None = None,
+    ) -> list[str]:
+        return _translate_texts(
+            settings_arg,
+            database_arg,
+            texts_arg,
+            source_lang=source_lang,
+            target_lang=target_lang,
+            duration_budgets=duration_budgets,
+            timing_guidance=timing_guidance,
+        )
+
+    def _translate_candidates_fn(
+        segments_arg,
+        texts_arg,
+        *,
+        source: str,
+        target: str,
+        timing_profiles: list[dict],
+        settings: dict,
+        database: Database,
+        speaking_rate_wps: float,
+    ) -> list[list[dict]]:
+        return _translate_candidates_batch(
+            settings,
+            database,
+            segments_arg,
+            texts_arg,
+            source_lang=source,
+            target_lang=target,
+            timing_profiles=timing_profiles,
+            speaking_rate=speaking_rate_wps,
+        )
+
+    translate_segments_with_candidates(
         settings,
         database,
-        texts,
+        segments,
         source_lang=source_lang,
         target_lang=target_lang,
-        duration_budgets=duration_budgets,
-        timing_guidance=timing_guidance,
+        translate_fn=_translate_fn,
+        translate_candidates_fn=_translate_candidates_fn,
+        data_dir=config.data_dir,
     )
-    if len(translated) != len(segments) or any(not str(item).strip() for item in translated):
+
+    if any(not str(segment.get("translation") or "").strip() for segment in segments):
         raise AppError(
             502,
             ErrorInfo(
@@ -1542,12 +1738,25 @@ def translate_step(job_id: str, config: AppConfig, database: Database, runner) -
                 retryable=True,
             )
         )
-    for segment, translation in zip(segments, translated, strict=True):
-        segment["translation"] = translation
-        segment.update(annotate_translation_duration(segment, speaking_rate_wps=speaking_rate))
+    speaking_rate = float(settings.get("vietnamese_speaking_rate_wps") or 3.2)
+    voice_profile = effective_voice_profile(settings, language=target_lang, data_dir=config.data_dir)
+    for segment in segments:
+        segment.update(
+            annotate_translation_duration(
+                segment,
+                speaking_rate_wps=speaking_rate,
+                voice_profile=voice_profile,
+                language=target_lang,
+            )
+        )
+        segment["voice_profile_key"] = voice_profile.get("profile_key")
+        segment["voice_profile_source"] = voice_profile.get("profile_source") or voice_profile.get("source")
+        segment["voice_profile_samples"] = voice_profile.get("sample_count_accepted") or voice_profile.get("samples")
+        segment["voice_profile_syllables_per_second"] = voice_profile.get("syllables_per_second")
+        segment["prediction_method"] = voice_profile.get("prediction_method")
 
     checkpoint_data = {
-        "schema_version": 1,
+        "schema_version": 2,
         "job_id": job_id,
         "step_name": "translate",
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1794,6 +2003,11 @@ def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
     conversion_wall_time_ms = 0
     micro_batch_enabled = str(settings.get("tts_micro_batch_enabled", True)).lower() not in {"0", "false", "no"}
     micro_batch_size = 4
+    timing_enabled = _timing_aware_tts_enabled(settings)
+    dub_lang = dub_language_from_settings(settings)
+    dub_lang_label = dub_language_label(dub_lang, english=True)
+    voice_profile = effective_voice_profile(settings, language=dub_lang, data_dir=config.data_dir)
+    global_speed = float(settings.get("tts_global_speed") or 1.0)
 
     with TtsSession(settings, data_dir=config.data_dir, runner=runner, adapter_factory=create_tts_adapter) as session:
         session_create_ms = round((time.perf_counter() - session_started) * 1000)
@@ -1818,18 +2032,38 @@ def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
                 # lazy_mix: keep raw; duration is read from the raw header.
                 s["tts_duration"] = round(get_wav_duration(raw_tts), 2)
 
+            measure_path = final_tts if strategy == "per_segment" and final_tts.is_file() else raw_tts
+            if measure_path.is_file():
+                envelope = measure_speech_envelope(measure_path)
+                attach_speech_metrics(s, envelope)
+
             s["tts_raw_path"] = str(raw_tts)
             s["tts_path"] = str(final_tts) if strategy == "per_segment" else None
+            spoken_text = prepare_spoken_text_for_tts(
+                str(s.get("translation") or entry.get("text") or ""),
+                speech_duration=float(s.get("original_duration") or 0.0),
+            )
+            s["tts_spoken_text"] = spoken_text
+            cache_identity = _tts_cache_identity_for_segment(settings, spoken_text, language=dub_lang)
+            s["tts_cache_key"] = cache_key_from_identity(cache_identity)
+            s["tts_text_fingerprint"] = cache_identity["translation_text_hash"][:16]
+            write_tts_sidecar(raw_tts, cache_identity, extra={
+                "segment_index": idx,
+                "tts_chunk_count": s.get("tts_chunk_count"),
+                "tts_chunking_used": s.get("tts_chunking_used"),
+                "tts_fidelity_status": s.get("tts_fidelity_status"),
+            })
             s["tts_session_reused"] = True
             telemetry.record("tts_segment", {
                 "wall_time_ms": synthesize_ms + conversion_ms,
                 "audio_duration_sec": s["tts_duration"],
+                "speech_duration_sec": s.get("tts_speech_duration"),
                 "tts_session_create_ms": session_create_ms,
                 "synthesize_ms": synthesize_ms,
                 "conversion_ms": conversion_ms,
                 "output_write_ms": conversion_ms,
                 "segment_index": idx,
-                "retry_count": 0,
+                "retry_count": int(s.get("tts_attempt_count") or 0),
                 "cache_hit": None,
                 "cache_miss": None,
                 "model_config": str(settings.get("omnivoice_model", "")),
@@ -1837,7 +2071,32 @@ def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
                 "tts_micro_batch_enabled": micro_batch_enabled,
                 "tts_micro_batch_size": batch_size,
                 "tts_batch_wall_time_ms": batch_wall_time_ms,
+                "voice_profile_key": voice_profile.get("profile_key"),
+                "voice_profile_source": voice_profile.get("profile_source") or voice_profile.get("source"),
+                "prediction_method": voice_profile.get("prediction_method"),
+                "chunk_count": s.get("tts_chunk_count"),
+                "chunked_segment": bool(s.get("tts_chunking_used")),
+                "chunk_retry_count": s.get("tts_chunk_retry_count"),
+                "chunk_cache_hits": s.get("tts_chunk_cache_hits"),
+                "chunk_cache_misses": s.get("tts_chunk_cache_misses"),
+                "fidelity_similarity": s.get("tts_text_similarity"),
+                "fidelity_status": s.get("tts_fidelity_status"),
             })
+            if (
+                bool(settings.get("voice_duration_profile_enabled", True))
+                and not timing_enabled
+                and raw_tts.is_file()
+            ):
+                speech_duration = _segment_speech_duration(s, raw_tts)
+                update_voice_profile_from_sample(
+                    settings,
+                    text=str(s.get("translation") or entry.get("text") or ""),
+                    speech_duration_sec=speech_duration,
+                    data_dir=config.data_dir,
+                    language=dub_lang,
+                    user_speed_not_unity=abs(global_speed - 1.0) > 0.01,
+                    measurement_confidence=float(s.get("tts_speech_measurement_confidence") or 1.0),
+                )
 
         def flush_pending() -> None:
             if not pending:
@@ -1861,23 +2120,58 @@ def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
 
         for s in segments:
             idx = s["index"]
-            text = s["translation"]
+            text = prepare_spoken_text_for_tts(
+                str(s.get("translation") or ""),
+                speech_duration=float(s.get("original_duration") or 0.0),
+            )
+            s["tts_spoken_text"] = text
+            cache_identity = _tts_cache_identity_for_segment(settings, str(text or ""), language=dub_lang)
+            cache_key = cache_key_from_identity(cache_identity)
 
             raw_tts = tts_dir / f"tts_raw_{idx}.wav"
             final_tts = tts_dir / f"tts_{idx}.wav"
 
-            if strategy == "per_segment" and final_tts.is_file() and final_tts.stat().st_size > 44:
+            if (
+                strategy == "per_segment"
+                and final_tts.is_file()
+                and raw_tts.is_file()
+                and segment_wav_cache_valid(
+                    raw_tts,
+                    cache_identity,
+                    text=str(text or ""),
+                    settings=settings,
+                    tts_dir=tts_dir,
+                    segment_index=idx,
+                )
+            ):
                 s["tts_duration"] = round(get_wav_duration(final_tts), 2)
                 s["tts_raw_path"] = str(raw_tts) if raw_tts.is_file() else str(final_tts)
                 s["tts_path"] = str(final_tts)
+                s["tts_cache_key"] = cache_key
+                s["tts_cache_hit"] = True
                 s["tts_session_reused"] = True
+                _segment_speech_duration(s, final_tts)
                 continue
 
-            if strategy != "per_segment" and raw_tts.is_file() and raw_tts.stat().st_size > 44:
+            if (
+                strategy != "per_segment"
+                and raw_tts.is_file()
+                and segment_wav_cache_valid(
+                    raw_tts,
+                    cache_identity,
+                    text=str(text or ""),
+                    settings=settings,
+                    tts_dir=tts_dir,
+                    segment_index=idx,
+                )
+            ):
                 s["tts_duration"] = round(get_wav_duration(raw_tts), 2)
                 s["tts_raw_path"] = str(raw_tts)
                 s["tts_path"] = None
+                s["tts_cache_key"] = cache_key
+                s["tts_cache_hit"] = True
                 s["tts_session_reused"] = True
+                _segment_speech_duration(s, raw_tts)
                 continue
 
             if raw_tts.is_file():
@@ -1887,6 +2181,34 @@ def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
                 final_tts.unlink()
 
             entry = {"segment": s, "text": text, "raw_tts": raw_tts, "final_tts": final_tts}
+            use_retry = timing_enabled and len(s.get("translation_candidates") or []) > 1
+            if use_retry:
+                flush_pending()
+
+                def synthesize_one(candidate_text: str, output_path: Path) -> None:
+                    session.synthesize(candidate_text, output_path, segment=s)
+
+                segment_budget = budget_from_settings(settings)
+                synth_started = time.perf_counter()
+                synthesize_with_candidate_retry(
+                    s,
+                    settings=settings,
+                    data_dir=config.data_dir,
+                    language=dub_lang,
+                    session=session,
+                    synthesize_one=synthesize_one,
+                    wav_path=raw_tts,
+                    database=database,
+                    estimate_word_count=_estimate_word_count,
+                    dub_lang_label=dub_lang_label,
+                    attempt_budget=segment_budget,
+                )
+                synthesize_ms = round((time.perf_counter() - synth_started) * 1000)
+                if not raw_tts.is_file():
+                    session.synthesize(str(s.get("translation") or text), raw_tts, segment=s)
+                finish_segment(entry, synthesize_ms=synthesize_ms, batch_size=1, batch_wall_time_ms=synthesize_ms)
+                continue
+
             if micro_batch_enabled:
                 pending.append(entry)
                 if len(pending) >= micro_batch_size:
@@ -1899,6 +2221,44 @@ def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
             finish_segment(entry, synthesize_ms=synthesize_ms, batch_size=1, batch_wall_time_ms=synthesize_ms)
 
         flush_pending()
+
+    from .omnivoice_chunking import segment_text_diagnostics
+
+    chunked_segments = 0
+    total_chunks = 0
+    chunk_retries = 0
+    fidelity_checked = 0
+    fidelity_good = 0
+    fidelity_poor = 0
+    fidelity_failed = 0
+    fidelity_scores: list[float] = []
+    very_long_count = 0
+    for s in segments:
+        diag = segment_text_diagnostics(str(s.get("translation") or ""), settings)
+        flags = diag.get("segment_diagnostics") or []
+        if "very_long_text_segment" in flags:
+            very_long_count += 1
+        for flag in flags:
+            existing = list(s.get("segment_diagnostics") or [])
+            if flag not in existing:
+                existing.append(flag)
+            s["segment_diagnostics"] = existing
+        if s.get("tts_chunking_used"):
+            chunked_segments += 1
+        total_chunks += int(s.get("tts_chunk_count") or 1)
+        chunk_retries += int(s.get("tts_chunk_retry_count") or 0)
+        status = str(s.get("tts_fidelity_status") or "not_checked")
+        if status != "not_checked":
+            fidelity_checked += 1
+        if status == "good":
+            fidelity_good += 1
+        elif status in {"poor", "review"}:
+            fidelity_poor += 1
+        elif status == "failed":
+            fidelity_failed += 1
+        score = s.get("tts_text_similarity")
+        if isinstance(score, (int, float)):
+            fidelity_scores.append(float(score))
 
     calibrated_rate = _update_speaking_rate_calibration(database, segments)
 
@@ -1920,6 +2280,20 @@ def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
         "tts_micro_batch_enabled": micro_batch_enabled,
         "tts_micro_batch_size": micro_batch_size,
         "calibrated_speaking_rate_wps": calibrated_rate,
+        "voice_profile_key": voice_profile.get("profile_key"),
+        "voice_profile_source": voice_profile.get("profile_source") or voice_profile.get("source"),
+        "voice_profile_samples": voice_profile.get("sample_count_accepted") or voice_profile.get("samples"),
+        "voice_profile_syllables_per_second": voice_profile.get("syllables_per_second"),
+        "prediction_method": voice_profile.get("prediction_method"),
+        "chunked_segment_count": chunked_segments,
+        "chunk_count": total_chunks,
+        "chunk_retry_count": chunk_retries,
+        "tts_fidelity_checked_count": fidelity_checked,
+        "tts_fidelity_good_count": fidelity_good,
+        "tts_fidelity_poor_count": fidelity_poor,
+        "tts_fidelity_failed_count": fidelity_failed,
+        "tts_text_similarity_mean": round(sum(fidelity_scores) / len(fidelity_scores), 4) if fidelity_scores else None,
+        "very_long_segment_count": very_long_count,
         **(describe_conversion(conversion_result) if conversion_result is not None else {"conversion_strategy": strategy, "conversion_input_count": 0, "conversion_wall_time_ms": 0, "conversion_process_count": 0, "conversion_fallback_reason": "no_batch_run"}),
     })
 
@@ -1928,10 +2302,320 @@ def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
         "job_id": job_id,
         "step_name": "tts",
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "tts_qc": {
+            "tts_chunked_segment_count": chunked_segments,
+            "tts_total_chunk_count": total_chunks,
+            "tts_chunk_retry_count": chunk_retries,
+            "tts_fidelity_checked_count": fidelity_checked,
+            "tts_fidelity_good_count": fidelity_good,
+            "tts_fidelity_poor_count": fidelity_poor,
+            "tts_fidelity_failed_count": fidelity_failed,
+            "tts_text_similarity_mean": round(sum(fidelity_scores) / len(fidelity_scores), 4) if fidelity_scores else None,
+            "very_long_segment_count": very_long_count,
+        },
         "segments": segments
     }
     save_checkpoint(config.data_dir, job_id, "tts", checkpoint_data)
     return checkpoint_data
+
+
+def _scale_attempt_budget_for_overflow(budget, overflow_ratio: float) -> None:
+    """Grant extra synthesis attempts when the raw dub badly overflows the free window.
+
+    overflow_ratio = current_speech_duration / fit_max (>1 means overflow). The worse the
+    overflow, the more attempts we allow to shorten/re-synthesize into the window (2.4).
+    """
+    try:
+        ratio = float(overflow_ratio)
+    except (TypeError, ValueError):
+        return
+    if ratio <= 1.05:
+        return
+    extra = 1 if ratio < 1.35 else 2
+    budget.max_total_syntheses = min(6, budget.max_total_syntheses + extra)
+    budget.max_candidate_attempts = min(4, budget.max_candidate_attempts + extra)
+    budget.max_rewrite_attempts = min(3, budget.max_rewrite_attempts + 1)
+
+
+def _duration_trim_caps(settings: dict) -> tuple[float, int]:
+    """Return (max_trim_ratio, max_trim_ms) hard caps for any speech-affecting trim (2.4)."""
+    ratio = float(settings.get("duration_trim_max_ratio", 0.15) or 0.15)
+    ms = int(settings.get("duration_trim_max_ms", 600) or 600)
+    return max(0.0, min(0.5, ratio)), max(0, ms)
+
+
+def _voiced_tts_segments(segments: list[dict]) -> list[dict]:
+    return [
+        s
+        for s in segments
+        if str(s.get("tts_spoken_text") or s.get("translation") or "").strip()
+        and not bool(s.get("no_speech"))
+    ]
+
+
+def _ensure_speed_base_wav(segment: dict, tts_dir: Path) -> Path | None:
+    """Freeze the current TTS WAV once before the one-shot uniform apply.
+
+    Callers must only freeze *before* any soft/uniform atempo. Later apply always
+    reads this frozen base so rates never compound.
+    """
+    idx = int(segment.get("index", 0) or 0)
+    claimed = segment.get("tts_speed_base_path")
+    if claimed and Path(str(claimed)).is_file():
+        return Path(str(claimed))
+    candidates = [
+        Path(str(segment.get("tts_path") or "")),
+        tts_dir / f"tts_repaired_{idx}.wav",
+        Path(str(segment.get("tts_raw_path") or "")),
+        tts_dir / f"tts_{idx}.wav",
+    ]
+    source = next((p for p in candidates if p.is_file()), None)
+    if source is None:
+        return None
+    base = tts_dir / f"tts_speed_base_{idx}.wav"
+    if source.resolve() != base.resolve():
+        shutil.copyfile(source, base)
+    segment["tts_speed_base_path"] = str(base)
+    try:
+        segment["repaired_duration"] = round(get_wav_duration(base), 2)
+    except Exception:
+        pass
+    return base
+
+
+def _collect_proposed_speed_factors(
+    segments: list[dict],
+    *,
+    absolute_max_rate: float,
+) -> float:
+    """Record needed speed per segment without rewriting WAV files.
+
+    Returns the max proposed factor (capped at absolute_max_rate).
+    """
+    target = 1.0
+    for s in _voiced_tts_segments(segments):
+        overflow = float(s.get("timing_overflow_sec") or 0.0)
+        available = float(s.get("timing_available_duration") or 0.0)
+        duration = float(s.get("repaired_duration") or s.get("tts_duration") or 0.0)
+        proposed = 1.0
+        if overflow > 0.15 and available > 0.05 and duration > 0:
+            required = duration / available
+            if required > 1.001:
+                proposed = min(absolute_max_rate, required)
+                if required > absolute_max_rate + 1e-6:
+                    s["timing_needs_compact"] = True
+                    s["timing_status"] = "SPEED_PARTIAL_NEEDS_COMPACT"
+                elif proposed >= absolute_max_rate - 1e-6:
+                    s["timing_status"] = "SPEED_PROPOSED_MAX"
+                else:
+                    s["timing_status"] = "SPEED_PROPOSED"
+        prev = float(s.get("proposed_speed_factor") or 1.0)
+        s["proposed_speed_factor"] = round(max(prev, proposed), 4)
+        target = max(target, float(s["proposed_speed_factor"]))
+    return min(absolute_max_rate, target)
+
+
+def _apply_uniform_reading_speed(
+    *,
+    segments: list[dict],
+    target_rate: float,
+    ffmpeg_path: Path,
+    tts_dir: Path,
+    job_id: str,
+    runner,
+) -> float:
+    """Apply one uniform atempo from frozen base WAVs to every voiced segment."""
+    target = max(1.0, float(target_rate))
+    if target <= 1.001:
+        for s in _voiced_tts_segments(segments):
+            s["soft_speed_factor"] = 1.0
+        return 1.0
+
+    for s in _voiced_tts_segments(segments):
+        base = _ensure_speed_base_wav(s, tts_dir)
+        if base is None:
+            continue
+        idx = int(s.get("index", 0) or 0)
+        out = tts_dir / f"tts_repaired_{idx}.wav"
+        sync_path = tts_dir / f"tts_speed_sync_{idx}.wav"
+        sync_path.unlink(missing_ok=True)
+        _run_ffmpeg_audio_filter(
+            ffmpeg_path,
+            base,
+            sync_path,
+            filter_expr=_build_atempo_chain(target),
+            job_id=job_id,
+            runner=runner,
+        )
+        if not sync_path.is_file():
+            continue
+        shutil.copyfile(sync_path, out)
+        s["tts_path"] = str(out)
+        s["repaired_duration"] = round(get_wav_duration(out), 2)
+        s["soft_speed_factor"] = round(target, 4)
+        method = str(s.get("repaired_method") or "none")
+        tag = f"uniform_speed_{target:.3f}x"
+        # Drop prior soft_speed/sync tags so method reflects the final one-shot apply.
+        cleaned = method
+        for junk in ("soft_speed_", "speed_sync_", "uniform_speed_"):
+            while f"+{junk}" in cleaned or cleaned.startswith(junk):
+                parts = cleaned.split("+")
+                parts = [p for p in parts if not p.startswith(junk)]
+                cleaned = "+".join(parts) if parts else "none"
+        s["repaired_method"] = f"{cleaned}+{tag}" if cleaned and cleaned != "none" else tag
+        s["timing_status"] = "SPEED_UNIFORM"
+
+    compute_placement_starts(segments)
+    schedule_soft_placements(segments)
+    return target
+
+
+def _propose_then_apply_uniform_speed(
+    *,
+    segments: list[dict],
+    absolute_max_rate: float,
+    ffmpeg_path: Path,
+    tts_dir: Path,
+    job_id: str,
+    runner,
+) -> float:
+    """Measure needed rates (no WAV rewrite) → take max → apply once to all."""
+    compute_placement_starts(segments)
+    schedule_soft_placements(segments)
+    for s in _voiced_tts_segments(segments):
+        _ensure_speed_base_wav(s, tts_dir)
+        # Reset so propose starts from current base duration metadata.
+        s["proposed_speed_factor"] = 1.0
+        s["soft_speed_factor"] = 1.0
+    target = _collect_proposed_speed_factors(segments, absolute_max_rate=absolute_max_rate)
+    return _apply_uniform_reading_speed(
+        segments=segments,
+        target_rate=target,
+        ffmpeg_path=ffmpeg_path,
+        tts_dir=tts_dir,
+        job_id=job_id,
+        runner=runner,
+    )
+
+
+def _apply_soft_placement_speed_and_compact(
+    *,
+    segments: list[dict],
+    settings: dict,
+    ffmpeg_path: Path,
+    tts_dir: Path,
+    job_id: str,
+    runner,
+    database: Database,
+    session: "TtsSession | None",
+) -> None:
+    """Soft place → propose needed speeds ≤1.2 → apply one uniform max → compact."""
+    absolute_max_rate = float(settings.get("edge_tts_overflow_speed_hard_max", 1.2) or 1.2)
+    absolute_max_rate = max(1.0, min(1.2, absolute_max_rate))
+    dub_lang_label = dub_language_label(dub_language_from_settings(settings), english=True)
+
+    _propose_then_apply_uniform_speed(
+        segments=segments,
+        absolute_max_rate=absolute_max_rate,
+        ffmpeg_path=ffmpeg_path,
+        tts_dir=tts_dir,
+        job_id=job_id,
+        runner=runner,
+    )
+
+    # Targeted compact only for remaining overflow after uniform speed.
+    if session is None:
+        return
+    for s in segments:
+        overflow = float(s.get("timing_overflow_sec") or 0.0)
+        available = float(s.get("timing_available_duration") or 0.0)
+        if overflow <= 0.15:
+            continue
+        # Compact any remaining overflow after speed passes (not only pre-marked).
+        text = str(s.get("tts_spoken_text") or s.get("translation") or "").strip()
+        if not text or available <= 0.05:
+            continue
+        try:
+            compact_text, _ = shorten_translation_for_timing(
+                settings,
+                database,
+                text=text,
+                budget=available,
+                current_duration=float(s.get("repaired_duration") or 0.0),
+                estimate_word_count=_estimate_word_count,
+                language_label=dub_lang_label,
+            )
+        except Exception:
+            logger.exception("Compact rewrite failed for segment %s", s.get("index"))
+            continue
+        if not compact_text or compact_text.strip() == text:
+            continue
+        idx = int(s["index"])
+        out_path = tts_dir / f"tts_compact_{idx}.wav"
+        out_path.unlink(missing_ok=True)
+        try:
+            session.synthesize(compact_text.strip(), out_path, segment=s)
+        except Exception:
+            logger.exception("Compact resynth failed for segment %s", idx)
+            continue
+        if not out_path.is_file():
+            continue
+        repaired_path = tts_dir / f"tts_repaired_{idx}.wav"
+        shutil.copyfile(out_path, repaired_path)
+        s["translation"] = compact_text.strip()
+        s["tts_spoken_text"] = compact_text.strip()
+        s["repaired_duration"] = round(get_wav_duration(repaired_path), 2)
+        s["tts_path"] = str(repaired_path)
+        s["tts_raw_path"] = str(out_path)
+        method = str(s.get("repaired_method") or "none")
+        s["repaired_method"] = f"{method}+soft_compact"
+        s["timing_status"] = "COMPACTED"
+        # Compact replaced speech at natural pace — clear frozen base for re-apply.
+        s.pop("tts_speed_base_path", None)
+        s["proposed_speed_factor"] = 1.0
+        s["soft_speed_factor"] = 1.0
+
+    compute_placement_starts(segments)
+    schedule_soft_placements(segments)
+
+    overflow_remaining = sum(1 for s in segments if float(s.get("timing_overflow_sec") or 0) > 0.15)
+    overlap_remaining = len(segments_with_voiced_overlap(segments))
+    if session is not None and (overflow_remaining > 0 or overlap_remaining > 0):
+        video_duration = (
+            max(float(s.get("end") or 0.0) for s in segments) + 2.0 if segments else None
+        )
+        repaired = repair_conflict_clusters(
+            segments,
+            settings=settings,
+            ffmpeg_path=ffmpeg_path,
+            tts_dir=tts_dir,
+            job_id=job_id,
+            runner=runner,
+            session=session,
+            get_wav_duration=get_wav_duration,
+            build_atempo_chain=_build_atempo_chain,
+            run_ffmpeg_audio_filter=_run_ffmpeg_audio_filter,
+            video_duration=video_duration,
+        )
+        segments[:] = repaired
+        for s in segments:
+            s.pop("tts_speed_base_path", None)
+            s["proposed_speed_factor"] = 1.0
+            s["soft_speed_factor"] = 1.0
+
+    # Always finish with one propose→max→apply so compact/cluster do not leave uneven pace.
+    for s in segments:
+        if str(s.get("timing_status") or "") == "COMPACTED" or s.get("cluster_source_indices"):
+            s.pop("tts_speed_base_path", None)
+    _propose_then_apply_uniform_speed(
+        segments=segments,
+        absolute_max_rate=absolute_max_rate,
+        ffmpeg_path=ffmpeg_path,
+        tts_dir=tts_dir,
+        job_id=job_id,
+        runner=runner,
+    )
+    enforce_zero_overlap_placements(segments)
 
 
 def duration_repair_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
@@ -1958,6 +2642,7 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
     global_speed = max(1.0, min(2.5, float(settings.get("tts_global_speed", 1.0) or 1.0)))
     rewrite_prefix = _timing_rewrite_method_prefix(settings)
     dub_lang_label = dub_language_label(dub_language_from_settings(settings), english=True)
+    fit_policy = policy_from_settings(settings)
 
     ffmpeg_path = resolve_tool_path(config, "ffmpeg")
     telemetry = TelemetrySink(config.data_dir, job_id)
@@ -1967,9 +2652,20 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
         for s in segments:
             segment_started = time.perf_counter()
             idx = s["index"]
-            budget = float(s.get("duration_budget") or 0.0)
+            profile = timing_profile_from_segment(s)
+            s.setdefault("timing_profile", profile)
+            segment_budget = budget_from_settings(settings)
+            prior_budget = s.get("tts_attempt_budget")
+            if isinstance(prior_budget, dict):
+                segment_budget.used = int(prior_budget.get("used") or 0)
+                segment_budget.candidate_attempts = int(prior_budget.get("candidate_attempts") or 0)
+                segment_budget.rewrite_attempts = int(prior_budget.get("rewrite_attempts") or 0)
+                segment_budget.cache_hits = int(prior_budget.get("cache_hits") or 0)
+            budget = float(s.get("duration_budget") or profile.get("timeline_window") or 0.0)
             tts_dur = float(s.get("tts_duration") or 0.0)
             orig_file = Path(s.get("tts_path") or s.get("tts_raw_path") or (tts_dir / f"tts_{idx}.wav"))
+            speech_dur = _segment_speech_duration(s, orig_file if orig_file.is_file() else None)
+            s["user_requested_speed"] = round(global_speed, 3)
             repaired_file = tts_dir / f"tts_repaired_{idx}.wav"
             repaired_file.unlink(missing_ok=True)
 
@@ -1986,7 +2682,8 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
             time_stretch_factor = 1.0
             tail_speech_detected = False
 
-            if not exact_enabled and tts_dur <= budget + 0.1:
+            speech_fit = classify_duration_fit(speech_dur, profile, policy=fit_policy)
+            if not exact_enabled and acceptable_duration_fit(speech_fit):
                 input_for_fit = orig_file
                 if abs(global_speed - 1.0) > 0.001:
                     speed_started = time.perf_counter()
@@ -2007,45 +2704,64 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                 s["repaired_method"] = "+".join(fit_methods) if fit_methods else "none"
                 s["repaired_duration"] = round(repaired_duration_value, 2)
                 s["duration_repair_risk"] = duration_repair_risk
+                s["repair_severity"] = "none"
+                s["needs_review"] = False
                 s["final_timing_error_ms"] = round((repaired_duration_value - budget) * 1000) if budget > 0 else 0
                 s["repair_attempts"] = repair_attempts
                 s["tail_speech_detected"] = False
                 s["time_stretch_factor"] = 1.0
+                s["final_timing_error_ms"] = round((speech_dur - profile.get("speech_target_duration", budget)) * 1000)
+                s["accepted_without_repair"] = True
                 continue
 
             input_for_fit = orig_file
-            current_duration = get_wav_duration(input_for_fit)
-            repair_target = _repair_target_duration(s, budget, tolerance_sec)
+            current_wav_duration = get_wav_duration(input_for_fit) if input_for_fit.is_file() else tts_dur
+            current_speech_duration = speech_dur or current_wav_duration
+            current_duration = current_wav_duration
+            repair_target = float(profile.get("speech_target_duration") or _repair_target_duration(s, budget, tolerance_sec))
+            hard_max = float(profile.get("hard_max_duration") or repair_target)
+            # Gap-based fit (VẤN ĐỀ 1): the dub only needs to fit inside the free window up to
+            # the next segment (fit_max = hard_max). Compress toward fit_max, never toward the
+            # shorter original speech duration, so full translated content is preserved whenever
+            # there is real free space before the next segment.
+            fit_max = max(repair_target, hard_max)
             s["repair_target_duration"] = round(repair_target, 2) if repair_target > 0 else 0.0
-            if repair_target > 0 and current_duration > repair_target + tolerance_sec:
+            s["fit_max_duration"] = round(fit_max, 2) if fit_max > 0 else 0.0
+            needs_review = False
+            if fit_max > 0 and current_speech_duration > fit_max + tolerance_sec:
+                _scale_attempt_budget_for_overflow(segment_budget, current_speech_duration / fit_max)
+            if fit_max > 0 and should_shorten_for_timing(current_speech_duration, s, policy=fit_policy):
                 try:
                     llm_started = time.perf_counter()
                     new_translation, target_words = shorten_translation_for_timing(
                         settings,
                         database,
                         text=str(s.get("translation") or ""),
-                        budget=repair_target,
-                        current_duration=current_duration,
+                        budget=fit_max,
+                        current_duration=current_speech_duration,
                         estimate_word_count=_estimate_word_count,
                         language_label=dub_lang_label,
                     )
                     llm_shorten_ms = round((time.perf_counter() - llm_started) * 1000)
-                    if new_translation and new_translation != s.get("translation"):
+                    if new_translation and new_translation != s.get("translation") and segment_budget.can_synthesize():
                         raw_temp = tts_dir / f"tts_temp_raw_{idx}.wav"
                         temp_wav = tts_dir / f"tts_temp_{idx}.wav"
                         raw_temp.unlink(missing_ok=True)
                         temp_wav.unlink(missing_ok=True)
                         synth_started = time.perf_counter()
                         session.synthesize(new_translation, raw_temp, segment=s)
+                        segment_budget.record_repair_resynth()
                         _convert_tts_to_final_wav(ffmpeg_path, raw_temp, temp_wav, job_id, runner)
                         re_synthesis_ms = round((time.perf_counter() - synth_started) * 1000)
                         raw_temp.unlink(missing_ok=True)
                         new_dur = get_wav_duration(temp_wav)
+                        new_speech = _segment_speech_duration(s, temp_wav)
                         repair_attempts += 1
                         re_synthesis_count += 1
-                        if new_dur < current_duration:
+                        if new_speech < current_speech_duration:
                             input_for_fit = temp_wav
                             current_duration = new_dur
+                            current_speech_duration = new_speech
                             s["translation"] = new_translation
                             fit_methods.append(
                                 f"{rewrite_prefix}_shorten_to_{target_words}_words"
@@ -2058,7 +2774,7 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                     quality_warning = f"{rewrite_prefix}_shorten_failed"
 
             def _maybe_apply_global_speed() -> None:
-                nonlocal input_for_fit, current_duration, atempo_ms
+                nonlocal input_for_fit, current_duration, current_speech_duration, atempo_ms
                 global_speed_method = f"global_speed_{round(global_speed, 2)}x"
                 if abs(global_speed - 1.0) <= 0.001 or global_speed_method in fit_methods:
                     return
@@ -2074,13 +2790,23 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                 )
                 atempo_ms += round((time.perf_counter() - speed_started) * 1000)
                 fit_methods.append(global_speed_method)
+                current_speech_duration = _segment_speech_duration(s, input_for_fit)
 
-            if exact_enabled and repair_target > 0 and current_duration > repair_target + tolerance_sec:
+            if exact_enabled and fit_max > 0 and current_speech_duration > fit_max + tolerance_sec:
                 _maybe_apply_global_speed()
-                raw_factor = current_duration / repair_target
-                speed_factor = min(max_stretch, max(1.0, raw_factor))
-                stretch_decision = classify_stretch(raw_factor, max_safe=max_safe_stretch, explicit_allow_danger=True)
-                duration_repair_risk = stretch_decision.risk
+                raw_factor = tempo_factor_for_duration(current_speech_duration, fit_max)
+                automatic_tempo, tempo_risk = clamp_automatic_tempo(
+                    raw_factor,
+                    policy=fit_policy,
+                    user_global_speed=global_speed,
+                )
+                speed_factor = min(max_stretch, max(1.0, automatic_tempo))
+                stretch_decision = classify_stretch_with_policy(
+                    speed_factor,
+                    settings=settings,
+                    explicit_allow_danger=True,
+                )
+                duration_repair_risk = stretch_decision.risk if stretch_decision.risk != "normal" else tempo_risk
                 if stretch_decision.warning:
                     quality_warning = stretch_decision.warning
                 stretched_file = tts_dir / f"tts_stretch_{idx}.wav"
@@ -2097,23 +2823,51 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                 atempo_ms = round((time.perf_counter() - atempo_started) * 1000)
                 input_for_fit = stretched_file
                 current_duration = get_wav_duration(stretched_file)
+                current_speech_duration = _segment_speech_duration(s, stretched_file)
                 time_stretch_factor = round(speed_factor, 3)
+                s["automatic_tempo_factor"] = time_stretch_factor
+                s["effective_speed"] = round(global_speed * time_stretch_factor, 3)
                 fit_methods.append(f"time_stretch_{round(speed_factor, 2)}x")
                 repair_attempts += 1
 
-            if exact_enabled and repair_target > 0 and abs(current_duration - repair_target) > tolerance_sec:
-                target_dur = max(0.05, float(repair_target))
-                if current_duration > target_dur:
+            if exact_enabled and fit_max > 0:
+                target_dur = max(0.05, float(fit_max))
+                lengthen_target = max(0.05, float(repair_target))
+                if current_speech_duration > fit_max + tolerance_sec:
+                    # Speech itself still overflows the free window after shorten + stretch.
+                    # Never trim into speech (2.4 hard cap) — flag the segment for human review
+                    # instead of silently cutting content.
                     _maybe_apply_global_speed()
                     tail_speech_detected = _wav_tail_has_speech(input_for_fit)
-                    if tail_speech_detected:
-                        quality_warning = "tail_speech_detected_skip_hard_trim"
+                    quality_warning = quality_warning or "speech_over_window_needs_review"
+                    duration_repair_risk = "danger"
+                    needs_review = True
+                    s["speech_trimmed"] = False
+                elif current_duration > fit_max + tolerance_sec and (
+                    current_duration - current_speech_duration
+                ) > tolerance_sec:
+                    # Only trailing silence overshoots the window: shrink the silence down to the
+                    # window boundary (fit_max), keeping the full speech tail intact.
+                    _maybe_apply_global_speed()
+                    trailing = float(
+                        s.get("tts_trailing_silence") or max(0.0, current_duration - current_speech_duration)
+                    )
+                    trim_ratio, trim_cap_ms = _duration_trim_caps(settings)
+                    trim_amount_ms = round(max(0.0, current_duration - target_dur) * 1000)
+                    speech_headroom_ms = round(max(0.0, target_dur - current_speech_duration) * 1000)
+                    # Guard: only trim silence that sits beyond the speech end. If honoring the
+                    # window would require cutting into speech, refuse and flag for review.
+                    if speech_headroom_ms < 0 or trim_amount_ms > trim_cap_ms + round(trailing * 1000):
+                        quality_warning = quality_warning or "silence_trim_exceeds_cap_needs_review"
+                        needs_review = True
+                        s["speech_trimmed"] = False
                     else:
                         exact_file = tts_dir / f"tts_exact_{idx}.wav"
                         exact_file.unlink(missing_ok=True)
-                        exact_filter = f"apad=pad_dur={target_dur + 0.2:.3f},atrim=0:{target_dur:.3f}"
-                        fade_start = max(0.0, target_dur - 0.05)
-                        exact_filter = f"afade=t=out:st={fade_start:.3f}:d=0.050,{exact_filter}"
+                        exact_filter = (
+                            f"atrim=0:{current_speech_duration + 0.05:.3f},"
+                            f"apad=pad_dur={target_dur + 0.2:.3f},atrim=0:{target_dur:.3f}"
+                        )
                         trim_started = time.perf_counter()
                         _run_ffmpeg_audio_filter(
                             ffmpeg_path,
@@ -2126,12 +2880,13 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                         trim_ms = round((time.perf_counter() - trim_started) * 1000)
                         input_for_fit = exact_file
                         current_duration = get_wav_duration(exact_file)
-                        fit_methods.append("exact_trim_pad")
+                        current_speech_duration = _segment_speech_duration(s, exact_file)
+                        fit_methods.append("outer_silence_trim")
+                        s["outer_silence_trimmed_ms"] = round(trailing * 1000)
                         repair_attempts += 1
-                else:
-                    target_dur = max(0.05, float(repair_target))
+                elif should_lengthen_for_timing(current_speech_duration, s, policy=fit_policy):
                     lengthen_gap_threshold = _lengthen_min_gap_sec(settings)
-                    gap = target_dur - current_duration
+                    gap = lengthen_target - current_speech_duration
                     if gap > lengthen_gap_threshold:
                         try:
                             llm_started = time.perf_counter()
@@ -2139,30 +2894,33 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                                 settings,
                                 database,
                                 text=str(s.get("translation") or ""),
-                                budget=target_dur,
-                                current_duration=current_duration,
+                                budget=lengthen_target,
+                                current_duration=current_speech_duration,
                                 min_gap_sec=lengthen_gap_threshold,
                                 max_ratio=_lengthen_max_ratio(settings),
                                 estimate_word_count=_estimate_word_count,
                                 language_label=dub_lang_label,
                             )
                             llm_lengthen_ms = round((time.perf_counter() - llm_started) * 1000)
-                            if new_translation and new_translation != s.get("translation"):
+                            if new_translation and new_translation != s.get("translation") and segment_budget.can_synthesize():
                                 raw_temp = tts_dir / f"tts_temp_raw_{idx}.wav"
                                 temp_wav = tts_dir / f"tts_temp_{idx}.wav"
                                 raw_temp.unlink(missing_ok=True)
                                 temp_wav.unlink(missing_ok=True)
                                 synth_started = time.perf_counter()
                                 session.synthesize(new_translation, raw_temp, segment=s)
+                                segment_budget.record_repair_resynth()
                                 _convert_tts_to_final_wav(ffmpeg_path, raw_temp, temp_wav, job_id, runner)
                                 re_synthesis_ms += round((time.perf_counter() - synth_started) * 1000)
                                 raw_temp.unlink(missing_ok=True)
                                 new_dur = get_wav_duration(temp_wav)
+                                new_speech = _segment_speech_duration(s, temp_wav)
                                 repair_attempts += 1
                                 re_synthesis_count += 1
-                                if new_dur > current_duration:
+                                if new_speech > current_speech_duration:
                                     input_for_fit = temp_wav
                                     current_duration = new_dur
+                                    current_speech_duration = new_speech
                                     s["translation"] = new_translation
                                     fit_methods.append(
                                         f"{rewrite_prefix}_lengthen_to_{target_words}_words"
@@ -2177,9 +2935,11 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                             quality_warning = f"{rewrite_prefix}_lengthen_failed"
 
                     _maybe_apply_global_speed()
-
-                    if current_duration < target_dur - tolerance_sec:
-                        remaining_gap = target_dur - current_duration
+                    if (
+                        should_lengthen_for_timing(current_speech_duration, s, policy=fit_policy)
+                        and current_speech_duration < lengthen_target - tolerance_sec
+                    ):
+                        remaining_gap = lengthen_target - current_speech_duration
                         if remaining_gap > lengthen_gap_threshold and not any(
                             method.endswith("_lengthen") or "_lengthen_to_" in method for method in fit_methods
                         ):
@@ -2191,7 +2951,7 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                             ffmpeg_path,
                             input_for_fit,
                             exact_file,
-                            filter_expr=_tail_silence_pad_filter(current_duration, target_dur),
+                            filter_expr=_tail_silence_pad_filter(current_duration, lengthen_target),
                             job_id=job_id,
                             runner=runner,
                         )
@@ -2200,21 +2960,42 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                         current_duration = get_wav_duration(exact_file)
                         fit_methods.append("tail_silence_pad")
                         repair_attempts += 1
+                elif acceptable_duration_fit(speech_fit):
+                    _maybe_apply_global_speed()
+                    s["accepted_without_repair"] = True
+                else:
+                    _maybe_apply_global_speed()
             else:
                 _maybe_apply_global_speed()
 
             repaired_file.unlink(missing_ok=True)
             shutil.copy(input_for_fit, repaired_file)
             repaired_duration = round(get_wav_duration(repaired_file), 2)
+            # Final residual-overflow guard: if the dub speech still overflows the free window
+            # after every safe repair, mark it danger + needs_review instead of hiding the issue.
+            final_speech = _segment_speech_duration(s, repaired_file) or current_speech_duration
+            if fit_max > 0 and final_speech > fit_max + tolerance_sec:
+                duration_repair_risk = "danger"
+                needs_review = True
+                quality_warning = quality_warning or "residual_speech_over_window"
+            if duration_repair_risk == "danger":
+                repair_severity = "danger"
+            elif duration_repair_risk == "warning" or needs_review:
+                repair_severity = "warning"
+            else:
+                repair_severity = "none"
             s["repaired_duration"] = repaired_duration
             s["repaired_method"] = "+".join(fit_methods) if fit_methods else "none"
             s["duration_repair_risk"] = duration_repair_risk
+            s["repair_severity"] = repair_severity
+            s["needs_review"] = bool(needs_review)
             s["final_timing_error_ms"] = round((repaired_duration - repair_target) * 1000) if repair_target > 0 else 0
             s["tail_speech_detected"] = tail_speech_detected
             s["time_stretch_factor"] = time_stretch_factor
             s["repair_attempts"] = repair_attempts
             s["quality_warning"] = quality_warning
             s["re_synthesis_count"] = re_synthesis_count
+            s["tts_attempt_budget"] = segment_budget.to_dict()
             telemetry.record("duration_repair_segment", {
                 "wall_time_ms": round((time.perf_counter() - segment_started) * 1000),
                 "audio_duration_sec": repaired_duration,
@@ -2231,12 +3012,23 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                 "segment_index": idx,
             })
 
-    compute_placement_starts(segments)
+        _apply_soft_placement_speed_and_compact(
+            segments=segments,
+            settings=settings,
+            ffmpeg_path=ffmpeg_path,
+            tts_dir=tts_dir,
+            job_id=job_id,
+            runner=runner,
+            database=database,
+            session=session,
+        )
 
     telemetry.record("duration_repair", {
         "wall_time_ms": round((time.perf_counter() - step_started) * 1000),
         "segment_count": len(segments),
         "retry_count": 0,
+        "overflow_remaining": sum(1 for s in segments if float(s.get("timing_overflow_sec") or 0) > 0.15),
+        "voiced_overlaps": len(segments_with_voiced_overlap(segments)),
     })
     checkpoint_data = {
         "schema_version": 2,
@@ -2244,28 +3036,238 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
         "step_name": "duration_repair",
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "segments": segments,
+        "timing_overflow_count": sum(1 for s in segments if float(s.get("timing_overflow_sec") or 0) > 0.15),
+        "voiced_overlap_count": len(segments_with_voiced_overlap(segments)),
     }
     save_checkpoint(config.data_dir, job_id, "duration_repair", checkpoint_data)
     _release_tts_gpu_resources(settings)
     return checkpoint_data
 
 
-def mix_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
+def _load_repaired_segments(config: AppConfig, job_id: str) -> list[dict]:
+    align_cp = load_checkpoint(config.data_dir, job_id, "align_final_dub")
+    if align_cp and align_cp.get("segments"):
+        return list(align_cp["segments"])
     repair_cp = load_checkpoint(config.data_dir, job_id, "duration_repair")
+    if repair_cp and repair_cp.get("segments"):
+        return list(repair_cp["segments"])
+    return []
+
+
+def align_final_dub_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
+    repair_cp = load_checkpoint(config.data_dir, job_id, "duration_repair")
+    if not repair_cp:
+        raise AppError(
+            400,
+            ErrorInfo(
+                code="MISSING_DURATION_REPAIR",
+                message="Duration repair checkpoint is missing.",
+                action="Resume duration_repair step.",
+            ),
+        )
+
+    segments = [dict(segment) for segment in repair_cp.get("segments", [])]
+    settings = _load_settings(database)
+    job_dir = config.data_dir / "jobs" / job_id
+    cache_dir = job_dir / "artifacts" / "subtitle_asr"
+    ffmpeg_path = resolve_tool_path(config, "ffmpeg")
+    project_root = Path(__file__).resolve().parents[2]
+    vendor_dir = Path(os.environ.get("DV_VENDOR_DIR", project_root / "vendor"))
+    configure_gpu_manager(settings)
+    _release_tts_gpu_resources(settings)
+
+    language = dub_language_label(dub_language_from_settings(settings), english=True)
+    telemetry = TelemetrySink(config.data_dir, job_id)
+    step_started = time.perf_counter()
+    model_load_started = time.perf_counter()
+
+    aligned_count = 0
+    fallback_count = 0
+    failed_count = 0
+    batch_result = align_job_segments_final_dub(
+        segments,
+        job_dir=job_dir,
+        cache_dir=cache_dir,
+        transcribe_fn=transcribe_audio,
+        vendor_dir=vendor_dir,
+        settings=settings,
+        ffmpeg_path=ffmpeg_path,
+        language=language,
+    )
+    cache_hits = int(batch_result.get("cache_hits") or 0)
+    cache_misses = int(batch_result.get("cache_misses") or 0)
+    model_calls = int(batch_result.get("model_calls") or 0)
+
+    for result in batch_result.get("results") or []:
+        status = str(result.get("status") or "skipped")
+        if status == "aligned":
+            aligned_count += 1
+        elif status in {"fallback_interpolated", "no_speech"}:
+            fallback_count += 1
+        elif status == "failed":
+            failed_count += 1
+
+    similarities = [
+        float(result["text_similarity"])
+        for result in batch_result.get("results") or []
+        if result.get("text_similarity") is not None
+    ]
+
+    model_load_time = round((time.perf_counter() - model_load_started) * 1000)
+    alignment_wall_time = round((time.perf_counter() - step_started) * 1000)
+    summary = summarize_alignment_results(segments)
+
+    telemetry.record(
+        "align_final_dub",
+        {
+            "segment_count": len(segments),
+            "aligned_count": aligned_count,
+            "fallback_count": fallback_count,
+            "failed_count": failed_count,
+            "cache_hits": cache_hits,
+            "cache_misses": cache_misses,
+            "model_calls": model_calls,
+            "alignment_wall_time": alignment_wall_time,
+            "model_load_time": model_load_time,
+            "average_text_similarity": summary.get("average_text_similarity"),
+        },
+    )
+
+    checkpoint_data = {
+        "schema_version": 1,
+        "job_id": job_id,
+        "step_name": "align_final_dub",
+        "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "segments": segments,
+        **summary,
+    }
+    save_checkpoint(config.data_dir, job_id, "align_final_dub", checkpoint_data)
+    if model_calls > 0:
+        _release_asr_gpu_models(settings)
+    return checkpoint_data
+
+
+def _evaluate_release_gate_before_render(
+    job_id: str,
+    config: AppConfig,
+    database: Database,
+    segments: list[dict],
+    settings: dict,
+) -> dict:
+    """Run the release quality gate after align_final_dub and persist a report.
+
+    This is the first time the gate is wired into the real job flow: previously it only ran
+    from CLI scripts after render. If any blocking condition is present (speech trim, semantic
+    critical, subtitle overlap/out-of-bounds, danger stretch, or a segment flagged
+    needs_review during duration repair), the job is halted before mix/render so the operator
+    can review it instead of shipping a broken dubbed.mp4 (2.5).
+    """
+    metrics = compute_timing_qc_metrics(segments, settings=settings)
+    gate = evaluate_release_gate(segments, metrics=metrics, settings=settings)
+    # Fold in the per-segment needs_review flag written by duration_repair (2.4).
+    review_segments = [
+        int(s.get("index")) for s in segments if s.get("needs_review")
+    ]
+    gate["needs_review_segments"] = review_segments
+    if review_segments and "needs_review_segments" not in gate["blocking"]:
+        gate = {**gate, "passed": False, "blocking": [*gate["blocking"], "needs_review_segments"]}
+    report = {
+        "schema_version": 1,
+        "job_id": job_id,
+        "step_name": "release_gate",
+        "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        **gate,
+    }
+    save_checkpoint(config.data_dir, job_id, "release_gate", report)
+    return gate
+
+
+def mix_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
+    segments = _load_repaired_segments(config, job_id)
     audio_cp = load_checkpoint(config.data_dir, job_id, "extract_audio")
 
-    if not repair_cp or not audio_cp:
+    gate_settings = _load_settings(database)
+    if bool(gate_settings.get("release_gate_blocking_enabled", True)):
+        gate = _evaluate_release_gate_before_render(job_id, config, database, segments, gate_settings)
+        if not gate.get("passed", True):
+            raise AppError(
+                409,
+                ErrorInfo(
+                    code="RELEASE_GATE_BLOCKED",
+                    message="Release quality gate blocked before render: "
+                    + ", ".join(gate.get("blocking") or []),
+                    action="Review flagged segments (duration overflow / stretch / subtitle), then resume the job.",
+                ),
+            )
+
+    # ChatGPT TL hard gate: overflow=0, voiced_overlap=0 before mix.
+    overflow_count = sum(1 for s in segments if float(s.get("timing_overflow_sec") or 0) > 0.15)
+    voiced_overlaps = segments_with_voiced_overlap(segments)
+    last_audible_end = 0.0
+    for s in segments:
+        text = str(s.get("tts_spoken_text") or s.get("translation") or "").strip()
+        if not text or bool(s.get("no_speech")):
+            continue
+        start = float(s.get("placement_start") or s.get("start") or 0.0)
+        rep = s.get("repaired_duration")
+        if rep is None or rep == "":
+            dur = float(s.get("tts_duration") or 0.0)
+        else:
+            dur = float(rep)
+        if dur <= 0:
+            continue
+        last_audible_end = max(last_audible_end, start + dur)
+    timing_blocking: list[str] = []
+    if overflow_count:
+        timing_blocking.append(f"timing_overflow_count={overflow_count}")
+    if voiced_overlaps:
+        timing_blocking.append(f"voiced_overlap_count={len(voiced_overlaps)}")
+    if timing_blocking and bool(gate_settings.get("timing_placement_gate_enabled", True)):
+        raise AppError(
+            409,
+            ErrorInfo(
+                code="TIMING_PLACEMENT_GATE_BLOCKED",
+                message="Timing placement gate blocked before mix: " + ", ".join(timing_blocking),
+                action="Re-run duration_repair conflict-cluster repair, then resume.",
+            ),
+        )
+
+    if not audio_cp:
         raise AppError(
             400,
             ErrorInfo(
                 code="MISSING_REPAIR_OR_AUDIO",
-                message="Duration repair or original audio checkpoints are missing.",
-                action="Verify upstream steps."
-            )
+                message="Original audio checkpoint is missing.",
+                action="Verify extract_audio step.",
+            ),
         )
 
     original_48k = Path(audio_cp["original_48k_path"])
-    segments = repair_cp.get("segments", [])
+    try:
+        media_duration = get_wav_duration(original_48k)
+    except Exception:
+        media_duration = 0.0
+    last_cn_end = max((float(s.get("end") or 0.0) for s in segments), default=0.0)
+    # ASR windows can slightly overrun extracted WAV length; hold narration to the
+    # effective source timeline (wav or last Chinese end), not an unreachable tighter bound.
+    source_deadline = max(media_duration, last_cn_end)
+    if (
+        source_deadline > 0
+        and last_audible_end > source_deadline + 0.05
+        and bool(gate_settings.get("timing_placement_gate_enabled", True))
+    ):
+        raise AppError(
+            409,
+            ErrorInfo(
+                code="TIMING_PLACEMENT_GATE_BLOCKED",
+                message=(
+                    f"Timing placement gate blocked: last_audible_end={last_audible_end:.2f}s "
+                    f"> source_deadline={source_deadline:.2f}s "
+                    f"(media={media_duration:.2f}s, cn_end={last_cn_end:.2f}s)"
+                ),
+                action="Re-run duration_repair conflict-cluster repair, then resume.",
+            ),
+        )
 
     job_dir = config.data_dir / "jobs" / job_id
     artifacts_dir = job_dir / "artifacts"
@@ -2283,12 +3285,18 @@ def mix_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
     segment_entries: list[dict] = []
     for seg in segments:
         idx = seg["index"]
-        seg_path = tts_dir / f"tts_repaired_{idx}.wav"
-        if not seg_path.is_file():
-            candidate = seg.get("tts_path")
-            seg_path = Path(candidate) if candidate else tts_dir / f"tts_{idx}.wav"
-        if not seg_path.is_file() and seg.get("tts_raw_path"):
-            seg_path = Path(seg["tts_raw_path"])
+        seg_path = resolve_voiced_tts_path(seg)
+        if seg_path is None and spoken_text(seg):
+            raise AppError(
+                409,
+                ErrorInfo(
+                    code="TTS_PROVENANCE_MISSING",
+                    message=f"Voiced segment {idx} is missing canonical tts_path.",
+                    action="Re-run duration_repair provenance repair, then resume mix.",
+                ),
+            )
+        if seg_path is None:
+            continue
         if seg_path.is_file():
             placement_start = float(seg.get("placement_start") or seg.get("start") or 0.0)
             clip_duration = float(seg.get("repaired_duration") or seg.get("tts_duration") or 0.0)
@@ -2303,6 +3311,17 @@ def mix_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
             )
 
     annotate_segment_mix_caps(segment_entries)
+    allow_hard_clip = bool(settings.get("mix_hard_clip_enabled", False))
+    would_clip = [
+        entry for entry in segment_entries
+        if float(entry.get("mix_would_clip_sec") or 0.0) > 0.15
+    ]
+    if would_clip and not allow_hard_clip:
+        logger.warning(
+            "Mix soft-placement residual overflow for job %s: %s segments would have been hard-clipped under legacy policy",
+            job_id,
+            len(would_clip),
+        )
 
     if segment_entries:
         cmd_narration = [str(ffmpeg_path), "-y"]
@@ -2314,6 +3333,7 @@ def mix_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
                 placement_start=entry["placement_start"],
                 clip_duration=entry["clip_duration"],
                 max_duration=entry.get("max_duration"),
+                allow_hard_clip=allow_hard_clip,
             )
             for input_index, entry in enumerate(segment_entries)
         ]
@@ -2413,7 +3433,7 @@ def mix_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
 
 def render_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
     mix_cp = load_checkpoint(config.data_dir, job_id, "mix")
-    repair_cp = load_checkpoint(config.data_dir, job_id, "duration_repair")
+    segments = _load_repaired_segments(config, job_id)
     
     if not mix_cp:
         raise AppError(
@@ -2443,21 +3463,21 @@ def render_step(job_id: str, config: AppConfig, database: Database, runner) -> d
 
     video_filters: list[str] = []
     subtitle_burn_in = False
-    if settings.get("subtitles_enabled", True) and repair_cp:
-        segments = [
+    if settings.get("subtitles_enabled", True) and segments:
+        refresh_all_segment_dub_word_timestamps(segments)
+        subtitle_segments = [
             segment
-            for segment in repair_cp.get("segments", [])
-            if str(segment.get("translation") or "").strip()
+            for segment in segments
+            if str(segment.get("translation") or segment.get("target_text") or "").strip()
         ]
-        if segments:
-            _release_tts_gpu_resources(settings)
+        if subtitle_segments:
             width, height = probe_video_dimensions(ffmpeg_path, original_mp4)
             project_root = Path(__file__).resolve().parents[2]
             vendor_dir = Path(os.environ.get("DV_VENDOR_DIR", project_root / "vendor"))
-            configure_gpu_manager(settings)
+            has_dub_words = any(segment_has_usable_dub_words(segment) for segment in subtitle_segments)
             write_ass_file(
                 ass_path,
-                segments,
+                subtitle_segments,
                 settings,
                 play_res_x=width,
                 play_res_y=height,
@@ -2465,9 +3485,12 @@ def render_step(job_id: str, config: AppConfig, database: Database, runner) -> d
                 vendor_dir=vendor_dir,
                 ffmpeg_path=ffmpeg_path,
                 transcribe_fn=transcribe_audio,
-                tts_asr_align=True,
+                tts_asr_align=not has_dub_words,
             )
-            _release_asr_gpu_models(settings)
+            if not has_dub_words:
+                _release_tts_gpu_resources(settings)
+                configure_gpu_manager(settings)
+                _release_asr_gpu_models(settings)
             if subtitles_filter_available(ffmpeg_path):
                 video_filters.append(ffmpeg_subtitles_filter(ass_path))
                 subtitle_burn_in = True
@@ -2540,21 +3563,21 @@ def render_step(job_id: str, config: AppConfig, database: Database, runner) -> d
 
 
 def qc_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
-    repair_cp = load_checkpoint(config.data_dir, job_id, "duration_repair")
+    segments = _load_repaired_segments(config, job_id)
     norm_cp = load_checkpoint(config.data_dir, job_id, "normalize_segments")
     render_cp = load_checkpoint(config.data_dir, job_id, "render")
+    align_cp = load_checkpoint(config.data_dir, job_id, "align_final_dub")
     
-    if not repair_cp or not norm_cp or not render_cp:
+    if not norm_cp or not render_cp:
         raise AppError(
             400,
             ErrorInfo(
                 code="MISSING_UPSTREAM_CHECKPOINTS",
-                message="Duration repair, Normalized segments, or Render checkpoints are missing.",
+                message="Normalized segments or Render checkpoints are missing.",
                 action="Verify upstream steps."
             )
         )
         
-    segments = repair_cp.get("segments", [])
     output_path = render_cp["output_path"]
     
     total_segments = len(segments)
@@ -2567,6 +3590,16 @@ def qc_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
     risky_trim_count = 0
     suspected_clipped_tails = 0
     synthesis_retry_count = 0
+    timing_candidate_count = 0
+    candidate_retry_count = 0
+    prediction_errors: list[float] = []
+    segments_accepted_first_try = 0
+    segments_using_extreme_stretch = 0
+    segments_using_speech_trim = 0
+    segments_rewritten = 0
+    segments_accepted_without_repair = 0
+    automatic_tempo_factors: list[float] = []
+    automatic_tempo_distribution: dict[str, int] = {}
 
     asr_cp = load_checkpoint(config.data_dir, job_id, "asr") or {}
     vad_cp = load_checkpoint(config.data_dir, job_id, "vad") or {}
@@ -2592,6 +3625,27 @@ def qc_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
         if s.get("duration_repair_risk") in {"warning", "danger"} or s.get("tail_speech_detected"):
             risky_trim_count += 1
         synthesis_retry_count += int(s.get("re_synthesis_count") or 0)
+        timing_candidate_count += len(s.get("translation_candidates") or [])
+        candidate_retry_count += max(0, int(s.get("tts_attempt_count") or 1) - 1)
+        predicted = s.get("predicted_duration")
+        actual = s.get("tts_speech_duration") or s.get("tts_duration")
+        if predicted is not None and actual is not None:
+            prediction_errors.append(abs(float(actual) - float(predicted)) * 1000.0)
+        if int(s.get("tts_attempt_count") or 1) <= 1 and s.get("accepted_without_repair"):
+            segments_accepted_first_try += 1
+        tempo = float(s.get("automatic_tempo_factor") or s.get("time_stretch_factor") or 1.0)
+        if tempo and (tempo > 1.12 or tempo < 0.9):
+            segments_using_extreme_stretch += 1
+        if s.get("speech_trimmed"):
+            segments_using_speech_trim += 1
+        if any(item.get("source") == "rewrite" for item in s.get("tts_attempts") or []):
+            segments_rewritten += 1
+        if s.get("accepted_without_repair"):
+            segments_accepted_without_repair += 1
+        if tempo:
+            automatic_tempo_factors.append(tempo)
+            tempo_key = str(round(tempo, 2))
+            automatic_tempo_distribution[tempo_key] = automatic_tempo_distribution.get(tempo_key, 0) + 1
         if method != "none":
             repaired_segments += 1
             if "llm_shorten" in method:
@@ -2616,8 +3670,21 @@ def qc_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
         if record.get("real_time_factor") is not None:
             step_rtf[step] = step_rtf.get(step, 0.0) + float(record["real_time_factor"])
 
+    alignment_summary = summarize_alignment_results(segments) if align_cp else {}
+    subtitle_segments = [
+        segment
+        for segment in segments
+        if str(segment.get("translation") or segment.get("target_text") or "").strip()
+    ]
+    subtitle_cues = build_subtitle_cues(subtitle_segments) if subtitle_segments else []
+    subtitle_metrics = compute_subtitle_qc_metrics(segments, subtitle_cues) if subtitle_cues else {}
+
+    rows = database.connection.execute("SELECT key, value FROM settings").fetchall()
+    qc_settings = {r["key"]: json.loads(r["value"]) for r in rows}
+    timing_metrics = compute_timing_qc_metrics(segments, settings=qc_settings)
+
     checkpoint_data = {
-        "schema_version": 3,
+        "schema_version": 4,
         "job_id": job_id,
         "step_name": "qc",
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -2643,6 +3710,20 @@ def qc_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
         "model_cold_start_count": sum(1 for record in telemetry_records if record.get("cold_start") is True),
         "total_rtf_by_step": step_rtf,
         "tts_segment_count": len(tts_cp.get("segments", [])) if tts_cp else total_segments,
+        "translation_candidate_count": timing_candidate_count,
+        "candidate_retry_count": candidate_retry_count,
+        "predicted_vs_actual_duration_error_ms": round(sum(prediction_errors) / len(prediction_errors), 1) if prediction_errors else None,
+        "speech_duration_error_ms": round(sum(prediction_errors) / len(prediction_errors), 1) if prediction_errors else None,
+        "segments_accepted_first_try": segments_accepted_first_try,
+        "segments_using_extreme_stretch": segments_using_extreme_stretch,
+        "segments_using_speech_trim": segments_using_speech_trim,
+        "segments_rewritten": segments_rewritten,
+        "segments_accepted_without_repair": segments_accepted_without_repair,
+        "automatic_tempo_factor_distribution": automatic_tempo_distribution,
+        **timing_metrics,
+        **alignment_summary,
+        **subtitle_metrics,
+        "dub_alignment_segments": alignment_summary.get("per_segment", []),
     }
     
     save_checkpoint(config.data_dir, job_id, "qc", checkpoint_data)

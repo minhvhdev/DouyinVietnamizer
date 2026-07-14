@@ -267,6 +267,15 @@ def release_vram_resources(*, runner=None) -> ReleaseVramResult:
         errors.append(f"gpu_manager_state: {exc}")
 
     try:
+        from .gpu_lease import clear_gpu_lease_state
+
+        cleared = clear_gpu_lease_state(reason="release_vram")
+        if cleared:
+            released.append("gpu_lease_state")
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"gpu_lease_state: {exc}")
+
+    try:
         helpers = _terminate_gpu_helper_processes()
         if helpers:
             released.append("gpu_helper_processes")

@@ -14,6 +14,7 @@ PIPELINE_STEPS = (
     "translate",
     "tts",
     "duration_repair",
+    "align_final_dub",
     "mix",
     "render",
     "qc",

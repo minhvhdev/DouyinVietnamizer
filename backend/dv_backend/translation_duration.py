@@ -3,16 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-
-def estimate_vietnamese_spoken_duration(text: str, *, speaking_rate_wps: float = 3.2) -> float:
-    cleaned = re.sub(r"\s+", " ", (text or "").strip())
-    if not cleaned:
-        return 0.0
-    words = re.findall(r"\w+", cleaned, flags=re.UNICODE)
-    punctuation_pause = len(re.findall(r"[,.!?;:…]", cleaned)) * 0.12
-    rate = max(1.0, float(speaking_rate_wps))
-    return round((len(words) / rate) + punctuation_pause, 3)
-
+from .duration_predictor import estimate_vietnamese_spoken_duration, predict_spoken_duration
 
 def duration_fit_prediction(estimated_duration: float, budget: float) -> str:
     if budget <= 0:
@@ -24,11 +15,32 @@ def duration_fit_prediction(estimated_duration: float, budget: float) -> str:
     return "over_budget"
 
 
-def annotate_translation_duration(segment: dict[str, Any], *, speaking_rate_wps: float = 3.2) -> dict[str, Any]:
+def annotate_translation_duration(
+    segment: dict[str, Any],
+    *,
+    speaking_rate_wps: float = 3.2,
+    voice_profile: dict[str, Any] | None = None,
+    language: str = "vi",
+) -> dict[str, Any]:
     updated = dict(segment)
-    estimate = estimate_vietnamese_spoken_duration(str(updated.get("translation") or ""), speaking_rate_wps=speaking_rate_wps)
-    budget = float(updated.get("repair_target_duration") or updated.get("duration_budget") or 0.0)
+    profile = updated.get("timing_profile") or {}
+    budget = float(
+        profile.get("speech_target_duration")
+        or updated.get("repair_target_duration")
+        or updated.get("duration_budget")
+        or 0.0
+    )
+    # Legacy vietnamese_speaking_rate_wps is only used when no calibrated voice profile is available.
+    effective_profile = voice_profile
+    prediction = predict_spoken_duration(
+        str(updated.get("translation") or ""),
+        language,
+        voice_profile=effective_profile,
+        speaking_rate_wps=speaking_rate_wps if effective_profile is None else None,
+    )
+    estimate = float(prediction["predicted_seconds"])
     updated["estimated_translation_duration"] = estimate
+    updated["translation_duration_prediction"] = prediction
     updated["duration_fit_prediction"] = duration_fit_prediction(estimate, budget)
     updated["translation_was_duration_constrained"] = budget > 0
     return updated
@@ -86,7 +98,13 @@ def build_translation_timing_guidance(
     aligned_units: list[dict[str, Any]] | None = None,
     speaking_rate_wps: float = 3.2,
 ) -> dict[str, Any]:
-    duration_budget = float(segment.get("repair_target_duration") or segment.get("duration_budget") or 0.0)
+    profile = segment.get("timing_profile") or {}
+    duration_budget = float(
+        profile.get("speech_target_duration")
+        or segment.get("repair_target_duration")
+        or segment.get("duration_budget")
+        or 0.0
+    )
     source_units = count_source_speech_units(
         str(segment.get("text") or ""),
         aligned_units=aligned_units,

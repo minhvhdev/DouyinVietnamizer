@@ -1,5 +1,7 @@
 from pathlib import Path
 import sys
+import array
+import wave
 
 from unittest.mock import MagicMock
 
@@ -331,21 +333,31 @@ def test_plan_official_omnivoice_call_requires_ref_text_for_clone() -> None:
 
 
 
+def _write_tone_wav(path: Path, *, duration_sec: float = 0.2, rate: int = 24000) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frames = int(rate * duration_sec)
+    samples = array.array("h", [8000 if (index // 100) % 2 == 0 else -8000 for index in range(frames)])
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(samples.tobytes())
+
+
 def test_omnivoice_adapter_uses_injected_client(tmp_path: Path) -> None:
 
     output = tmp_path / "out.wav"
 
-    output.write_bytes(b"RIFF")
-
-
-
     client = MagicMock()
 
-    client.synthesize.return_value = {"ok": True, "output_path": str(output)}
+    def _write_and_ok(**kwargs) -> dict:
+        out = Path(kwargs["output_path"])
+        _write_tone_wav(out, duration_sec=0.2)
+        return {"ok": True, "output_path": str(out)}
 
+    client.synthesize.side_effect = _write_and_ok
 
-
-    adapter = OmniVoiceTtsAdapter(_client=client)
+    adapter = OmniVoiceTtsAdapter(model="k2-fsa/OmniVoice", _client=client, settings={"omnivoice_fidelity_check_enabled": False})
 
     adapter.synthesize("Xin chao", output, voice="instruct:female, low pitch")
 
@@ -360,5 +372,24 @@ def test_omnivoice_adapter_uses_injected_client(tmp_path: Path) -> None:
     assert kwargs["ref_audio"] is None
 
     assert kwargs.get("anchor_text") is None
+
+
+def test_omnivoice_adapter_does_not_external_chunk_by_default(tmp_path: Path) -> None:
+    output = tmp_path / "out.wav"
+    client = MagicMock()
+
+    def _write_and_ok(**kwargs) -> dict:
+        out = Path(kwargs["output_path"])
+        _write_tone_wav(out, duration_sec=0.2)
+        return {"ok": True, "output_path": str(out)}
+
+    client.synthesize.side_effect = _write_and_ok
+    adapter = OmniVoiceTtsAdapter(model="k2-fsa/OmniVoice", _client=client, settings={"omnivoice_fidelity_check_enabled": False})
+    long_text = " ".join(["Đây là một câu tiếng Việt đủ dài để vượt ngưỡng chunk ký tự cũ." for _ in range(12)])
+
+    adapter.synthesize(long_text, output, voice="instruct:female, low pitch")
+
+    client.synthesize.assert_called_once()
+    assert client.synthesize.call_args.kwargs["text"] == long_text
 
 

@@ -433,6 +433,7 @@ dependencies = [
     { name = "huggingface-hub" },
     { name = "numpy" },
     { name = "onnxruntime" },
+    { name = "pythainlp" },
     { name = "qwen-asr" },
     { name = "silero-vad" },
     { name = "soundfile" },
@@ -458,6 +459,7 @@ requires-dist = [
     { name = "huggingface-hub", specifier = ">=0.26" },
     { name = "numpy", specifier = ">=2" },
     { name = "onnxruntime", specifier = ">=1.20" },
+    { name = "pythainlp", specifier = ">=5.0,<6" },
     { name = "qwen-asr", specifier = ">=0.0.6" },
     { name = "silero-vad", specifier = ">=5.1,<6" },
     { name = "soundfile", specifier = ">=0.12" },
@@ -1482,6 +1484,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a3/5c/00a0e072241553e1a7496d638deababa67c5058571567b92a7eaa258397c/pytest-8.4.2.tar.gz", hash = "sha256:86c0d0b93306b961d58d62a4db4879f27fe25513d4b969df351abdddb3c30e01", size = 1519618, upload-time = "2025-09-04T14:34:22.711Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a8/a4/20da314d277121d6534b3a980b29035dcd51e6744bd79075a6ce8fa4eb8d/pytest-8.4.2-py3-none-any.whl", hash = "sha256:872f880de3fc3a5bdc88a11b39c9710c3497a547cfa9320bc3c5e62fbf272e79", size = 365750, upload-time = "2025-09-04T14:34:20.226Z" },
+]
+
+[[package]]
+name = "pythainlp"
+version = "5.3.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/56/47/2364543c559eacdc63633a3f29d7467a36a33089f7a8b226a247dd12de7e/pythainlp-5.3.4.tar.gz", hash = "sha256:e66fd76fb5931834fd4e32ed54337ec62350d7654f187850e4dd4f915e9f624f", size = 19306201, upload-time = "2026-04-02T18:42:46.044Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0c/bd/bedc1e416eb0fa2cb5eaa990207ae67dfaf02d4986f22d5ec372c0b97ae3/pythainlp-5.3.4-py3-none-any.whl", hash = "sha256:76744e51e27c895630bafd74f53a1f0aa8782cef2f7f02eebd6427fe8ce8d84d", size = 19849568, upload-time = "2026-04-02T18:42:42.384Z" },
 ]
 
 [[package]]

@@ -418,12 +418,24 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     jobs = JobService(database, config.data_dir)
     jobs.reconcile_interrupted()
+    try:
+        from .gpu_lease import clear_gpu_lease_state
+
+        clear_gpu_lease_state(reason="backend_startup")
+    except Exception:
+        pass
     runtime = default_runtime_service(config, database)
     if runtime.latest() is None:
         runtime.run()
 
     runner = JobRunner(config, database)
-    raw_settings = settings.get_raw_all()
+    from .voice_calibration_runner import VoiceCalibrationRunner
+
+    voice_calibration = VoiceCalibrationRunner(
+        data_dir=config.data_dir,
+        database=database,
+        settings_getter=settings.get_raw_all,
+    )
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         try:
@@ -718,16 +730,25 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.get("/api/jobs/{job_id}/segments/{index}/wav")
     def get_segment_wav(job_id: str, index: int) -> FileResponse:
+        from .checkpoints import load_checkpoint
+
         job_dir = config.data_dir / "jobs" / job_id
         tts_dir = job_dir / "artifacts" / "tts"
-        
-        wav_path = tts_dir / f"tts_repaired_{index}.wav"
-        if not wav_path.is_file():
-            wav_path = tts_dir / f"tts_{index}.wav"
-        if not wav_path.is_file():
-            wav_path = tts_dir / f"tts_raw_{index}.wav"
 
-        if not wav_path.is_file():
+        from .tts_provenance import resolve_voiced_tts_path
+
+        wav_path = None
+        for step in ("align_final_dub", "duration_repair", "tts"):
+            cp = load_checkpoint(config.data_dir, job_id, step) or {}
+            for seg in cp.get("segments") or []:
+                if int(seg.get("index", -1)) != int(index):
+                    continue
+                wav_path = resolve_voiced_tts_path(seg)
+                break
+            if wav_path is not None:
+                break
+
+        if not wav_path or not wav_path.is_file():
             raise AppError(
                 404,
                 ErrorInfo(
@@ -1003,7 +1024,13 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     def list_cloned_voices(backend: str = "omnivoice") -> list[dict]:
         resolved_backend = _normalize_voice_backend(backend)
         rows = database.connection.execute(
-            "SELECT id, name, wav_filename, transcript, created_at FROM cloned_voices WHERE backend = ? ORDER BY created_at DESC",
+            """
+            SELECT id, name, wav_filename, transcript, created_at,
+                   voice_status, duration_profile_status, duration_profile_key,
+                   duration_profile_quality, duration_profile_sample_count,
+                   last_calibrated_at, active_calibration_job_id
+            FROM cloned_voices WHERE backend = ? ORDER BY created_at DESC
+            """,
             (resolved_backend,),
         ).fetchall()
         cloned_dir = _cloned_voice_dir(config.data_dir, resolved_backend)
@@ -1021,7 +1048,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     "wav_path": str(wav_path),
                     "transcript": transcript,
                     "transcribed": bool(transcript),
-                    "created_at": r["created_at"]
+                    "created_at": r["created_at"],
+                    "voice_status": r["voice_status"] or "ready",
+                    "duration_profile_status": r["duration_profile_status"] or "not_started",
+                    "duration_profile_key": r["duration_profile_key"],
+                    "duration_profile_quality": r["duration_profile_quality"],
+                    "duration_profile_sample_count": r["duration_profile_sample_count"] or 0,
+                    "last_calibrated_at": r["last_calibrated_at"],
+                    "active_calibration_job_id": r["active_calibration_job_id"],
                 })
         return voices
 
@@ -1134,7 +1168,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         now = datetime.now(timezone.utc).isoformat()
         with database.connection:
             database.connection.execute(
-                "INSERT INTO cloned_voices (id, backend, name, wav_filename, transcript, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                """
+                INSERT INTO cloned_voices (
+                    id, backend, name, wav_filename, transcript, created_at,
+                    voice_status, duration_profile_status
+                ) VALUES (?, ?, ?, ?, ?, ?, 'ready', 'not_started')
+                """,
                 (voice_id, resolved_backend, voice_name, wav_filename, transcript, now)
             )
 
@@ -1147,7 +1186,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "transcript": transcript,
             "transcript_error": transcript_error,
             "transcribed": bool(transcript),
-            "created_at": now
+            "created_at": now,
+            "voice_status": "ready",
+            "duration_profile_status": "not_started",
         }
 
     @app.delete("/api/cloned-voices/{voice_id}")
@@ -1259,10 +1300,55 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
         return FileResponse(str(output_wav), media_type="audio/wav", filename="test_output.wav")
 
+    class VoiceCalibrationStartPayload(BaseModel):
+        mode: str = "standard"
+
+    @app.post("/api/cloned-voices/{voice_id}/calibration")
+    def start_voice_calibration(voice_id: str, payload: VoiceCalibrationStartPayload) -> dict:
+        return voice_calibration.start_calibration(voice_id, payload.mode or "standard")
+
+    @app.get("/api/cloned-voices/{voice_id}/calibration")
+    def get_voice_calibration(voice_id: str) -> dict:
+        status = voice_calibration.get_status(voice_id)
+        if not status:
+            raise AppError(
+                404,
+                ErrorInfo(code="VOICE_NOT_FOUND", message="Cloned voice not found.", action="Verify voice ID."),
+            )
+        return status
+
+    @app.post("/api/cloned-voices/{voice_id}/calibration/cancel")
+    def cancel_voice_calibration(voice_id: str) -> dict:
+        status = voice_calibration.get_status(voice_id)
+        job_id = (status or {}).get("job_id")
+        if not job_id:
+            raise AppError(
+                404,
+                ErrorInfo(code="CALIBRATION_NOT_RUNNING", message="No active calibration job.", action="Start calibration first."),
+            )
+        voice_calibration.cancel_job(job_id)
+        return {"status": "cancelled", "job_id": job_id, "voice_id": voice_id}
+
+    @app.post("/api/cloned-voices/{voice_id}/calibration/resume")
+    def resume_voice_calibration(voice_id: str) -> dict:
+        status = voice_calibration.get_status(voice_id) or {}
+        job_id = status.get("job_id")
+        if not job_id:
+            raise AppError(
+                404,
+                ErrorInfo(code="CALIBRATION_JOB_NOT_FOUND", message="No calibration job to resume.", action="Start a new calibration."),
+            )
+        return voice_calibration.resume_calibration(voice_id, job_id)
+
+    @app.delete("/api/cloned-voices/{voice_id}/duration-profile")
+    def reset_voice_duration_profile(voice_id: str) -> dict:
+        return voice_calibration.delete_profile(voice_id)
+
     app.state.config = config
     app.state.database = database
     app.state.jobs = jobs
     app.state.runtime = runtime
     app.state.runner = runner
+    app.state.voice_calibration = voice_calibration
     app.state.settings = settings
     return app

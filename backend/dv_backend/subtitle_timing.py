@@ -17,9 +17,21 @@ from .segment_mix import annotate_segment_mix_caps, effective_clip_duration
 logger = logging.getLogger(__name__)
 
 SUBTITLE_MAX_CHARS_PER_CUE = 58
+SUBTITLE_MAX_LINES = 2
+SUBTITLE_MAX_CHARS_PER_LINE = 40
+SUBTITLE_DUB_MIN_CUE_DURATION_MS = 700
+SUBTITLE_MAX_CUE_DURATION_MS = 5500
+SUBTITLE_MIN_GAP_MS = 50
+SUBTITLE_PAUSE_SPLIT_THRESHOLD_MS = 550
+SUBTITLE_CUE_TAIL_PADDING_MS = 80
 SUBTITLE_MIN_DURATION_FOR_TTS_ASR = 2.5
 SUBTITLE_MIN_CHUNKS_FOR_TTS_ASR = 2
 SUBTITLE_MIN_CUE_DURATION = 0.25
+SUBTITLE_DUB_MIN_CUE_DURATION = SUBTITLE_DUB_MIN_CUE_DURATION_MS / 1000.0
+SUBTITLE_MAX_CUE_DURATION = SUBTITLE_MAX_CUE_DURATION_MS / 1000.0
+SUBTITLE_MIN_GAP = SUBTITLE_MIN_GAP_MS / 1000.0
+SUBTITLE_PAUSE_SPLIT_THRESHOLD = SUBTITLE_PAUSE_SPLIT_THRESHOLD_MS / 1000.0
+SUBTITLE_CUE_TAIL_PADDING = SUBTITLE_CUE_TAIL_PADDING_MS / 1000.0
 SUBTITLE_SPEECH_DETECT_NOISE_DB = -40.0
 SUBTITLE_SPEECH_DETECT_MIN_SILENCE_SEC = 0.25
 
@@ -27,11 +39,68 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…。！？;])\s*")
 _COMMA_SPLIT_RE = re.compile(r"\s*,\s*")
 
 
+def subtitle_layout_from_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
+    """Resolve user-configurable subtitle layout limits (3.4) with legacy defaults."""
+    s = settings or {}
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return int(s.get(key, default) or default)
+        except (TypeError, ValueError):
+            return default
+
+    max_line = _int("subtitle_max_chars_per_line", SUBTITLE_MAX_CHARS_PER_LINE)
+    max_lines = _int("subtitle_max_lines_per_cue", s.get("subtitle_max_lines") or SUBTITLE_MAX_LINES)
+    return {
+        "max_chars_per_cue": max(8, max_line * max(1, max_lines)),
+        "min_cue_duration": _int("subtitle_min_cue_duration_ms", SUBTITLE_DUB_MIN_CUE_DURATION_MS) / 1000.0,
+        "max_cue_duration": _int("subtitle_max_cue_duration_ms", SUBTITLE_MAX_CUE_DURATION_MS) / 1000.0,
+        "min_gap": _int("subtitle_inter_cue_gap_ms", SUBTITLE_MIN_GAP_MS) / 1000.0,
+    }
+
+
+def _is_space_delimited_language(language: str | None) -> bool:
+    """Thai (and other scriptio-continua languages) are not split on whitespace."""
+    return str(language or "").lower() not in {"th", "tha", "thai"}
+
+
+def _join_display_words(texts: list[str], language: str | None) -> str:
+    parts = [part for part in (t.strip() for t in texts) if part]
+    if not parts:
+        return ""
+    if _is_space_delimited_language(language):
+        return " ".join(parts)
+    return "".join(parts)
+
+
+def _thai_word_tokens(text: str) -> list[str]:
+    """Tokenize Thai text into words, preferring pythainlp when available."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return []
+    try:
+        from pythainlp.tokenize import word_tokenize  # type: ignore
+
+        tokens = [tok for tok in word_tokenize(cleaned, keep_whitespace=False) if tok.strip()]
+        if tokens:
+            return tokens
+    except Exception:
+        pass
+    # Fallback: split on whitespace if present, else return the whole run so callers can
+    # length-split by characters without breaking mid-cluster where possible.
+    if " " in cleaned:
+        return [tok for tok in cleaned.split() if tok]
+    return [cleaned]
+
+
 def segment_subtitle_start(segment: dict) -> float:
     placement = segment.get("placement_start")
     if placement is not None:
         return float(placement)
-    return float(segment["start"])
+    start = segment.get("start")
+    if start is not None:
+        return float(start)
+    return 0.0
 
 
 def segment_subtitle_end(segment: dict) -> float:
@@ -66,7 +135,11 @@ def annotate_subtitle_playback_windows(segments: list[dict[str, Any]]) -> None:
     annotate_segment_mix_caps(entries)
     for entry in entries:
         segment = entry["segment"]
-        effective = effective_clip_duration(entry["clip_duration"], entry.get("max_duration"))
+        effective = effective_clip_duration(
+            entry["clip_duration"],
+            entry.get("max_duration"),
+            allow_hard_clip=False,
+        )
         segment["subtitle_playback_duration"] = round(effective, 3)
 
 
@@ -240,14 +313,32 @@ def _split_on_commas(text: str) -> list[str]:
     return merged
 
 
-def _split_word_chunks(text: str, max_chars: int) -> list[str]:
-    words = text.split()
+def _hard_split_oversized(words: list[str], max_chars: int) -> list[str]:
+    """Character-split any single token longer than max_chars (last-resort hard break)."""
+    limit = max(1, max_chars)
+    expanded: list[str] = []
+    for word in words:
+        if len(word) > limit:
+            expanded.extend(word[i : i + limit] for i in range(0, len(word), limit))
+        else:
+            expanded.append(word)
+    return expanded
+
+
+def _split_word_chunks(text: str, max_chars: int, *, language: str | None = None) -> list[str]:
+    if _is_space_delimited_language(language):
+        words = text.split()
+        joiner = " "
+    else:
+        words = _thai_word_tokens(text)
+        joiner = ""
+    words = _hard_split_oversized(words, max_chars)
     if not words:
         return [text.strip()] if text.strip() else []
     chunks: list[str] = []
     current = ""
     for word in words:
-        candidate = f"{current} {word}".strip() if current else word
+        candidate = f"{current}{joiner}{word}" if current else word
         if len(candidate) <= max_chars:
             current = candidate
             continue
@@ -259,7 +350,12 @@ def _split_word_chunks(text: str, max_chars: int) -> list[str]:
     return chunks
 
 
-def split_for_subtitle_display(text: str) -> list[str]:
+def split_for_subtitle_display(
+    text: str,
+    *,
+    max_chars: int = SUBTITLE_MAX_CHARS_PER_CUE,
+    language: str | None = None,
+) -> list[str]:
     """Split translation into chunks shown one at a time on screen."""
     cleaned = re.sub(r"\s+", " ", (text or "").strip())
     if not cleaned:
@@ -268,14 +364,14 @@ def split_for_subtitle_display(text: str) -> list[str]:
     sentences = split_translation_sentences(cleaned)
     chunks: list[str] = []
     for sentence in sentences:
-        if len(sentence) <= SUBTITLE_MAX_CHARS_PER_CUE:
+        if len(sentence) <= max_chars:
             chunks.append(sentence)
             continue
         comma_parts = _split_on_commas(sentence)
-        if len(comma_parts) > 1:
+        if len(comma_parts) > 1 and all(len(part) <= max_chars for part in comma_parts):
             chunks.extend(comma_parts)
             continue
-        chunks.extend(_split_word_chunks(sentence, SUBTITLE_MAX_CHARS_PER_CUE))
+        chunks.extend(_split_word_chunks(sentence, max_chars, language=language))
 
     if not chunks:
         return [cleaned]
@@ -462,21 +558,10 @@ def resolve_overlapping_cues(cues: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 
 def _resolve_tts_wav(job_dir: Path, segment: dict) -> Path | None:
-    tts_dir = job_dir / "artifacts" / "tts"
-    idx = segment.get("index")
-    if idx is None:
-        return None
-    repaired = tts_dir / f"tts_repaired_{idx}.wav"
-    if repaired.is_file():
-        return repaired
-    for key in ("tts_path", "tts_raw_path"):
-        candidate = segment.get(key)
-        if candidate:
-            path = Path(candidate)
-            if path.is_file():
-                return path
-    fallback = tts_dir / f"tts_{idx}.wav"
-    return fallback if fallback.is_file() else None
+    from .tts_provenance import resolve_voiced_tts_path
+
+    del job_dir
+    return resolve_voiced_tts_path(segment)
 
 
 def _ensure_asr_audio(
@@ -572,6 +657,329 @@ def transcribe_tts_clip_for_subtitles(
     return units
 
 
+def transcribe_tts_clip_details_for_subtitles(
+    wav_path: Path,
+    *,
+    vendor_dir: Path,
+    settings: dict[str, Any],
+    language: str,
+    ffmpeg_path: Path,
+    cache_dir: Path,
+    transcribe_fn: Callable[..., Any],
+) -> dict[str, Any]:
+    """Transcribe a TTS clip once and return units plus raw segment metadata."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cached = _load_cached_units(cache_dir, wav_path)
+    wav_duration = _wav_duration(wav_path)
+    if cached is not None:
+        return {
+            "aligned_units": _clip_aligned_units(cached, max_duration=wav_duration),
+            "segments": [],
+            "from_forced_aligner": True,
+        }
+
+    speech_duration = _detect_wav_speech_duration(wav_path, ffmpeg_path)
+    trim_duration = None
+    if speech_duration is not None and speech_duration < wav_duration * 0.85:
+        trim_duration = speech_duration + 0.05
+
+    prepared = cache_dir / f"{wav_path.stem}_16k.wav"
+    if not prepared.is_file() or prepared.stat().st_mtime < wav_path.stat().st_mtime:
+        _ensure_asr_audio(wav_path, prepared, ffmpeg_path, trim_duration=trim_duration)
+
+    asr_kwargs = {
+        "vendor_dir": vendor_dir,
+        "asr_model": str(settings.get("qwen3_asr_model", "") or ""),
+        "aligner_model": str(settings.get("qwen3_aligner_model", "") or ""),
+        "device": _resolve_asr_device(settings),
+        "language": language,
+        "speaker_diarization": False,
+        "include_alignment": True,
+    }
+    result = transcribe_fn(prepared, **asr_kwargs)
+    units: list[dict[str, Any]] = []
+    segments: list[dict[str, Any]] = []
+    from_forced = False
+    if isinstance(result, dict):
+        forced_units = list(result.get("aligned_units") or [])
+        segments = list(result.get("segments") or [])
+        if forced_units:
+            units = forced_units
+            from_forced = True
+        elif segments:
+            units = [
+                {
+                    "text": str(segment.get("text") or ""),
+                    "start": float(segment.get("start", 0.0) or 0.0),
+                    "end": float(segment.get("end", 0.0) or 0.0),
+                }
+                for segment in segments
+                if str(segment.get("text") or "").strip()
+            ]
+    clip_duration = trim_duration or wav_duration
+    units = _clip_aligned_units(units, max_duration=clip_duration)
+    _store_cached_units(cache_dir, wav_path, units)
+    return {
+        "aligned_units": units,
+        "segments": segments,
+        "from_forced_aligner": from_forced,
+    }
+
+
+def _word_display_text(word: dict[str, Any]) -> str:
+    return str(word.get("text") or "").strip()
+
+
+def _max_chars_per_cue(settings: dict[str, Any] | None) -> int:
+    if settings is None:
+        return SUBTITLE_MAX_CHARS_PER_LINE * SUBTITLE_MAX_LINES
+    return int(subtitle_layout_from_settings(settings)["max_chars_per_cue"])
+
+
+def _split_words_by_pause(words: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    if not words:
+        return []
+    groups: list[list[dict[str, Any]]] = [[words[0]]]
+    for previous, current in zip(words, words[1:], strict=False):
+        gap = float(current.get("absolute_start", current.get("start", 0.0))) - float(
+            previous.get("absolute_end", previous.get("end", 0.0))
+        )
+        if gap >= SUBTITLE_PAUSE_SPLIT_THRESHOLD:
+            groups.append([current])
+        else:
+            groups[-1].append(current)
+    return groups
+
+
+def _split_word_group_by_punctuation(words: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    groups: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for word in words:
+        current.append(word)
+        text = _word_display_text(word)
+        if text and re.search(r"[.!?…。！？;]$", text):
+            groups.append(current)
+            current = []
+    if current:
+        groups.append(current)
+    return groups or [words]
+
+
+def _split_word_group_by_length(
+    words: list[dict[str, Any]],
+    *,
+    max_chars: int,
+    language: str | None = None,
+) -> list[list[dict[str, Any]]]:
+    joiner_width = 1 if _is_space_delimited_language(language) else 0
+    chunks: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_len = 0
+    for word in words:
+        text = _word_display_text(word)
+        projected = current_len + (joiner_width if current else 0) + len(text)
+        if current and projected > max_chars:
+            chunks.append(current)
+            current = [word]
+            current_len = len(text)
+        else:
+            current.append(word)
+            current_len = projected
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _words_to_cue(
+    words: list[dict[str, Any]],
+    *,
+    tail_padding: float,
+    max_cue_duration: float = SUBTITLE_MAX_CUE_DURATION,
+    min_cue_duration: float = SUBTITLE_DUB_MIN_CUE_DURATION,
+    language: str | None = None,
+) -> dict[str, Any] | None:
+    if not words:
+        return None
+    text = _join_display_words([_word_display_text(word) for word in words], language)
+    if not text:
+        return None
+    start = float(words[0].get("absolute_start", words[0].get("start", 0.0)))
+    end = float(words[-1].get("absolute_end", words[-1].get("end", start)))
+    end = min(end + tail_padding, start + max_cue_duration)
+    end = max(start + min_cue_duration, end)
+    return {"start": round(start, 3), "end": round(end, 3), "text": text}
+
+
+def _merge_short_cues(
+    cues: list[dict[str, Any]],
+    *,
+    min_cue_duration: float = SUBTITLE_DUB_MIN_CUE_DURATION,
+    max_cue_duration: float = SUBTITLE_MAX_CUE_DURATION,
+    max_chars: int | None = None,
+    language: str | None = None,
+) -> list[dict[str, Any]]:
+    if len(cues) <= 1:
+        return cues
+    char_limit = max_chars if max_chars is not None else _max_chars_per_cue(None)
+    joiner = " " if _is_space_delimited_language(language) else ""
+    merged: list[dict[str, Any]] = []
+    buffer: dict[str, Any] | None = None
+    for cue in cues:
+        duration = float(cue["end"]) - float(cue["start"])
+        if buffer is None:
+            if duration < min_cue_duration:
+                buffer = dict(cue)
+            else:
+                merged.append(cue)
+            continue
+        combined_text = f"{buffer['text']}{joiner}{cue['text']}".strip()
+        combined_end = float(cue["end"])
+        combined_duration = combined_end - float(buffer["start"])
+        if combined_duration <= max_cue_duration and len(combined_text) <= char_limit:
+            buffer = {
+                "start": buffer["start"],
+                "end": round(combined_end, 3),
+                "text": combined_text,
+            }
+            if combined_duration >= min_cue_duration:
+                merged.append(buffer)
+                buffer = None
+        else:
+            merged.append(buffer)
+            buffer = cue if duration < min_cue_duration else None
+            if buffer is None:
+                merged.append(cue)
+    if buffer is not None:
+        merged.append(buffer)
+    return merged
+
+
+def _merge_orphan_word_cues(
+    cues: list[dict[str, Any]],
+    *,
+    max_chars: int,
+    language: str | None = None,
+) -> list[dict[str, Any]]:
+    """Merge single-word cues into neighbors when they flash too briefly on screen."""
+    if len(cues) < 2:
+        return cues
+
+    joiner = " " if _is_space_delimited_language(language) else ""
+
+    def _word_count(text: str) -> int:
+        return len([part for part in re.split(r"\s+", text.strip()) if part])
+
+    merged: list[dict[str, Any]] = []
+    for cue in cues:
+        text = str(cue.get("text") or "").strip()
+        if not text:
+            continue
+        if merged and _word_count(text) <= 1:
+            previous = merged[-1]
+            combined = f"{previous['text']}{joiner}{text}".strip()
+            if len(combined) <= max_chars:
+                merged[-1] = {
+                    "start": previous["start"],
+                    "end": round(max(float(previous["end"]), float(cue["end"])), 3),
+                    "text": combined,
+                }
+                continue
+        merged.append(dict(cue))
+
+    resolved: list[dict[str, Any]] = []
+    for cue in reversed(merged):
+        text = str(cue.get("text") or "").strip()
+        if resolved and _word_count(text) <= 1:
+            nxt = resolved[-1]
+            combined = f"{text}{joiner}{nxt['text']}".strip()
+            if len(combined) <= max_chars:
+                resolved[-1] = {
+                    "start": round(min(float(cue["start"]), float(nxt["start"])), 3),
+                    "end": nxt["end"],
+                    "text": combined,
+                }
+                continue
+        resolved.append(dict(cue))
+    resolved.reverse()
+    return resolved
+
+
+def resolve_ass_quantized_cues(cues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Prevent ASS centisecond rounding from creating overlapping cues."""
+    if not cues:
+        return []
+    ordered = sorted(cues, key=lambda item: (float(item["start"]), float(item["end"])))
+    resolved: list[dict[str, Any]] = []
+    for cue in ordered:
+        orig_start_cs = max(0, int(round(float(cue["start"]) * 100)))
+        orig_end_cs = max(orig_start_cs + 1, int(round(float(cue["end"]) * 100)))
+        min_duration_cs = max(1, orig_end_cs - orig_start_cs)
+        start_cs = orig_start_cs
+        end_cs = orig_end_cs
+        if resolved:
+            prev_end_cs = max(0, int(round(float(resolved[-1]["end"]) * 100)))
+            if start_cs < prev_end_cs:
+                start_cs = prev_end_cs
+            end_cs = max(end_cs, start_cs + min_duration_cs)
+        resolved.append(
+            {
+                "start": round(start_cs / 100.0, 3),
+                "end": round(end_cs / 100.0, 3),
+                "text": str(cue["text"]),
+            }
+        )
+    return resolved
+
+
+def build_cues_from_dub_words(
+    segment: dict[str, Any],
+    *,
+    settings: dict[str, Any] | None = None,
+    next_segment_start: float | None = None,
+    language: str | None = None,
+) -> list[dict[str, Any]]:
+    """Build subtitle cues from final dub word timestamps."""
+    dub_words = segment.get("dub_words") or []
+    if not dub_words:
+        return []
+    layout = subtitle_layout_from_settings(settings)
+    max_chars = int(layout["max_chars_per_cue"])
+    min_cue = float(layout["min_cue_duration"])
+    max_cue = float(layout["max_cue_duration"])
+    min_gap = float(layout["min_gap"])
+    tail_padding = SUBTITLE_CUE_TAIL_PADDING
+    grouped: list[dict[str, Any]] = []
+    # Prefer sentence/clause punctuation over pause gaps so cues end on ".!?" instead of mid-phrase.
+    for punct_group in _split_word_group_by_punctuation(list(dub_words)):
+        for pause_group in _split_words_by_pause(punct_group):
+            for chunk in _split_word_group_by_length(pause_group, max_chars=max_chars, language=language):
+                cue = _words_to_cue(
+                    chunk,
+                    tail_padding=tail_padding,
+                    max_cue_duration=max_cue,
+                    min_cue_duration=min_cue,
+                    language=language,
+                )
+                if cue is not None:
+                    grouped.append(cue)
+    grouped = _merge_short_cues(
+        grouped,
+        min_cue_duration=min_cue,
+        max_cue_duration=max_cue,
+        max_chars=max_chars,
+        language=language,
+    )
+    grouped = _merge_orphan_word_cues(grouped, max_chars=max_chars, language=language)
+    if next_segment_start is not None:
+        cap = float(next_segment_start) - min_gap
+        for cue in grouped:
+            cue["end"] = min(float(cue["end"]), cap)
+            if float(cue["end"]) <= float(cue["start"]):
+                cue["end"] = min(cap, float(cue["start"]) + min_cue)
+    segment["subtitle_cue_count"] = len(grouped)
+    return grouped
+
+
 def build_segment_subtitle_cues(
     segment: dict[str, Any],
     *,
@@ -581,14 +989,44 @@ def build_segment_subtitle_cues(
     ffmpeg_path: Path | None,
     transcribe_fn: Callable[..., Any] | None,
     tts_asr_align: bool,
+    next_segment_start: float | None = None,
+    target_language: str | None = None,
 ) -> list[dict[str, Any]]:
-    translation = str(segment.get("translation") or "").strip()
+    # Content lineage must match spoken audio (cluster compact/re-TTS updates).
+    translation = str(
+        segment.get("tts_spoken_text")
+        or segment.get("translation")
+        or segment.get("target_text")
+        or ""
+    ).strip()
     if not translation:
         return []
 
-    chunks = split_for_subtitle_display(translation)
+    from .final_dub_alignment import refresh_segment_dub_word_timestamps, segment_has_usable_dub_words
+
+    refresh_segment_dub_word_timestamps(segment)
     window_start = segment_subtitle_start(segment)
     window_end = segment_subtitle_end(segment)
+    if segment_has_usable_dub_words(segment):
+        cues = build_cues_from_dub_words(
+            segment,
+            settings=settings,
+            next_segment_start=next_segment_start,
+            language=target_language,
+        )
+        return _ensure_cues_cover_speech(
+            cues,
+            speech_start=window_start,
+            speech_end=window_end,
+            next_segment_start=next_segment_start,
+        )
+
+    layout = subtitle_layout_from_settings(settings)
+    chunks = split_for_subtitle_display(
+        translation,
+        max_chars=int(layout["max_chars_per_cue"]),
+        language=target_language,
+    )
     wav_path = _resolve_tts_wav(job_dir, segment) if job_dir is not None else None
     speech_start, speech_end = resolve_subtitle_speech_window(
         window_start=window_start,
@@ -648,7 +1086,12 @@ def build_segment_subtitle_cues(
                     window_duration=speech_duration,
                     chunk_count=len(chunks),
                 ):
-                    return normalized
+                    return _ensure_cues_cover_speech(
+                        normalized,
+                        speech_start=speech_start,
+                        speech_end=speech_end,
+                        next_segment_start=next_segment_start,
+                    )
                 logger.info(
                     "Subtitle ASR alignment low quality for segment %s; using proportional timing.",
                     segment.get("index"),
@@ -660,7 +1103,50 @@ def build_segment_subtitle_cues(
                 exc,
             )
 
-    return allocate_proportional_cues(chunks, speech_start, speech_end)
+    cues = allocate_proportional_cues(chunks, speech_start, speech_end)
+    return _ensure_cues_cover_speech(
+        cues,
+        speech_start=speech_start,
+        speech_end=speech_end,
+        next_segment_start=next_segment_start,
+    )
+
+
+def _ensure_cues_cover_speech(
+    cues: list[dict[str, Any]],
+    *,
+    speech_start: float,
+    speech_end: float,
+    next_segment_start: float | None = None,
+    early_slack_sec: float = 0.08,
+    min_gap_sec: float = 0.05,
+) -> list[dict[str, Any]]:
+    """Keep cues near speech; never leave the spoken window without active text.
+
+    ChatGPT TL: may lead audio by 50–100ms and linger slightly past the tail,
+    but must not start after spoken words are already clear, and must not vanish
+    while the clause is still playing.
+    """
+    if not cues:
+        return cues
+    limit = float(speech_end)
+    if next_segment_start is not None:
+        limit = min(limit, float(next_segment_start) - min_gap_sec)
+    first = cues[0]
+    first_start = float(first.get("start") or 0.0)
+    # Pull early start back toward speech onset (allow small lead).
+    target_start = max(0.0, float(speech_start) - early_slack_sec)
+    if first_start > float(speech_start) + 0.12:
+        first["start"] = round(target_start, 3)
+    else:
+        first["start"] = round(min(first_start, float(speech_start)), 3)
+        first["start"] = round(max(float(first["start"]), target_start), 3)
+    # Extend last cue through remaining speech.
+    last = cues[-1]
+    last["end"] = round(max(float(last.get("end") or 0.0), limit), 3)
+    if float(last["end"]) <= float(last.get("start") or 0.0):
+        last["end"] = round(float(last["start"]) + SUBTITLE_MIN_CUE_DURATION, 3)
+    return cues
 
 
 def build_subtitle_cues(
@@ -673,9 +1159,25 @@ def build_subtitle_cues(
     transcribe_fn: Callable[..., Any] | None = None,
     tts_asr_align: bool = False,
 ) -> list[dict[str, Any]]:
+    from .final_dub_alignment import refresh_all_segment_dub_word_timestamps
+
+    target_language: str | None = None
+    if settings is not None:
+        try:
+            from .dubbing_languages import dub_language_from_settings
+
+            target_language = dub_language_from_settings(settings)
+        except Exception:
+            target_language = None
+
+    refresh_all_segment_dub_word_timestamps(segments)
     annotate_subtitle_playback_windows(segments)
+    ordered = sorted(segments, key=lambda item: segment_subtitle_start(item))
     cues: list[dict[str, Any]] = []
-    for segment in segments:
+    for index, segment in enumerate(ordered):
+        next_start = None
+        if index + 1 < len(ordered):
+            next_start = segment_subtitle_start(ordered[index + 1])
         cues.extend(
             build_segment_subtitle_cues(
                 segment,
@@ -685,6 +1187,8 @@ def build_subtitle_cues(
                 ffmpeg_path=ffmpeg_path,
                 transcribe_fn=transcribe_fn,
                 tts_asr_align=tts_asr_align,
+                next_segment_start=next_start,
+                target_language=target_language,
             )
         )
-    return resolve_overlapping_cues(cues)
+    return resolve_ass_quantized_cues(resolve_overlapping_cues(cues))

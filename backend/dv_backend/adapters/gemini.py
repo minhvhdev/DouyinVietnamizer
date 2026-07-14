@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import re
 import urllib.error
 import urllib.request
@@ -210,6 +211,80 @@ class GeminiTranslator:
                 last_error or RuntimeError("Gemini request failed")
             )
 
+        raise AppError(
+            502,
+            ErrorInfo(
+                code=code,
+                message=message,
+                action=action,
+                detail=str(last_error),
+                retryable=True,
+            ),
+        )
+
+    def translate_candidates(
+        self,
+        segments: list[dict[str, Any]],
+        texts: list[str],
+        source: str,
+        target: str,
+        *,
+        timing_profiles: list[dict[str, Any]] | None = None,
+        speaking_rate_wps: float = 3.2,
+        candidate_count: int = 3,
+    ) -> list[list[dict[str, Any]]]:
+        from ..translation_candidate_llm import (
+            build_candidate_items,
+            build_candidate_translation_prompt,
+            parse_candidate_batches_failsoft,
+        )
+
+        if not self.key_pool.keys:
+            raise AppError(
+                400,
+                ErrorInfo(
+                    code="MISSING_GEMINI_API_KEYS",
+                    message="No Gemini API keys are configured.",
+                    action="Add at least one Google AI Studio API key in Settings.",
+                ),
+            )
+
+        profiles = timing_profiles or [{} for _ in texts]
+        items = build_candidate_items(
+            segments,
+            texts,
+            timing_profiles=profiles,
+            speaking_rate_wps=speaking_rate_wps,
+        )
+        prompt = build_candidate_translation_prompt(
+            items,
+            source=source,
+            target=target,
+            candidate_count=candidate_count,
+        )
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"responseMimeType": "application/json", "temperature": 0.3},
+        }
+        last_error: Exception | None = None
+        for index, api_key in self.key_pool.ordered_keys():
+            try:
+                raw = response_text(self.request(api_key, self.model, payload))
+                batches, parse_warning = parse_candidate_batches_failsoft(
+                    raw,
+                    expected_count=len(texts),
+                    fallback_texts=texts,
+                )
+                if parse_warning:
+                    logging.getLogger(__name__).warning("Gemini candidate parse fallback: %s", parse_warning)
+                if not any(batch for batch in batches):
+                    raise ValueError("Gemini returned empty candidate batches.")
+                self.key_pool.mark_success(index)
+                return batches
+            except Exception as cause:
+                last_error = cause
+
+        code, message, action = classify_gemini_failure(last_error or RuntimeError("Gemini request failed"))
         raise AppError(
             502,
             ErrorInfo(
