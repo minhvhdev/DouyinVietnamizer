@@ -229,20 +229,38 @@ class JobRunner:
                         )
                     return
 
-                if e.info.code == "RELEASE_GATE_BLOCKED":
+                if e.info.code in {
+                    "RELEASE_GATE_BLOCKED",
+                    "TIMING_REVIEW_REQUIRED",
+                    "TIMING_PLACEMENT_GATE_BLOCKED",
+                }:
                     now_end = utc_now()
+                    # duration_repair already wrote a valid checkpoint before TIMING_REVIEW_REQUIRED;
+                    # mark that step completed so resume after user edits can continue forward.
+                    step_status = (
+                        "completed" if e.info.code == "TIMING_REVIEW_REQUIRED" and step_name == "duration_repair" else "pending"
+                    )
                     with self.database.connection:
-                        # Keep this step pending so the operator can fix flagged segments and
-                        # resume; the gate is re-evaluated on the next run.
-                        self.database.connection.execute(
-                            """
-                            UPDATE job_steps
-                            SET status = 'pending', started_at = NULL, completed_at = NULL,
-                                duration_ms = NULL, error_code = ?, error_message = ?
-                            WHERE job_id = ? AND name = ?
-                            """,
-                            (e.info.code, e.info.message, job_id, step_name),
-                        )
+                        if step_status == "completed":
+                            self.database.connection.execute(
+                                """
+                                UPDATE job_steps
+                                SET status = 'completed', completed_at = ?,
+                                    duration_ms = NULL, error_code = ?, error_message = ?
+                                WHERE job_id = ? AND name = ?
+                                """,
+                                (now_end, e.info.code, e.info.message, job_id, step_name),
+                            )
+                        else:
+                            self.database.connection.execute(
+                                """
+                                UPDATE job_steps
+                                SET status = 'pending', started_at = NULL, completed_at = NULL,
+                                    duration_ms = NULL, error_code = ?, error_message = ?
+                                WHERE job_id = ? AND name = ?
+                                """,
+                                (e.info.code, e.info.message, job_id, step_name),
+                            )
                         self.database.connection.execute(
                             "UPDATE jobs SET status = 'needs_review', current_step = ?, last_error_code = ?, last_error_message = ?, updated_at = ? WHERE id = ?",
                             (step_name, e.info.code, e.info.message, now_end, job_id),

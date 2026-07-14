@@ -66,9 +66,44 @@ export type OutputItem = {
   file_size: number;
 };
 
-export type JobFolder = {
-  path: string;
-  exists: boolean;
+export type TimingReviewSegment = {
+  index: number;
+  start?: number;
+  end?: number;
+  source_text?: string;
+  spoken_text: string;
+  plan_version?: number;
+  timing_status?: string;
+  timing_review_reason?: string;
+  required_speed?: number;
+  max_allowed_speed?: number;
+  overflow_seconds?: number;
+  estimated_words_to_remove?: number;
+  estimated_words_to_remove_min?: number;
+  estimated_words_to_remove_max?: number;
+  timing_available_duration?: number;
+  repaired_duration?: number;
+  release_blocking?: boolean;
+};
+
+export type TimingReviewPayload = {
+  job_id: string;
+  source_step: string;
+  segments: TimingReviewSegment[];
+  remaining_count: number;
+  release_eligible: boolean;
+  max_speed: number;
+  pace_policy?: string;
+};
+
+export type TimingReviewSubmitResult = {
+  status: string;
+  edited_indices: number[];
+  remaining_count: number;
+  overlap_count: number;
+  release_eligible: boolean;
+  segments: TimingReviewSegment[];
+  detail?: string | null;
 };
 
 export type JobsApi = {
@@ -105,6 +140,12 @@ export type JobsApi = {
   redubJob(jobId: string): Promise<{ status: string; job: Job }>;
   getJobFiles(jobId: string): Promise<any[]>;
   getJobFolder(jobId: string): Promise<JobFolder>;
+  getTimingReview(jobId: string): Promise<TimingReviewPayload>;
+  submitTimingReview(
+    jobId: string,
+    edits: Array<{ index: number; spoken_text: string; expected_plan_version?: number }>,
+    resumePipeline?: boolean,
+  ): Promise<TimingReviewSubmitResult>;
   detectHardware(): Promise<{ cuda_supported: boolean; vulkan_supported: boolean; avx2_supported: boolean; espeak_installed: boolean; recommendation: string }>;
   bootstrapVendor(profile: string): Promise<{ status: string }>;
   bootstrapProgress(): Promise<{

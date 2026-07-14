@@ -883,6 +883,11 @@ def test_duration_repair_lengthens_when_gap_exceeds_one_second(
     test_env,
 ):
     config, database, _job_service, runner = test_env
+    with database.connection:
+        database.connection.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("allow_spoken_text_mutation", json.dumps(True), "now"),
+        )
     mock_resolve.return_value = Path("dummy-ffmpeg")
     save_checkpoint(config.data_dir, "job-long-gap", "tts", {
         "segments": [
@@ -932,6 +937,10 @@ def test_duration_repair_applies_global_speed_after_lengthen(
         database.connection.execute(
             "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
             ("tts_global_speed", json.dumps(2.5), "now"),
+        )
+        database.connection.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("allow_spoken_text_mutation", json.dumps(True), "now"),
         )
     mock_resolve.return_value = Path("dummy-ffmpeg")
     save_checkpoint(config.data_dir, "job-global-speed", "tts", {
@@ -1116,18 +1125,21 @@ def test_extract_audio_creates_background_stems_for_background_only_mix(
     assert any(str(artifacts_dir / "bgm_16k.wav") == str(cmd[-1]) for cmd in commands)
 
 
+@patch("dv_backend.pipeline.get_video_stream_duration", return_value=5.0)
 @patch("dv_backend.pipeline.resolve_tool_path")
 @patch("dv_backend.pipeline.run_subprocess_with_cancel")
 def test_mix_lazy_mix_resamples_raw_tts_in_filtergraph(
-    mock_run, mock_resolve, test_env
+    mock_run, mock_resolve, _mock_video_dur, test_env
 ):
     config, database, _job_service, runner = test_env
     mock_resolve.return_value = Path("ffmpeg")
     job_id = "job-lazy-mix"
     artifacts_dir = config.data_dir / "jobs" / job_id / "artifacts"
     original = artifacts_dir / "original_48k.wav"
+    original_mp4 = artifacts_dir / "original.mp4"
     raw = artifacts_dir / "tts" / "tts_raw_0.wav"
     write_dummy_wav(original)
+    original_mp4.write_bytes(b"mp4")
     write_dummy_wav(raw, duration=1.0, sample_rate=24000, channels=1)
     save_checkpoint(config.data_dir, job_id, "extract_audio", {"original_48k_path": str(original)})
     save_checkpoint(
@@ -1154,10 +1166,11 @@ def test_mix_lazy_mix_resamples_raw_tts_in_filtergraph(
     assert result["narration_segment_input_count"] == 1
 
 
+@patch("dv_backend.pipeline.get_video_stream_duration", return_value=5.0)
 @patch("dv_backend.pipeline.resolve_tool_path")
 @patch("dv_backend.pipeline.run_subprocess_with_cancel")
 def test_mix_uses_background_stem_and_normalizes_levels(
-    mock_run, mock_resolve, test_env
+    mock_run, mock_resolve, _mock_video_dur, test_env
 ):
     config, database, _job_service, runner = test_env
     mock_resolve.return_value = Path("ffmpeg")
@@ -1167,6 +1180,7 @@ def test_mix_uses_background_stem_and_normalizes_levels(
     bgm = artifacts_dir / "bgm.wav"
     narration_segment = artifacts_dir / "tts" / "tts_repaired_0.wav"
     write_dummy_wav(original)
+    (artifacts_dir / "original.mp4").write_bytes(b"mp4")
     write_dummy_wav(bgm)
     write_dummy_wav(narration_segment, duration=1.0)
     save_checkpoint(
@@ -1197,13 +1211,17 @@ def test_mix_uses_background_stem_and_normalizes_levels(
     assert "sidechaincompress" not in filter_graph
     assert "loudnorm=I=-24" in filter_graph
     assert "loudnorm=I=-16" in filter_graph
+    assert "apad,atrim=0:5.000000" in filter_graph
+    assert result["target_video_duration_sec"] == 5.0
 
 
+@patch("dv_backend.pipeline.get_video_stream_duration", return_value=5.0)
 @patch("dv_backend.pipeline.resolve_tool_path")
 @patch("dv_backend.pipeline.run_subprocess_with_cancel")
 def test_mix_legacy_separate_setting_uses_background_only(
     mock_run,
     mock_resolve,
+    _mock_video_dur,
     test_env,
 ):
     config, database, _job_service, runner = test_env
@@ -1214,6 +1232,7 @@ def test_mix_legacy_separate_setting_uses_background_only(
     bgm = artifacts_dir / "bgm.wav"
     narration_segment = artifacts_dir / "tts" / "tts_repaired_0.wav"
     write_dummy_wav(original)
+    (artifacts_dir / "original.mp4").write_bytes(b"mp4")
     write_dummy_wav(bgm)
     write_dummy_wav(narration_segment, duration=1.0)
     with database.connection:
@@ -1251,11 +1270,13 @@ def test_mix_legacy_separate_setting_uses_background_only(
     assert str(bgm) in mix_cmd
 
 
+@patch("dv_backend.pipeline.get_video_stream_duration", return_value=5.0)
 @patch("dv_backend.pipeline.resolve_tool_path")
 @patch("dv_backend.pipeline.run_subprocess_with_cancel")
 def test_mix_falls_back_to_ducking_without_background_stem(
     mock_run,
     mock_resolve,
+    _mock_video_dur,
     test_env,
 ):
     config, database, _job_service, runner = test_env
@@ -1265,6 +1286,7 @@ def test_mix_falls_back_to_ducking_without_background_stem(
     original = artifacts_dir / "original_48k.wav"
     narration_segment = artifacts_dir / "tts" / "tts_repaired_0.wav"
     write_dummy_wav(original)
+    (artifacts_dir / "original.mp4").write_bytes(b"mp4")
     write_dummy_wav(narration_segment, duration=1.0)
 
     save_checkpoint(
@@ -1293,12 +1315,14 @@ def test_mix_falls_back_to_ducking_without_background_stem(
     assert result["mix_mode"] == "duck"
     assert "sidechaincompress" in filter_graph
     assert str(original) in mix_cmd
+    assert "apad,atrim=0:5.000000" in filter_graph
 
 
+@patch("dv_backend.pipeline.get_video_stream_duration", return_value=5.0)
 @patch("dv_backend.pipeline.resolve_tool_path")
 @patch("dv_backend.pipeline.run_subprocess_with_cancel")
 def test_mix_saves_vietnamese_narration_as_debug_output(
-    mock_run, mock_resolve, test_env
+    mock_run, mock_resolve, _mock_video_dur, test_env
 ):
     config, database, _job_service, runner = test_env
     mock_resolve.return_value = Path("ffmpeg")
@@ -1307,6 +1331,7 @@ def test_mix_saves_vietnamese_narration_as_debug_output(
     original = artifacts_dir / "original_48k.wav"
     narration_segment = artifacts_dir / "tts" / "tts_repaired_0.wav"
     write_dummy_wav(original)
+    (artifacts_dir / "original.mp4").write_bytes(b"mp4")
     write_dummy_wav(narration_segment, duration=1.0)
     save_checkpoint(
         config.data_dir,
@@ -1445,7 +1470,9 @@ def test_render_step_burns_subtitles_when_enabled(
 @patch("dv_backend.pipeline.transcribe_audio")
 @patch("dv_backend.pipeline.GoogleFreeTranslator")
 @patch("dv_backend.pipeline.create_tts_adapter")
+@patch("dv_backend.pipeline.get_video_stream_duration", return_value=5.0)
 def test_full_runner_execution_and_resume(
+    _mock_video_dur,
     tts_factory,
     translator_type,
     mock_transcribe,

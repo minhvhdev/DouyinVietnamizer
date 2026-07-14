@@ -25,6 +25,7 @@ DEFAULT_SPEED = 1.0
 DEFAULT_FLUSH_MS = 150
 DEFAULT_MAX_BATCH = 4
 DEFAULT_SYNTHESIS_TIMEOUT_SEC = 300.0
+DEFAULT_INCOMPLETE_BATCH_TIMEOUT_SEC = 30.0
 
 
 def _log(message: str) -> None:
@@ -116,7 +117,8 @@ class OmniVoiceEngine:
         language_id: str | None,
         audio_chunk_threshold: float = 30.0,
         audio_chunk_duration: float = 15.0,
-    ) -> tuple[float, int]:
+        include_perf: bool = False,
+    ) -> tuple[float, int, dict[str, Any] | None]:
         if self._model is None:
             raise RuntimeError("OmniVoice engine is not initialized.")
 
@@ -124,6 +126,8 @@ class OmniVoiceEngine:
         from omnivoice import OmniVoiceGenerationConfig
 
         _ = ref_text
+        started = time.perf_counter()
+        perf: dict[str, Any] = {}
         plan = plan_official_omnivoice_call(
             text=text,
             speed=speed,
@@ -149,24 +153,35 @@ class OmniVoiceEngine:
 
         clone_ref_audio = plan.pop("ref_audio", None)
         clone_ref_text = plan.pop("ref_text", None)
+        clone_started = time.perf_counter()
         if clone_ref_audio:
             generate_kwargs["voice_clone_prompt"] = self._clone_prompt(
                 ref_audio=clone_ref_audio,
                 ref_text=clone_ref_text or "",
                 preprocess_prompt=generation_config.preprocess_prompt,
             )
+        if include_perf:
+            perf["clone_prompt_ms"] = round((time.perf_counter() - clone_started) * 1000, 2)
 
         _log(
             f"Synthesize clone={bool(clone_ref_audio)} design={bool(generate_kwargs.get('instruct'))} "
             f"steps={generation_config.num_step} speed={generate_kwargs.get('speed', 1.0)}"
         )
+        model_started = time.perf_counter()
         samples = self._model.generate(**generate_kwargs)[0]
+        if include_perf:
+            perf["model_synthesis_ms"] = round((time.perf_counter() - model_started) * 1000, 2)
         if samples is None or len(samples) == 0:
             raise RuntimeError("OmniVoice returned no audio.")
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
+        encode_started = time.perf_counter()
         sf.write(str(out), samples, OMNIVOICE_DEFAULT_SAMPLE_RATE)
-        return _wav_duration(output_path)
+        if include_perf:
+            perf["encode_ms"] = round((time.perf_counter() - encode_started) * 1000, 2)
+            perf["total_worker_ms"] = round((time.perf_counter() - started) * 1000, 2)
+        duration, sample_rate = _wav_duration(output_path)
+        return duration, sample_rate, perf if include_perf else None
 
     def release(self) -> None:
         self._model = None
@@ -186,9 +201,11 @@ class OmniVoiceEngine:
 
 
 def _iter_batch(engine: OmniVoiceEngine, batch: list[dict[str, Any]]):
+    batch_size = len(batch)
     for req in batch:
         try:
-            duration, sample_rate = engine.synthesize(
+            include_perf = bool(req.get("include_perf"))
+            duration, sample_rate, perf = engine.synthesize(
                 _sanitize_text(req["text"]),
                 req["output_path"],
                 ref_audio=req.get("ref_audio"),
@@ -200,6 +217,7 @@ def _iter_batch(engine: OmniVoiceEngine, batch: list[dict[str, Any]]):
                 language_id=req.get("language_id"),
                 audio_chunk_threshold=float(req.get("audio_chunk_threshold") or 30.0),
                 audio_chunk_duration=float(req.get("audio_chunk_duration") or 15.0),
+                include_perf=include_perf,
             )
         except ValueError as exc:
             _log(f"Synthesize rejected: {exc!r}")
@@ -222,13 +240,21 @@ def _iter_batch(engine: OmniVoiceEngine, batch: list[dict[str, Any]]):
                 "retryable": True,
             }
             continue
-        yield {
+        response = {
             "id": req.get("id"),
             "ok": True,
             "output_path": req["output_path"],
             "duration_sec": round(duration, 3),
             "sample_rate": sample_rate,
         }
+        if include_perf and perf is not None:
+            response["perf"] = {
+                **perf,
+                "worker_batch_size": batch_size,
+                "flush_reason": req.get("_flush_reason"),
+                "queue_wait_ms": req.get("_queue_wait_ms"),
+            }
+        yield response
 
 
 def _read_request(line: str) -> dict[str, Any] | None:
@@ -253,23 +279,95 @@ def _sanitize_synthesize_request(request: dict[str, Any]) -> dict[str, Any]:
     return request
 
 
-def _run_group(engine: OmniVoiceEngine, batch: list[dict[str, Any]]) -> None:
+def _annotate_batch_timing(batch: list[dict[str, Any]], *, flush_reason: str) -> None:
+    processed_at = time.perf_counter()
+    for request in batch:
+        received_at = float(request.get("_received_at") or processed_at)
+        request["_flush_reason"] = flush_reason
+        request["_queue_wait_ms"] = round(max(0.0, (processed_at - received_at) * 1000.0), 2)
+
+
+def _collect_synthesize_batch(
+    messages: queue.Queue,
+    first_request: dict[str, Any],
+    *,
+    max_batch: int,
+    flush_sec: float,
+    incomplete_batch_timeout_sec: float = DEFAULT_INCOMPLETE_BATCH_TIMEOUT_SEC,
+) -> tuple[list[dict[str, Any]], str, dict[str, Any] | None]:
+    """Collect synthesize requests. Returns (batch, flush_reason, deferred_request)."""
+    first_request["_received_at"] = time.perf_counter()
+    batch = [first_request]
+    batch_id = first_request.get("batch_id")
+    expected_size_raw = first_request.get("batch_size")
+
+    if batch_id is not None and expected_size_raw is not None:
+        expected_size = max(1, int(expected_size_raw))
+        if expected_size == 1:
+            return batch, "explicit_batch_complete", None
+        deadline = time.perf_counter() + max(0.1, float(incomplete_batch_timeout_sec))
+        while len(batch) < expected_size:
+            timeout = max(0.0, deadline - time.perf_counter())
+            try:
+                next_request = messages.get(timeout=timeout)
+            except queue.Empty:
+                return batch, "batch_incomplete_timeout", None
+            if next_request is None:
+                return batch, "shutdown_or_eof", None
+            next_request["_received_at"] = time.perf_counter()
+            next_op = next_request.get("op") or "synthesize"
+            if next_op != "synthesize":
+                return batch, "explicit_batch_complete", next_request
+            if str(next_request.get("batch_id")) != str(batch_id):
+                return batch, "explicit_batch_complete", next_request
+            batch.append(next_request)
+        return batch, "explicit_batch_complete", None
+
+    deadline = time.perf_counter() + flush_sec
+    while len(batch) < max_batch:
+        timeout = max(0.0, deadline - time.perf_counter())
+        if flush_sec <= 0.0:
+            break
+        try:
+            next_request = messages.get(timeout=timeout)
+        except queue.Empty:
+            return batch, "flush_timeout", None
+        if next_request is None:
+            return batch, "shutdown_or_eof", None
+        next_request["_received_at"] = time.perf_counter()
+        next_op = next_request.get("op") or "synthesize"
+        if next_op == "synthesize":
+            batch.append(next_request)
+            continue
+        flush_reason = "max_batch_reached" if len(batch) >= max_batch else "flush_timeout"
+        return batch, flush_reason, next_request
+    flush_reason = "max_batch_reached" if len(batch) >= max_batch else "flush_timeout"
+    return batch, flush_reason, None
+
+
+def _run_group(engine: OmniVoiceEngine, batch: list[dict[str, Any]], *, flush_reason: str) -> None:
     if not batch:
         return
+    _annotate_batch_timing(batch, flush_reason=flush_reason)
     model, device = _batch_key(batch[0])
-    _log(f"Handling synthesize batch size={len(batch)} model={model} device={device}")
+    _log(f"Handling synthesize batch size={len(batch)} model={model} device={device} flush={flush_reason}")
     engine.get(model=model, device=device)
     for response in _iter_batch(engine, batch):
         _emit(response)
 
 
-def _run_synthesize_batch(engine: OmniVoiceEngine, batch: list[dict[str, Any]]) -> None:
+def _run_synthesize_batch(
+    engine: OmniVoiceEngine,
+    batch: list[dict[str, Any]],
+    *,
+    flush_reason: str,
+) -> None:
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for request in batch:
         request = _sanitize_synthesize_request(request)
         groups.setdefault(_batch_key(request), []).append(request)
     for group in groups.values():
-        _run_group(engine, group)
+        _run_group(engine, group, flush_reason=flush_reason)
 
 
 def serve(*, max_batch: int = DEFAULT_MAX_BATCH, flush_ms: int = DEFAULT_FLUSH_MS, idle_timeout_sec: float = 0.0) -> int:
@@ -321,36 +419,39 @@ def serve(*, max_batch: int = DEFAULT_MAX_BATCH, flush_ms: int = DEFAULT_FLUSH_M
                 _emit_unknown(request, op)
                 continue
 
-            batch = [request]
-            deadline = time.perf_counter() + flush_sec
-            while len(batch) < max_batch:
-                timeout = max(0.0, deadline - time.perf_counter())
-                if flush_sec <= 0.0 and batch:
-                    break
-                try:
-                    next_request = messages.get(timeout=timeout)
-                except queue.Empty:
-                    break
-                if next_request is None:
-                    _run_synthesize_batch(engine, batch)
+            deferred: dict[str, Any] | None = None
+            while True:
+                batch, flush_reason, deferred = _collect_synthesize_batch(
+                    messages,
+                    request,
+                    max_batch=max_batch,
+                    flush_sec=flush_sec,
+                )
+                if batch:
+                    _run_synthesize_batch(engine, batch, flush_reason=flush_reason)
+                if flush_reason == "shutdown_or_eof":
                     _log("Worker stdin closed")
                     return 0
-                next_op = next_request.get("op") or "synthesize"
-                if next_op == "synthesize":
-                    batch.append(next_request)
-                    continue
-                _run_synthesize_batch(engine, batch)
-                batch = []
-                if next_op == "shutdown":
+                if deferred is None:
+                    break
+                if deferred.get("op") == "shutdown":
                     _log("Worker shutdown requested")
                     return 0
-                if next_op == "ping":
-                    _emit({"id": next_request.get("id"), "ok": True, "pong": True})
-                else:
-                    _emit_unknown(next_request, next_op)
-                break
-            if batch:
-                _run_synthesize_batch(engine, batch)
+                if deferred.get("op") == "ping":
+                    _emit({"id": deferred.get("id"), "ok": True, "pong": True})
+                    request = messages.get()
+                    if request is None:
+                        _log("Worker stdin closed")
+                        return 0
+                    continue
+                request = deferred
+                if (request.get("op") or "synthesize") != "synthesize":
+                    _emit_unknown(request, str(request.get("op") or "unknown"))
+                    request = messages.get()
+                    if request is None:
+                        _log("Worker stdin closed")
+                        return 0
+                    continue
     finally:
         engine.release()
 

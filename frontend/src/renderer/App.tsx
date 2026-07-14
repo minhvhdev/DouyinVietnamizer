@@ -30,7 +30,7 @@ import {
   Server,
 } from "lucide-react";
 
-import type { ClonedVoice, Job, JobsApi, OutputItem, ReleaseVramResult, RuntimeCheck, RuntimeReport, VoiceCalibrationStatus } from "../shared/contracts";
+import type { ClonedVoice, Job, JobsApi, OutputItem, ReleaseVramResult, RuntimeCheck, RuntimeReport, TimingReviewPayload, VoiceCalibrationStatus } from "../shared/contracts";
 import { api as defaultApi } from "../shared/api";
 import { invokeOpenFolder, invokeRestart, probeBackendHealth, subscribeBackendEvents, waitForBackend, type BackendConnectionState, type BackendStatus, BACKEND_BASE } from "../lib/tauri-bridge";
 import "./styles.css";
@@ -297,6 +297,7 @@ const translateJobStatus = (status: string) => {
     case "completed": return "đã hoàn thành";
     case "failed": return "thất bại";
     case "interrupted": return "bị gián đoạn";
+    case "needs_review": return "cần chỉnh TTS";
     default: return status.replaceAll("_", " ");
   }
 };
@@ -588,6 +589,12 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
   const [drawerTab, setDrawerTab] = useState<"steps" | "segments" | "files">("steps");
   const [durationRepairCp, setDurationRepairCp] = useState<any | null>(null);
+  const [timingReview, setTimingReview] = useState<TimingReviewPayload | null>(null);
+  const [timingReviewDrafts, setTimingReviewDrafts] = useState<Record<number, string>>({});
+  const [timingReviewSubmitting, setTimingReviewSubmitting] = useState(false);
+  const [timingReviewMessage, setTimingReviewMessage] = useState<string | null>(null);
+  /** Per-segment audio cache-bust; only bump after successful re-TTS so typing does not reload WAVs. */
+  const [timingReviewAudioBust, setTimingReviewAudioBust] = useState<Record<number, number>>({});
   const [jobFiles, setJobFiles] = useState<any[]>([]);
   const [rerunModalOpen, setRerunModalOpen] = useState(false);
   const [rerunKeepSteps, setRerunKeepSteps] = useState<string[]>([]);
@@ -847,9 +854,11 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     // Poll every 2s for responsiveness, but throttle expensive fetches while idle.
     const interval = setInterval(() => {
       const now = Date.now();
-      const hasActiveJobs = jobsRef.current.some((job) =>
-        !["done", "failed", "cancelled"].includes(String(job.status || "").toLowerCase()),
-      );
+      const hasActiveJobs = jobsRef.current.some((job) => {
+        const status = String(job.status || "").toLowerCase();
+        // needs_review is interactive editing — treat as idle for heavy refresh.
+        return !["done", "failed", "cancelled", "needs_review"].includes(status);
+      });
       if (!hasActiveJobs && now - lastJobsPollAtRef.current < 8_000) {
         return;
       }
@@ -860,7 +869,16 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
           const updated = newJobs.find((j) => j.id === selectedJobId);
           if (updated && now - lastJobDetailsRefreshAtRef.current >= 4_000) {
             lastJobDetailsRefreshAtRef.current = now;
+            const previousStatus = String(
+              jobsRef.current.find((job) => job.id === selectedJobId)?.status || selectedJob?.status || "",
+            ).toLowerCase();
+            const nextStatus = String(updated.status || "").toLowerCase();
             setSelectedJob(updated);
+            // Stay on needs_review: update job row only; do not refetch checkpoints/files
+            // (avoids WAV reload + draft overwrite while the user is editing).
+            if (previousStatus === "needs_review" && nextStatus === "needs_review") {
+              return;
+            }
             if (updated.status === "waiting_for_selection" || updated.current_step === "download") {
               fetchResolveCheckpoint(updated.id);
             }
@@ -1181,7 +1199,8 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     }
   }
 
-  async function fetchJobCheckpoints(jobId: string) {
+  async function fetchJobCheckpoints(jobId: string, options?: { resetDrafts?: boolean }) {
+    const resetDrafts = options?.resetDrafts === true;
     try {
       const cp = await api.getCheckpoint(jobId, "duration_repair");
       setDurationRepairCp(cp);
@@ -1191,7 +1210,124 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
         setDurationRepairCp(cp);
       } catch {
         setDurationRepairCp(null);
+        setTimingReview(null);
+        setTimingReviewDrafts({});
+        setTimingReviewMessage(null);
       }
+    }
+    try {
+      const review = await api.getTimingReview(jobId);
+      setTimingReview(review);
+      setTimingReviewDrafts((prev) => {
+        const nextIndices = new Set(review.segments.map((row) => row.index));
+        const prevIndices = Object.keys(prev)
+          .map((key) => Number(key))
+          .filter((index) => Number.isFinite(index));
+        const sameSet =
+          prevIndices.length === nextIndices.size &&
+          prevIndices.every((index) => nextIndices.has(index));
+        if (!resetDrafts && sameSet && prevIndices.length > 0) {
+          const kept: Record<number, string> = {};
+          for (const index of nextIndices) {
+            kept[index] = prev[index] ?? review.segments.find((row) => row.index === index)?.spoken_text ?? "";
+          }
+          return kept;
+        }
+        const drafts: Record<number, string> = {};
+        for (const row of review.segments) {
+          drafts[row.index] = row.spoken_text;
+        }
+        return drafts;
+      });
+      setTimingReviewMessage(
+        review.remaining_count > 0
+          ? `${review.remaining_count} đoạn cần rút gọn (max ${review.max_speed.toFixed(2)}×).`
+          : null,
+      );
+    } catch {
+      setTimingReview(null);
+      setTimingReviewDrafts({});
+      setTimingReviewMessage(null);
+    }
+  }
+
+  async function submitTimingReviewEdits() {
+    if (!selectedJob || !timingReview) return;
+    const edits = timingReview.segments
+      .map((row) => {
+        const spoken_text = (timingReviewDrafts[row.index] ?? row.spoken_text).trim();
+        const original = String(row.spoken_text || "").trim();
+        return {
+          index: row.index,
+          spoken_text,
+          expected_plan_version: row.plan_version ?? 1,
+          changed: spoken_text.length > 0 && spoken_text !== original,
+        };
+      })
+      .filter((row) => row.changed)
+      .map(({ index, spoken_text, expected_plan_version }) => ({
+        index,
+        spoken_text,
+        expected_plan_version,
+      }));
+    if (edits.length === 0) {
+      setTimingReviewMessage("Bạn chưa đổi text đoạn nào (hoặc text trùng bản cũ). Hãy rút gọn rồi gửi lại.");
+      return;
+    }
+    setTimingReviewSubmitting(true);
+    setTimingReviewMessage(`Đang re-TTS ${edits.length} đoạn đã sửa…`);
+    try {
+      const result = await api.submitTimingReview(selectedJob.id, edits, true);
+      const edited = result.edited_indices ?? [];
+      if (edited.length > 0) {
+        setTimingReviewAudioBust((prev) => {
+          const next = { ...prev };
+          for (const index of edited) {
+            next[index] = (next[index] ?? 0) + 1;
+          }
+          return next;
+        });
+      }
+      if (result.release_eligible) {
+        setTimingReviewMessage(
+          edited.length > 0
+            ? `Đã re-TTS ${edited.length} đoạn. Timing đạt — hệ thống đang render lại…`
+            : "Đã đạt timing. Hệ thống đang render lại từ căn chỉnh…",
+        );
+        setTimingReview({ ...timingReview, segments: [], remaining_count: 0, release_eligible: true });
+        await refreshJobs();
+      } else {
+        setTimingReview({
+          ...timingReview,
+          segments: result.segments,
+          remaining_count: result.remaining_count,
+          release_eligible: false,
+        });
+        const drafts: Record<number, string> = {};
+        for (const row of result.segments) {
+          drafts[row.index] = row.spoken_text;
+        }
+        setTimingReviewDrafts(drafts);
+        if (edited.length === 0) {
+          setTimingReviewMessage(
+            "Backend không áp dụng thay đổi text (trùng bản cũ). Hãy rút gọn rõ hơn rồi gửi lại.",
+          );
+        } else if (result.remaining_count > 0) {
+          setTimingReviewMessage(
+            `Đã re-TTS ${edited.length} đoạn. Vẫn còn ${result.remaining_count} đoạn chưa vừa — tiếp tục rút gọn.`,
+          );
+        } else {
+          setTimingReviewMessage(
+            `Đã re-TTS ${edited.length} đoạn. Còn ${result.overlap_count} overlap cần xử lý.`,
+          );
+        }
+        await refreshJobs();
+      }
+      await fetchJobCheckpoints(selectedJob.id, { resetDrafts: true });
+    } catch (cause) {
+      setTimingReviewMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setTimingReviewSubmitting(false);
     }
   }
 
@@ -1338,6 +1474,10 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     setSelectedJob(job);
     setResolveCp(null);
     setDurationRepairCp(null);
+    setTimingReview(null);
+    setTimingReviewDrafts({});
+    setTimingReviewAudioBust({});
+    setTimingReviewMessage(null);
     setJobFiles([]);
     setDrawerTab("steps");
     fetchResolveCheckpoint(job.id);
@@ -1350,6 +1490,10 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     setSelectedJob(null);
     setResolveCp(null);
     setDurationRepairCp(null);
+    setTimingReview(null);
+    setTimingReviewDrafts({});
+    setTimingReviewAudioBust({});
+    setTimingReviewMessage(null);
     setJobFiles([]);
     closeRerunModal();
   }
@@ -3533,9 +3677,9 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
               >
                 <FolderOpen size={16} /> Mở thư mục
               </button>
-              {(selectedJob.status === "queued" || selectedJob.status === "failed" || selectedJob.status === "interrupted") && (
+              {(selectedJob.status === "queued" || selectedJob.status === "failed" || selectedJob.status === "interrupted" || selectedJob.status === "needs_review") && (
                 <button className="smoke-button" style={{ minWidth: 0, whiteSpace: "nowrap" }} onClick={() => startJob(selectedJob.id)}>
-                  <RefreshCw size={16} /> {selectedJob.status === "queued" ? "Bắt đầu lồng tiếng" : "Tiếp tục lồng tiếng"}
+                  <RefreshCw size={16} /> {selectedJob.status === "queued" ? "Bắt đầu lồng tiếng" : selectedJob.status === "needs_review" ? "Thử tiếp tục pipeline" : "Tiếp tục lồng tiếng"}
                 </button>
               )}
               {(selectedJob.status === "completed" || selectedJob.status === "failed" || selectedJob.status === "interrupted") && (
@@ -3676,6 +3820,115 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                     </button>
                   ))}
                 </div>
+              </div>
+            )}
+
+            {(selectedJob.status === "needs_review" || (timingReview && timingReview.remaining_count > 0)) && (
+              <div
+                style={{
+                  background: "#241c14",
+                  border: "1px solid #6b4a24",
+                  borderRadius: "12px",
+                  padding: "16px",
+                  margin: "12px 0",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "12px",
+                }}
+              >
+                <div>
+                  <h3 style={{ margin: 0, fontSize: "15px", color: "#ffb347" }}>Cần chỉnh TTS — đoạn quá dài</h3>
+                  <p style={{ margin: "6px 0 0", fontSize: "13px", color: "#c4b39a", lineHeight: 1.45 }}>
+                    Hệ thống đã đạt tốc độ tối đa {timingReview?.max_speed?.toFixed(2) ?? "1.20"}×. Hãy rút gọn text các đoạn bên dưới,
+                    rồi gửi — chỉ re-TTS các đoạn bạn sửa.
+                  </p>
+                  {timingReviewMessage && (
+                    <p style={{ margin: "8px 0 0", fontSize: "12px", color: "#ffd7a1" }}>{timingReviewMessage}</p>
+                  )}
+                </div>
+                <div style={{ display: "grid", gap: "10px", maxHeight: "360px", overflowY: "auto" }}>
+                  {(timingReview?.segments ?? []).map((row) => {
+                    const overflowSec = Number(row.overflow_seconds ?? 0);
+                    const durationSec = Number(row.repaired_duration ?? 0);
+                    const availableSec = Number(row.timing_available_duration ?? 0);
+                    const fitsWindow =
+                      durationSec > 0 && availableSec > 0 && durationSec <= availableSec + 0.15;
+                    const minW = row.estimated_words_to_remove_min ?? row.estimated_words_to_remove ?? 0;
+                    const maxW = row.estimated_words_to_remove_max ?? row.estimated_words_to_remove ?? minW;
+                    if (fitsWindow || overflowSec <= 0.15) {
+                      return null;
+                    }
+                    return (
+                      <div
+                        key={row.index}
+                        style={{
+                          background: "#12151c",
+                          border: "1px solid #3a2f22",
+                          borderRadius: "10px",
+                          padding: "12px",
+                          display: "grid",
+                          gap: "8px",
+                        }}
+                      >
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: "8px" }}>
+                          <strong style={{ fontSize: "13px", color: "#fff" }}>Phân đoạn #{row.index + 1}</strong>
+                          <small style={{ color: "#d0a56a" }}>
+                            Thừa ~{overflowSec.toFixed(2)}s
+                            {row.repaired_duration != null && row.timing_available_duration != null
+                              ? ` · dài ${durationSec.toFixed(2)}s / khung ${availableSec.toFixed(2)}s`
+                              : ""}
+                            {minW > 0
+                              ? ` · cần bỏ ít nhất ~${minW} từ${maxW > minW ? ` (an toàn tới ~${maxW})` : ""}`
+                              : ""}
+                          </small>
+                        </div>
+                        {row.source_text && (
+                          <div style={{ fontSize: "12px", color: "#8a93a5", fontStyle: "italic" }}>
+                            Gốc: {row.source_text}
+                          </div>
+                        )}
+                        <textarea
+                          value={timingReviewDrafts[row.index] ?? row.spoken_text}
+                          onChange={(event) =>
+                            setTimingReviewDrafts((prev) => ({ ...prev, [row.index]: event.target.value }))
+                          }
+                          rows={3}
+                          style={{
+                            width: "100%",
+                            resize: "vertical",
+                            background: "#0d1016",
+                            color: "#fff",
+                            border: "1px solid #343a48",
+                            borderRadius: "8px",
+                            padding: "10px",
+                            fontSize: "13px",
+                            lineHeight: 1.4,
+                          }}
+                        />
+                        <audio
+                          key={`timing-review-audio-${row.index}-${row.plan_version ?? 1}-${timingReviewAudioBust[row.index] ?? 0}`}
+                          controls
+                          preload="none"
+                          src={`http://127.0.0.1:8765/api/jobs/${selectedJob.id}/segments/${row.index}/wav?v=${row.plan_version ?? 1}-${timingReviewAudioBust[row.index] ?? 0}`}
+                          style={{ height: "26px", width: "100%" }}
+                        />
+                      </div>
+                    );
+                  })}
+                  {(!timingReview || timingReview.segments.length === 0) && (
+                    <p style={{ margin: 0, fontSize: "13px", color: "#8f97a6" }}>
+                      Đang tải danh sách đoạn cần chỉnh, hoặc không còn đoạn nào.
+                    </p>
+                  )}
+                </div>
+                <button
+                  className="smoke-button"
+                  style={{ background: "linear-gradient(135deg, #c47a20, #8a4f12)", color: "#fff" }}
+                  disabled={timingReviewSubmitting || !timingReview || timingReview.segments.length === 0}
+                  onClick={() => void submitTimingReviewEdits()}
+                >
+                  {timingReviewSubmitting ? "Đang re-TTS & kiểm tra…" : "Gửi chỉnh sửa TTS"}
+                </button>
               </div>
             )}
 

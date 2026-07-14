@@ -1,7 +1,10 @@
 from datetime import datetime, timezone
 import json
+import logging
 from typing import Any
 import uuid
+
+logger = logging.getLogger(__name__)
 
 from .adapters.subtitles import (
     DEFAULT_SUBTITLE_BACKGROUND_COLOR,
@@ -50,9 +53,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "omnivoice_language_id": "",
     "omnivoice_audio_chunk_threshold": 30.0,
     "omnivoice_audio_chunk_duration": 15.0,
-    "omnivoice_external_chunking_enabled": False,
+    "omnivoice_external_chunking_enabled": True,
     "omnivoice_chunk_fidelity_fallback_full_segment": True,
-    "omnivoice_chunk_retry_on_fidelity_failure": False,
+    "omnivoice_chunk_retry_on_fidelity_failure": True,
     "omnivoice_chunk_target_chars": 180,
     "omnivoice_chunk_max_chars": 220,
     "omnivoice_chunk_min_chars": 40,
@@ -89,6 +92,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "exact_timing_max_safe_stretch": 1.25,
     "edge_tts_overflow_speed_max": 1.15,
     "edge_tts_overflow_speed_hard_max": 1.2,
+    "allow_spoken_text_mutation": False,
+    "pace_policy": "narration_uniform",
+    "quality_preset": "accurate",
+    "timing_placement_gate_enabled": True,
     "short_tts_lengthen_min_gap_sec": 1.5,
     "short_tts_lengthen_max_ratio": 1.6,
     "tts_global_speed": 1.0,
@@ -154,6 +161,19 @@ SUPPORTED_MIX_MODES = {"background_only", "duck"}
 SUPPORTED_ASR_ALIGNMENT_MODES = {"fast", "balanced", "accurate"}
 SUPPORTED_VAD_ENGINES = {"silero", "silencedetect"}
 
+# Bump when shipping new default flips for stored SQLite rows.
+# Version is managed by migration (not DEFAULT_SETTINGS INSERT) so legacy DBs
+# missing the key are treated as version 0 and can still upgrade untouched False.
+SETTINGS_DEFAULTS_VERSION = 2
+SETTINGS_DEFAULTS_VERSION_KEY = "settings_defaults_version"
+
+# Phase 2/3: these flipped False → True. Legacy untouched False should migrate.
+_OMNIVOICE_CHUNK_FLAG_DEFAULT_FLIPS: tuple[tuple[str, bool, bool], ...] = (
+    # (key, legacy_default, new_default)
+    ("omnivoice_external_chunking_enabled", False, True),
+    ("omnivoice_chunk_retry_on_fidelity_failure", False, True),
+)
+
 
 def mask_api_key(api_key: str) -> str:
     if len(api_key) <= 8:
@@ -176,8 +196,89 @@ class SettingsService:
                 )
             self._migrate_legacy_pending_gemini_key(now)
             self._migrate_legacy_omnivoice_chunk_defaults(now)
+            self._migrate_omnivoice_chunk_flag_defaults(now)
 
+    def _read_settings_defaults_version(self) -> int:
+        row = self.database.connection.execute(
+            "SELECT value FROM settings WHERE key = ?",
+            (SETTINGS_DEFAULTS_VERSION_KEY,),
+        ).fetchone()
+        if row is None:
+            return 0
+        try:
+            return int(json.loads(row["value"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return 0
 
+    def _write_settings_defaults_version(self, version: int, now: str) -> None:
+        self.database.connection.execute(
+            """
+            INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (SETTINGS_DEFAULTS_VERSION_KEY, json.dumps(version), now),
+        )
+
+    @staticmethod
+    def _coerce_stored_bool(value: Any) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"0", "false", "no", "off"}:
+                return False
+            if lowered in {"1", "true", "yes", "on"}:
+                return True
+        return None
+
+    def _migrate_omnivoice_chunk_flag_defaults(self, now: str) -> None:
+        """Upgrade legacy untouched Omnivoice chunk flags to Phase 2/3 defaults.
+
+        Method B (settings schema version): if ``settings_defaults_version`` is
+        below the current version and a flag still equals the *old* default
+        (False), treat it as untouched seed data and flip to the new default.
+        Explicit opt-outs after the version bump (or via ``update()``, which
+        stamps the current version) are preserved.
+        """
+        current_version = self._read_settings_defaults_version()
+        if current_version >= SETTINGS_DEFAULTS_VERSION:
+            return
+
+        flipped: list[str] = []
+        for key, legacy_default, new_default in _OMNIVOICE_CHUNK_FLAG_DEFAULT_FLIPS:
+            row = self.database.connection.execute(
+                "SELECT value FROM settings WHERE key = ?",
+                (key,),
+            ).fetchone()
+            if row is None:
+                continue
+            try:
+                stored = json.loads(row["value"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            coerced = self._coerce_stored_bool(stored)
+            if coerced is None:
+                continue
+            if coerced == legacy_default and new_default != legacy_default:
+                self.database.connection.execute(
+                    """
+                    INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                    """,
+                    (key, json.dumps(new_default), now),
+                )
+                flipped.append(key)
+
+        self._write_settings_defaults_version(SETTINGS_DEFAULTS_VERSION, now)
+        # One-shot INFO when Omnivoice defaults are upgraded (not on later ensure_defaults).
+        logger.info(
+            "Omnivoice chunk defaults upgraded (settings_defaults_version %s → %s); flipped=%s",
+            current_version,
+            SETTINGS_DEFAULTS_VERSION,
+            ",".join(flipped) if flipped else "(none)",
+        )
 
     def _migrate_legacy_pending_gemini_key(self, now: str) -> None:
         row = self.database.connection.execute(
@@ -603,6 +704,16 @@ class SettingsService:
 
         if values.get("omnivoice_language_id") is not None:
             values["omnivoice_language_id"] = str(values.get("omnivoice_language_id") or "").strip()
+
+        omnivoice_flag_touched = False
+        for flag_key, _legacy, _new in _OMNIVOICE_CHUNK_FLAG_DEFAULT_FLIPS:
+            if values.get(flag_key) is not None:
+                values[flag_key] = bool(values[flag_key])
+                omnivoice_flag_touched = True
+        if omnivoice_flag_touched:
+            # Stamp current defaults version so future migrations do not treat
+            # an explicit False opt-out as untouched legacy seed data.
+            values[SETTINGS_DEFAULTS_VERSION_KEY] = SETTINGS_DEFAULTS_VERSION
 
         for chunk_key, minimum, maximum in (
             ("omnivoice_audio_chunk_threshold", 4.0, 60.0),

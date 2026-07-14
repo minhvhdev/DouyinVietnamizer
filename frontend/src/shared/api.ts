@@ -1,4 +1,4 @@
-import type { Job, JobFolder, JobsApi, RuntimeReport, VoiceCalibrationStatus } from "./contracts";
+import type { Job, JobFolder, JobsApi, RuntimeReport, TimingReviewPayload, TimingReviewSubmitResult, VoiceCalibrationStatus } from "./contracts";
 
 const baseUrl = import.meta.env.VITE_BACKEND_URL ?? "http://127.0.0.1:8765";
 
@@ -144,6 +144,21 @@ export const api: JobsApi = {
   redubJob: (jobId) => request(`/api/jobs/${jobId}/redub`, { method: "POST" }),
   getJobFiles: (jobId) => request(`/api/jobs/${jobId}/files`),
   getJobFolder: (jobId) => request<JobFolder>(`/api/jobs/${jobId}/folder`),
+  getTimingReview: (jobId) => request<TimingReviewPayload>(`/api/jobs/${jobId}/timing-review`),
+  submitTimingReview: async (jobId, edits, resumePipeline = true) => {
+    const response = await fetch(`${baseUrl}/api/jobs/${jobId}/timing-review/submit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ edits, resume_pipeline: resumePipeline }),
+      // OmniVoice re-TTS for several segments can take several minutes.
+      signal: AbortSignal.timeout(600_000),
+    });
+    const body = await response.json();
+    if (!response.ok) {
+      throw new Error(formatApiError(body));
+    }
+    return body as TimingReviewSubmitResult;
+  },
   detectHardware: () => request("/api/runtime/detect-hardware"),
   bootstrapVendor: (profile) => request("/api/runtime/bootstrap-vendor", { method: "POST", body: JSON.stringify({ profile }) }),
   bootstrapProgress: () => request("/api/runtime/bootstrap-progress")

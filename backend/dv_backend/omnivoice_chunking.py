@@ -1,16 +1,20 @@
 """Semantic text chunking for OmniVoice long-segment synthesis."""
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from typing import Any
 
 from .adapters.tts import sanitize_tts_text, split_omnivoice_tts_text
 
-CHUNK_CACHE_SCHEMA_VERSION = 3
+CHUNK_CACHE_SCHEMA_VERSION = 4
+
+logger = logging.getLogger(__name__)
 
 _DECIMAL_RE = re.compile(r"\d+\.\d+")
 _MODEL_TOKEN_RE = re.compile(r"\b(?:RTX|GTX|RX)\s*\d{3,5}\b", re.IGNORECASE)
+_WORD_CHAR_RE = re.compile(r"\w", re.UNICODE)
 
 
 def omnivoice_chunk_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
@@ -35,10 +39,20 @@ def omnivoice_chunk_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
         hard_max = min_chars + 20
     if target > hard_max:
         target = hard_max
+    retry_1 = _int("omnivoice_chunk_retry_max_chars_1", 220)
+    retry_2 = _int("omnivoice_chunk_retry_max_chars_2", 140)
+    retry_3 = _int("omnivoice_chunk_retry_max_chars_3", 90)
+    # Keep fallback ladder strictly descending relative to the normal hard max.
+    if retry_1 > hard_max:
+        retry_1 = hard_max
+    if retry_2 >= retry_1:
+        retry_2 = max(min_chars, retry_1 - 40)
+    if retry_3 >= retry_2:
+        retry_3 = max(min_chars, retry_2 - 40)
     return {
-        "external_chunking_enabled": _bool("omnivoice_external_chunking_enabled", False),
+        "external_chunking_enabled": _bool("omnivoice_external_chunking_enabled", True),
         "fallback_full_segment_enabled": _bool("omnivoice_chunk_fidelity_fallback_full_segment", True),
-        "retry_on_fidelity_failure": _bool("omnivoice_chunk_retry_on_fidelity_failure", False),
+        "retry_on_fidelity_failure": _bool("omnivoice_chunk_retry_on_fidelity_failure", True),
         "target_chars": target,
         "max_chars": hard_max,
         "min_chars": min_chars,
@@ -48,17 +62,22 @@ def omnivoice_chunk_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
         "pause_sentence_ms": _int("omnivoice_pause_sentence_ms", 260),
         "pause_hard_ms": _int("omnivoice_pause_hard_ms", 50),
         "max_retries": _int("omnivoice_chunk_max_retries", 2),
-        "retry_max_chars": (
-            _int("omnivoice_chunk_retry_max_chars_1", 220),
-            _int("omnivoice_chunk_retry_max_chars_2", 140),
-            _int("omnivoice_chunk_retry_max_chars_3", 90),
-        ),
+        "retry_max_chars": (retry_1, retry_2, retry_3),
         "fidelity_threshold": float(settings.get("omnivoice_fidelity_good_threshold", 0.85) or 0.85),
         "fidelity_review_threshold": float(settings.get("omnivoice_fidelity_review_threshold", 0.70) or 0.70),
         "fidelity_critical_threshold": float(settings.get("omnivoice_fidelity_critical_threshold", 0.55) or 0.55),
         "fidelity_check_min_chars": _int("omnivoice_fidelity_check_min_chars", 240),
         "fidelity_enabled": _bool("omnivoice_fidelity_check_enabled", True),
     }
+
+
+def smaller_retry_max_chars(current_max: int, cfg: dict[str, Any]) -> int | None:
+    """Return the next smaller retry ladder value strictly below ``current_max``."""
+    ladder = sorted({int(value) for value in cfg.get("retry_max_chars", ())}, reverse=True)
+    for value in ladder:
+        if value < current_max:
+            return value
+    return None
 
 
 def normalize_text_for_compare(text: str) -> str:
@@ -120,6 +139,38 @@ def _restore_placeholders(text: str, placeholders: dict[str, str]) -> str:
     return restored
 
 
+def _assert_word_safe_boundaries(original: str, chunks: list[str], *, max_chars: int) -> None:
+    """Reject mid-word cuts unless the unbroken token itself exceeds max_chars."""
+    cleaned = re.sub(r"\s+", " ", sanitize_tts_text(original).strip())
+    cursor = 0
+    for index, chunk in enumerate(chunks):
+        piece = chunk.strip()
+        if not piece:
+            raise ValueError("Empty chunk after strip.")
+        start = cleaned.find(piece, cursor)
+        if start < 0:
+            continue
+        if start > 0:
+            prev = cleaned[start - 1]
+            if (
+                _WORD_CHAR_RE.match(prev)
+                and _WORD_CHAR_RE.match(piece[0])
+                and not prev.isspace()
+                and prev not in ",.:;!?…。，；：！？-—"
+            ):
+                token_start = start
+                while token_start > 0 and not cleaned[token_start - 1].isspace():
+                    token_start -= 1
+                token_end = start
+                while token_end < len(cleaned) and not cleaned[token_end].isspace():
+                    token_end += 1
+                if token_end - token_start <= max_chars:
+                    raise ValueError(
+                        f"Mid-word split at chunk {index} for token length {token_end - token_start}."
+                    )
+        cursor = start + len(piece)
+
+
 def split_omnivoice_text_semantic(
     text: str,
     *,
@@ -135,7 +186,9 @@ def split_omnivoice_text_semantic(
     protected, placeholders = _protect_decimal_spans(cleaned)
     raw_chunks = split_omnivoice_tts_text(protected, max_chars=max_chars)
     restored = [_restore_placeholders(chunk, placeholders) for chunk in raw_chunks]
+    # Prefer splitter output for synthesis text so no generate() payload exceeds max_chars.
     validate_chunk_reconstruction(cleaned, restored)
+    _assert_word_safe_boundaries(cleaned, restored, max_chars=max_chars)
 
     result: list[dict[str, Any]] = []
     cursor = 0
@@ -144,14 +197,31 @@ def split_omnivoice_text_semantic(
         start = cleaned.find(needle, cursor)
         if start < 0:
             start = cursor
-        if index + 1 < len(restored):
-            next_needle = restored[index + 1].strip()
-            next_start = cleaned.find(next_needle, start + len(needle))
-            end = next_start if next_start >= start else start + len(needle)
+            end = min(start + len(needle), len(cleaned))
+            exact = needle
         else:
-            end = len(cleaned)
-        exact = cleaned[start:end]
-        cursor = end
+            end = start + len(needle)
+            # Absorb trailing spaces between this chunk and the next token when it fits.
+            while end < len(cleaned) and cleaned[end].isspace():
+                if index + 1 < len(restored):
+                    next_needle = restored[index + 1].strip()
+                    next_start = cleaned.find(next_needle, end)
+                    if next_start == end:
+                        break
+                    if next_start > end and all(ch.isspace() for ch in cleaned[end:next_start]):
+                        candidate_end = next_start
+                        if candidate_end - start <= max_chars:
+                            end = candidate_end
+                        break
+                if end + 1 - start <= max_chars:
+                    end += 1
+                else:
+                    break
+            exact = cleaned[start:end]
+            if len(exact.strip()) > max_chars:
+                exact = needle
+                end = start + len(needle)
+        cursor = max(end, start + len(needle))
         split_kind = "sentence"
         trimmed = exact.rstrip()
         boundary = trimmed[-1:] if trimmed else ""
@@ -159,20 +229,31 @@ def split_omnivoice_text_semantic(
             split_kind = "sentence"
         elif boundary in ",，;；:：":
             split_kind = "comma"
-        elif len(exact) >= max_chars - 1:
+        elif len(exact.strip()) >= max_chars - 1:
             split_kind = "hard"
         else:
             split_kind = "word"
         result.append(
             {
                 "chunk_index": index,
-                "text": exact,
+                "text": exact.strip() if exact.strip() else needle,
                 "text_start": start,
                 "text_end": end,
                 "split_kind": split_kind,
             }
         )
-    validate_chunk_reconstruction(cleaned, [item["text"] for item in result])
+    texts = [item["text"] for item in result]
+    validate_chunk_reconstruction(cleaned, texts)
+    _assert_word_safe_boundaries(cleaned, texts, max_chars=max_chars)
+    if any(len(item["text"]) > max_chars for item in result):
+        raise ValueError(f"Chunk exceeded max_chars={max_chars}.")
+    logger.debug(
+        "omnivoice semantic split: text_len=%d max_chars=%d chunks=%d preview=%r",
+        len(cleaned),
+        max_chars,
+        len(result),
+        cleaned[:80],
+    )
     return result
 
 

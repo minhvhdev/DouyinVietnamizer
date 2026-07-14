@@ -257,7 +257,7 @@ class JobService:
                     last_error_code = NULL,
                     last_error_message = NULL,
                     updated_at = ?
-                WHERE id = ? AND status IN ('interrupted', 'failed')
+                WHERE id = ? AND status IN ('interrupted', 'failed', 'needs_review')
                 """,
                 (now, job_id),
             )
@@ -283,7 +283,7 @@ class JobService:
 
     def rerun(self, job_id: str, keep_steps: list[str]) -> Job:
         job = self.get(job_id)
-        if job.status not in {"completed", "failed", "interrupted"}:
+        if job.status not in {"completed", "failed", "interrupted", "needs_review"}:
             raise AppError(
                 409,
                 ErrorInfo(

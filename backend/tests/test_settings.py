@@ -287,6 +287,139 @@ def test_openai_api_key_is_masked_and_persisted(tmp_path: Path) -> None:
     assert raw["openai_api_base"] == "https://api.openai.com/v1"
 
 
+def test_fresh_settings_enable_omnivoice_chunk_flags(tmp_path: Path) -> None:
+    from dv_backend.settings import SETTINGS_DEFAULTS_VERSION, SETTINGS_DEFAULTS_VERSION_KEY
+
+    settings = service(tmp_path)
+    raw = settings.get_raw_all()
+    assert raw["omnivoice_external_chunking_enabled"] is True
+    assert raw["omnivoice_chunk_retry_on_fidelity_failure"] is True
+    assert raw[SETTINGS_DEFAULTS_VERSION_KEY] == SETTINGS_DEFAULTS_VERSION
+
+
+def test_legacy_untouched_false_omnivoice_flags_migrate_to_true(tmp_path: Path) -> None:
+    from dv_backend.settings import SETTINGS_DEFAULTS_VERSION, SETTINGS_DEFAULTS_VERSION_KEY
+
+    database = Database(tmp_path / "legacy.db")
+    database.migrate()
+    now = "2024-01-01T00:00:00+00:00"
+    with database.connection:
+        for key in (
+            "omnivoice_external_chunking_enabled",
+            "omnivoice_chunk_retry_on_fidelity_failure",
+        ):
+            database.connection.execute(
+                "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+                (key, json.dumps(False), now),
+            )
+        # Intentionally omit settings_defaults_version (legacy untouched).
+
+    settings = SettingsService(database)
+    raw = settings.get_raw_all()
+    assert raw["omnivoice_external_chunking_enabled"] is True
+    assert raw["omnivoice_chunk_retry_on_fidelity_failure"] is True
+    assert raw[SETTINGS_DEFAULTS_VERSION_KEY] == SETTINGS_DEFAULTS_VERSION
+
+
+def test_legacy_omnivoice_migration_smoke_lifecycle(tmp_path: Path, caplog) -> None:
+    """Legacy False + no version → True/v2 on startup; explicit False sticks; no re-migrate; one-shot log."""
+    import logging
+
+    from dv_backend.settings import SETTINGS_DEFAULTS_VERSION, SETTINGS_DEFAULTS_VERSION_KEY
+
+    database = Database(tmp_path / "lifecycle.db")
+    database.migrate()
+    now = "2024-01-01T00:00:00+00:00"
+    with database.connection:
+        for key in (
+            "omnivoice_external_chunking_enabled",
+            "omnivoice_chunk_retry_on_fidelity_failure",
+        ):
+            database.connection.execute(
+                "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+                (key, json.dumps(False), now),
+            )
+        # Intentionally omit settings_defaults_version (legacy untouched).
+
+    with caplog.at_level(logging.INFO, logger="dv_backend.settings"):
+        settings = SettingsService(database)
+    raw = settings.get_raw_all()
+    assert raw["omnivoice_external_chunking_enabled"] is True
+    assert raw["omnivoice_chunk_retry_on_fidelity_failure"] is True
+    assert raw[SETTINGS_DEFAULTS_VERSION_KEY] == SETTINGS_DEFAULTS_VERSION
+    assert any(
+        "Omnivoice chunk defaults upgraded" in record.message for record in caplog.records
+    ), "expected one-shot migration INFO log"
+
+    settings.update(
+        {
+            "omnivoice_external_chunking_enabled": False,
+            "omnivoice_chunk_retry_on_fidelity_failure": False,
+        }
+    )
+    # Clear so reload cannot re-emit if wrongly re-entering migration.
+    caplog.clear()
+    settings.ensure_defaults()
+    reloaded = SettingsService(database)
+    raw2 = reloaded.get_raw_all()
+    assert raw2["omnivoice_external_chunking_enabled"] is False
+    assert raw2["omnivoice_chunk_retry_on_fidelity_failure"] is False
+    assert raw2[SETTINGS_DEFAULTS_VERSION_KEY] == SETTINGS_DEFAULTS_VERSION
+    assert not any(
+        "Omnivoice chunk defaults upgraded" in record.message for record in caplog.records
+    ), "migration must not re-apply after opt-out"
+
+
+def test_explicit_omnivoice_chunk_opt_out_survives_reload(tmp_path: Path) -> None:
+    from dv_backend.settings import SETTINGS_DEFAULTS_VERSION, SETTINGS_DEFAULTS_VERSION_KEY
+
+    settings = service(tmp_path)
+    settings.update(
+        {
+            "omnivoice_external_chunking_enabled": False,
+            "omnivoice_chunk_retry_on_fidelity_failure": False,
+        }
+    )
+    raw = settings.get_raw_all()
+    assert raw["omnivoice_external_chunking_enabled"] is False
+    assert raw["omnivoice_chunk_retry_on_fidelity_failure"] is False
+    assert raw[SETTINGS_DEFAULTS_VERSION_KEY] == SETTINGS_DEFAULTS_VERSION
+
+    # Reload / re-ensure must not flip intentional opt-out.
+    settings.ensure_defaults()
+    raw2 = settings.get_raw_all()
+    assert raw2["omnivoice_external_chunking_enabled"] is False
+    assert raw2["omnivoice_chunk_retry_on_fidelity_failure"] is False
+
+
+def test_omnivoice_chunk_flag_migration_is_idempotent(tmp_path: Path) -> None:
+    from dv_backend.settings import SETTINGS_DEFAULTS_VERSION, SETTINGS_DEFAULTS_VERSION_KEY
+
+    database = Database(tmp_path / "idem.db")
+    database.migrate()
+    now = "2024-01-01T00:00:00+00:00"
+    with database.connection:
+        database.connection.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("omnivoice_external_chunking_enabled", json.dumps(False), now),
+        )
+        database.connection.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("omnivoice_chunk_retry_on_fidelity_failure", json.dumps(False), now),
+        )
+
+    settings = SettingsService(database)
+    first = settings.get_raw_all()
+    settings.ensure_defaults()
+    second = settings.get_raw_all()
+    assert first["omnivoice_external_chunking_enabled"] is True
+    assert second["omnivoice_external_chunking_enabled"] is True
+    assert first[SETTINGS_DEFAULTS_VERSION_KEY] == SETTINGS_DEFAULTS_VERSION
+    assert second[SETTINGS_DEFAULTS_VERSION_KEY] == SETTINGS_DEFAULTS_VERSION
+    assert first["omnivoice_chunk_retry_on_fidelity_failure"] is True
+    assert second["omnivoice_chunk_retry_on_fidelity_failure"] is True
+
+
 def test_switching_to_thai_accepts_thai_google_voice(tmp_path: Path) -> None:
     settings = service(tmp_path)
 

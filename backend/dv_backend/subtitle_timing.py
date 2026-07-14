@@ -980,6 +980,115 @@ def build_cues_from_dub_words(
     return grouped
 
 
+def normalize_spoken_for_conservation(text: str) -> str:
+    """Normalize for ASS/spoken equality: drop whitespace/punct/case only.
+
+    Digits and letters (including meaning-bearing marks) are preserved.
+    """
+    import unicodedata
+
+    out: list[str] = []
+    for ch in str(text or "").casefold():
+        if ch.isspace():
+            continue
+        category = unicodedata.category(ch)
+        if category.startswith("P") or category.startswith("S"):
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
+def assert_cues_conserve_spoken(
+    cues: list[dict[str, Any]],
+    spoken_text: str,
+    *,
+    segment_index: int | None = None,
+) -> None:
+    """Fail closed when cue text does not conserve approved spoken text."""
+    from .errors import AppError
+    from .models import ErrorInfo
+
+    spoken = str(spoken_text or "").strip()
+    if not spoken:
+        return
+    if not cues:
+        raise AppError(
+            409,
+            ErrorInfo(
+                code="SUBTITLE_CONTENT_CONSERVATION_FAILED",
+                message=("Empty subtitle cues for voiced text"
+                         + (f" (segment {segment_index})." if segment_index is not None else ".")),
+                action="Rebuild subtitles from approved spoken text.",
+                detail=f"segment_index={segment_index},empty_cues=1",
+            ),
+        )
+    for cue in cues:
+        if not str(cue.get("text") or "").strip():
+            raise AppError(
+                409,
+                ErrorInfo(
+                    code="SUBTITLE_CONTENT_CONSERVATION_FAILED",
+                    message=("Empty voiced subtitle cue"
+                             + (f" (segment {segment_index})." if segment_index is not None else ".")),
+                    action="Rebuild subtitles from approved spoken text.",
+                    detail=f"segment_index={segment_index},empty_cue=1",
+                ),
+            )
+    joined = "".join(str(cue.get("text") or "") for cue in cues)
+    if normalize_spoken_for_conservation(joined) != normalize_spoken_for_conservation(spoken):
+        raise AppError(
+            409,
+            ErrorInfo(
+                code="SUBTITLE_CONTENT_CONSERVATION_FAILED",
+                message=("Subtitle cue text diverged from approved spoken text"
+                         + (f" (segment {segment_index})." if segment_index is not None else ".")),
+                action="Do not fall back to ASR lexical text; rebuild cues from spoken_text.",
+                detail=f"segment_index={segment_index},cue_count={len(cues)}",
+            ),
+        )
+
+
+def _rebase_cue_texts_to_spoken(
+    cues: list[dict[str, Any]],
+    spoken_text: str,
+    *,
+    language: str | None = None,
+    settings: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Keep cue timing windows; force display text from approved spoken_text only."""
+    spoken = str(spoken_text or "").strip()
+    if not cues or not spoken:
+        return cues
+    layout = subtitle_layout_from_settings(settings)
+    chunks = split_for_subtitle_display(
+        spoken,
+        max_chars=int(layout["max_chars_per_cue"]),
+        language=language,
+    )
+    if not chunks:
+        return cues
+    if len(chunks) == len(cues):
+        for cue, chunk in zip(cues, chunks):
+            cue["text"] = chunk
+        return cues
+    # Unequal count: rebuild texts on existing time spans proportionally by character weight.
+    total_chars = sum(max(1, len(c)) for c in chunks) or 1
+    t0 = float(cues[0]["start"])
+    t1 = float(cues[-1]["end"])
+    span = max(0.05, t1 - t0)
+    rebuilt: list[dict[str, Any]] = []
+    cursor = t0
+    for i, chunk in enumerate(chunks):
+        weight = max(1, len(chunk)) / total_chars
+        dur = span * weight
+        end = t1 if i + 1 == len(chunks) else min(t1, cursor + dur)
+        if end <= cursor:
+            end = min(t1, cursor + 0.12)
+        rebuilt.append({"start": round(cursor, 3), "end": round(end, 3), "text": chunk})
+        cursor = end
+    return rebuilt
+
+
 def build_segment_subtitle_cues(
     segment: dict[str, Any],
     *,
@@ -1014,12 +1123,24 @@ def build_segment_subtitle_cues(
             next_segment_start=next_segment_start,
             language=target_language,
         )
-        return _ensure_cues_cover_speech(
+        cues = _rebase_cue_texts_to_spoken(
+            cues,
+            translation,
+            language=target_language,
+            settings=settings,
+        )
+        cues = _ensure_cues_cover_speech(
             cues,
             speech_start=window_start,
             speech_end=window_end,
             next_segment_start=next_segment_start,
         )
+        assert_cues_conserve_spoken(
+            cues,
+            translation,
+            segment_index=int(segment.get("index", 0) or 0),
+        )
+        return cues
 
     layout = subtitle_layout_from_settings(settings)
     chunks = split_for_subtitle_display(
@@ -1086,12 +1207,18 @@ def build_segment_subtitle_cues(
                     window_duration=speech_duration,
                     chunk_count=len(chunks),
                 ):
-                    return _ensure_cues_cover_speech(
+                    cues = _ensure_cues_cover_speech(
                         normalized,
                         speech_start=speech_start,
                         speech_end=speech_end,
                         next_segment_start=next_segment_start,
                     )
+                    assert_cues_conserve_spoken(
+                        cues,
+                        translation,
+                        segment_index=int(segment.get("index", 0) or 0),
+                    )
+                    return cues
                 logger.info(
                     "Subtitle ASR alignment low quality for segment %s; using proportional timing.",
                     segment.get("index"),
@@ -1104,12 +1231,18 @@ def build_segment_subtitle_cues(
             )
 
     cues = allocate_proportional_cues(chunks, speech_start, speech_end)
-    return _ensure_cues_cover_speech(
+    cues = _ensure_cues_cover_speech(
         cues,
         speech_start=speech_start,
         speech_end=speech_end,
         next_segment_start=next_segment_start,
     )
+    assert_cues_conserve_spoken(
+        cues,
+        translation,
+        segment_index=int(segment.get("index", 0) or 0),
+    )
+    return cues
 
 
 def _ensure_cues_cover_speech(

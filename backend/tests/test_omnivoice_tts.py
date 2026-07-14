@@ -374,7 +374,7 @@ def test_omnivoice_adapter_uses_injected_client(tmp_path: Path) -> None:
     assert kwargs.get("anchor_text") is None
 
 
-def test_omnivoice_adapter_does_not_external_chunk_by_default(tmp_path: Path) -> None:
+def test_omnivoice_adapter_external_chunks_by_default(tmp_path: Path) -> None:
     output = tmp_path / "out.wav"
     client = MagicMock()
 
@@ -384,7 +384,38 @@ def test_omnivoice_adapter_does_not_external_chunk_by_default(tmp_path: Path) ->
         return {"ok": True, "output_path": str(out)}
 
     client.synthesize.side_effect = _write_and_ok
-    adapter = OmniVoiceTtsAdapter(model="k2-fsa/OmniVoice", _client=client, settings={"omnivoice_fidelity_check_enabled": False})
+    adapter = OmniVoiceTtsAdapter(
+        model="k2-fsa/OmniVoice",
+        _client=client,
+        settings={"omnivoice_fidelity_check_enabled": False},
+    )
+    long_text = " ".join(["Đây là một câu tiếng Việt đủ dài để vượt ngưỡng chunk ký tự cũ." for _ in range(12)])
+
+    adapter.synthesize(long_text, output, voice="instruct:female, low pitch")
+
+    assert client.synthesize.call_count >= 2
+    for call in client.synthesize.call_args_list:
+        assert len(call.kwargs["text"]) <= 220
+
+
+def test_omnivoice_adapter_respects_external_chunking_disabled(tmp_path: Path) -> None:
+    output = tmp_path / "out.wav"
+    client = MagicMock()
+
+    def _write_and_ok(**kwargs) -> dict:
+        out = Path(kwargs["output_path"])
+        _write_tone_wav(out, duration_sec=0.2)
+        return {"ok": True, "output_path": str(out)}
+
+    client.synthesize.side_effect = _write_and_ok
+    adapter = OmniVoiceTtsAdapter(
+        model="k2-fsa/OmniVoice",
+        _client=client,
+        settings={
+            "omnivoice_fidelity_check_enabled": False,
+            "omnivoice_external_chunking_enabled": False,
+        },
+    )
     long_text = " ".join(["Đây là một câu tiếng Việt đủ dài để vượt ngưỡng chunk ký tự cũ." for _ in range(12)])
 
     adapter.synthesize(long_text, output, voice="instruct:female, low pitch")

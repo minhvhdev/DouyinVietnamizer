@@ -289,6 +289,43 @@ class OmniVoiceWorkerClient:
     def register_with_runner(self, runner: object | None) -> None:
         return None
 
+    @property
+    def pending_count(self) -> int:
+        with self._pending_lock:
+            return len(self._pending)
+
+    def wait_result(self, request_id: str, *, timeout_sec: float = 600.0) -> dict[str, Any]:
+        """Wait for a response without raising on worker-reported synthesis failure."""
+        with self._pending_lock:
+            response_q = self._pending.get(request_id)
+        if response_q is None:
+            raise AppError(
+                502,
+                ErrorInfo(
+                    code="OMNIVOICE_TTS_FAILED",
+                    message="Unknown OmniVoice request id.",
+                    retryable=True,
+                ),
+            )
+        try:
+            response = response_q.get(timeout=timeout_sec)
+        except queue.Empty as exc:
+            with self._pending_lock:
+                self._pending.pop(request_id, None)
+            raise AppError(
+                502,
+                ErrorInfo(
+                    code="OMNIVOICE_TIMEOUT",
+                    message="OmniVoice synthesis timed out.",
+                    action="Retry TTS for this segment or restart the OmniVoice worker.",
+                    retryable=True,
+                ),
+            ) from exc
+        with self._pending_lock:
+            self._pending.pop(request_id, None)
+        self._last_used = time.perf_counter()
+        return response
+
     def submit(
         self,
         *,
@@ -298,6 +335,10 @@ class OmniVoiceWorkerClient:
         ref_text: str | None,
         anchor_text: str | None = None,
         instruct: str | None,
+        include_perf: bool = False,
+        batch_id: str | None = None,
+        batch_index: int | None = None,
+        batch_size: int | None = None,
     ) -> str:
         if not text or not text.strip():
             raise AppError(
@@ -327,7 +368,13 @@ class OmniVoiceWorkerClient:
             "language_id": self.language_id,
             "audio_chunk_threshold": self.audio_chunk_threshold,
             "audio_chunk_duration": self.audio_chunk_duration,
+            "include_perf": bool(include_perf),
         }
+        if batch_id is not None and batch_size is not None:
+            request["batch_id"] = str(batch_id)
+            request["batch_size"] = max(1, int(batch_size))
+            if batch_index is not None:
+                request["batch_index"] = max(0, int(batch_index))
         with self._pending_lock:
             self._pending[request_id] = response_q
         try:
@@ -351,33 +398,45 @@ class OmniVoiceWorkerClient:
         return request_id
 
     def wait(self, request_id: str, *, timeout_sec: float = 600.0) -> dict[str, Any]:
-        with self._pending_lock:
-            response_q = self._pending.get(request_id)
-        if response_q is None:
-            raise AppError(
-                502,
-                ErrorInfo(
-                    code="OMNIVOICE_TTS_FAILED",
-                    message="Unknown OmniVoice request id.",
-                    retryable=True,
-                ),
-            )
-        try:
-            response = response_q.get(timeout=timeout_sec)
-        except queue.Empty as exc:
-            raise AppError(
-                502,
-                ErrorInfo(
-                    code="OMNIVOICE_TIMEOUT",
-                    message="OmniVoice synthesis timed out.",
-                    retryable=True,
-                ),
-            ) from exc
-        self._last_used = time.perf_counter()
+        response = self.wait_result(request_id, timeout_sec=timeout_sec)
         if response.get("ok"):
             return response
         self._raise_worker_error(response)
         return response
+
+    def wait_many(self, request_ids: list[str], *, timeout_sec: float = 600.0) -> list[dict[str, Any]]:
+        if not request_ids:
+            return []
+        return [self.wait_result(request_id, timeout_sec=timeout_sec) for request_id in request_ids]
+
+    def synthesize_many(
+        self,
+        requests: list[dict[str, Any]],
+        *,
+        timeout_sec: float = 600.0,
+    ) -> list[dict[str, Any]]:
+        """Submit every request before waiting for the first response."""
+        if not requests:
+            return []
+        batch_id = uuid.uuid4().hex
+        batch_size = len(requests)
+        request_ids: list[str] = []
+        for index, req in enumerate(requests):
+            request_ids.append(
+                self.submit(
+                    text=str(req["text"]),
+                    output_path=Path(req["output_path"]),
+                    ref_audio=req.get("ref_audio"),
+                    ref_text=req.get("ref_text"),
+                    anchor_text=req.get("anchor_text"),
+                    instruct=req.get("instruct"),
+                    include_perf=bool(req.get("include_perf")),
+                    batch_id=str(req.get("batch_id") or batch_id),
+                    batch_index=int(req.get("batch_index") if req.get("batch_index") is not None else index),
+                    batch_size=int(req.get("batch_size") if req.get("batch_size") is not None else batch_size),
+                )
+            )
+        return self.wait_many(request_ids, timeout_sec=timeout_sec)
 
     def synthesize(
         self,
@@ -388,6 +447,7 @@ class OmniVoiceWorkerClient:
         ref_text: str | None,
         anchor_text: str | None = None,
         instruct: str | None,
+        include_perf: bool = False,
     ) -> dict[str, Any]:
         request_id = self.submit(
             text=text,
@@ -396,6 +456,7 @@ class OmniVoiceWorkerClient:
             ref_text=ref_text,
             anchor_text=anchor_text,
             instruct=instruct,
+            include_perf=include_perf,
         )
         return self.wait(request_id)
 

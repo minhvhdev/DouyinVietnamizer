@@ -3,6 +3,7 @@ from pathlib import Path
 import re
 import shutil
 import wave
+from typing import Any
 
 from ..errors import AppError
 from ..models import ErrorInfo
@@ -109,19 +110,23 @@ def split_omnivoice_sentences(text: str) -> list[str]:
 
 
 def _append_word_safe_chunks(chunks: list[str], sentence: str, max_chars: int) -> None:
+    """Split an overlong sentence on spaces; never cut mid-token when a space exists."""
     start = 0
     length = len(sentence)
     while start < length:
         end = min(start + max_chars, length)
         if end < length:
             space = sentence.rfind(" ", start, end)
-            if space > start + max(20, max_chars // 3):
+            if space > start:
                 end = space
+            # else: no space in window — hard-cut unbroken overlong token as last resort
         piece = sentence[start:end].strip()
         if piece:
             chunks.append(piece)
         if end <= start:
             end = min(start + max_chars, length)
+        if end < length and sentence[end : end + 1].isspace():
+            end += 1
         start = end if end > start else start + max_chars
 
 
@@ -340,6 +345,8 @@ class TtsSession:
             self.gpu_manager = gpu_manager
         self._lease = None
         self._model_key = self._build_model_key()
+        self._last_batch_mode: str | None = None
+        self._last_batch_diagnostics: dict[str, Any] = {}
 
     def _build_model_key(self) -> str:
         if self.backend == "omnivoice":
@@ -456,6 +463,21 @@ class TtsSession:
         if last_error is not None:
             raise last_error
 
+    @property
+    def last_batch_mode(self) -> str | None:
+        return self._last_batch_mode
+
+    @property
+    def last_batch_diagnostics(self) -> dict[str, Any]:
+        return dict(self._last_batch_diagnostics)
+
+    def _apply_adapter_batch_diagnostics(self, adapter: object) -> None:
+        diagnostics = getattr(adapter, "last_batch_diagnostics", None)
+        if isinstance(diagnostics, dict):
+            self._last_batch_diagnostics = dict(diagnostics)
+            if diagnostics.get("mode"):
+                self._last_batch_mode = str(diagnostics["mode"])
+
     def synthesize_batch(self, items: list[dict]) -> None:
         if not items:
             return
@@ -479,8 +501,15 @@ class TtsSession:
                     adapter = factory(self.settings, data_dir=self.data_dir, runner=self.runner)
                     synthesize_batch = getattr(adapter, "synthesize_batch", None)
                     if callable(synthesize_batch):
+                        self._last_batch_mode = "adapter_synthesize_batch"
                         synthesize_batch(adapter_items)
+                        self._apply_adapter_batch_diagnostics(adapter)
                     else:
+                        self._last_batch_mode = (
+                            "omnivoice_sequential_fallback"
+                            if self.backend == "omnivoice"
+                            else "sequential_fallback"
+                        )
                         for item in adapter_items:
                             adapter.synthesize(
                                 item["text"],
@@ -504,8 +533,15 @@ class TtsSession:
                 adapter = self._adapter_instance()
                 synthesize_batch = getattr(adapter, "synthesize_batch", None)
                 if callable(synthesize_batch):
+                    self._last_batch_mode = "adapter_synthesize_batch"
                     synthesize_batch(adapter_items)
+                    self._apply_adapter_batch_diagnostics(adapter)
                 else:
+                    self._last_batch_mode = (
+                        "omnivoice_sequential_fallback"
+                        if self.backend == "omnivoice"
+                        else "sequential_fallback"
+                    )
                     for item in adapter_items:
                         adapter.synthesize(
                             item["text"],

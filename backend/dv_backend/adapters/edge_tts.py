@@ -1,4 +1,5 @@
 import asyncio
+import os
 import shutil
 import subprocess
 import tempfile
@@ -165,43 +166,58 @@ def _concat_wavs(parts: list[Path], output_path: Path) -> None:
                 action="Verify translation output for this segment.",
             ),
         )
-    if len(parts) == 1:
-        output_path.write_bytes(parts[0].read_bytes())
-        return
-
-    params = None
-    frames: list[bytes] = []
-    for part in parts:
-        with wave.open(str(part), "rb") as wav:
-            current = (
-                wav.getnchannels(),
-                wav.getsampwidth(),
-                wav.getframerate(),
-                wav.getcomptype(),
-                wav.getcompname(),
-            )
-            if params is None:
-                params = current
-            elif current != params:
-                raise AppError(
-                    502,
-                    ErrorInfo(
-                        code="EDGE_TTS_MERGE_FAILED",
-                        message="Edge TTS chunk formats did not match.",
-                        action="Try a shorter preview sentence.",
-                    ),
-                )
-            frames.append(wav.readframes(wav.getnframes()))
-
-    assert params is not None
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with wave.open(str(output_path), "wb") as merged:
-        merged.setnchannels(params[0])
-        merged.setsampwidth(params[1])
-        merged.setframerate(params[2])
-        merged.setcomptype(params[3], params[4])
-        for chunk in frames:
-            merged.writeframes(chunk)
+    temp_path = output_path.with_name(f"{output_path.stem}.atomic.tmp{output_path.suffix}")
+    temp_path.unlink(missing_ok=True)
+    try:
+        if len(parts) == 1:
+            temp_path.write_bytes(parts[0].read_bytes())
+        else:
+            params = None
+            frames: list[bytes] = []
+            for part in parts:
+                with wave.open(str(part), "rb") as wav:
+                    current = (
+                        wav.getnchannels(),
+                        wav.getsampwidth(),
+                        wav.getframerate(),
+                        wav.getcomptype(),
+                        wav.getcompname(),
+                    )
+                    if params is None:
+                        params = current
+                    elif current != params:
+                        raise AppError(
+                            502,
+                            ErrorInfo(
+                                code="EDGE_TTS_MERGE_FAILED",
+                                message="Edge TTS chunk formats did not match.",
+                                action="Try a shorter preview sentence.",
+                            ),
+                        )
+                    frames.append(wav.readframes(wav.getnframes()))
+
+            assert params is not None
+            with wave.open(str(temp_path), "wb") as merged:
+                merged.setnchannels(params[0])
+                merged.setsampwidth(params[1])
+                merged.setframerate(params[2])
+                merged.setcomptype(params[3], params[4])
+                for chunk in frames:
+                    merged.writeframes(chunk)
+        if not temp_path.is_file() or temp_path.stat().st_size < 44:
+            raise AppError(
+                502,
+                ErrorInfo(
+                    code="EDGE_TTS_SYNTHESIZE_FAILED",
+                    message="Edge TTS produced invalid audio output.",
+                    action="Retry synthesis for this segment.",
+                    retryable=True,
+                ),
+            )
+        os.replace(str(temp_path), str(output_path))
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 class EdgeTtsAdapter:

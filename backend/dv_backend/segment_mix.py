@@ -106,3 +106,43 @@ def build_narration_amix_filter(input_count: int) -> str:
         f"{labels}amix=inputs={input_count}:duration=longest:"
         f"dropout_transition={AMIX_DROPOUT_TRANSITION_SEC:.3f}:normalize=0[narration]"
     )
+
+
+def format_mix_target_duration(target_duration_sec: float) -> str:
+    """High-precision duration string for ffmpeg atrim (avoid coarse :.1f truncation)."""
+    target = float(target_duration_sec)
+    if not (target > 0) or target == float("inf"):
+        raise ValueError(f"target_duration_sec must be a finite positive number, got {target_duration_sec!r}")
+    return f"{target:.6f}"
+
+
+def duration_lock_audio_chain(target_duration_sec: float) -> str:
+    """Pad with silence then trim so a stream is exactly the video target length."""
+    target = format_mix_target_duration(target_duration_sec)
+    return f"apad,atrim=0:{target},asetpts=PTS-STARTPTS"
+
+
+def build_background_narration_mix_filter(
+    *,
+    duck: bool,
+    target_duration_sec: float,
+) -> str:
+    """Build bg+narration mix graph locked to video stream duration.
+
+    Both inputs are pad/trimmed to the target *before* amix so a short extracted
+    WAV cannot decide final length via ``duration=first``.
+    """
+    lock = duration_lock_audio_chain(target_duration_sec)
+    bg = (
+        f"[0:a]loudnorm=I=-24:TP=-4:LRA=7,alimiter=limit=0.72,{lock}[bg];"
+        f"[1:a]loudnorm=I=-16:TP=-1.5:LRA=7,alimiter=limit=0.96,{lock}[fg];"
+    )
+    if duck:
+        return (
+            bg
+            + "[fg]asplit=2[fg1][fg2];"
+            + "[bg][fg1]sidechaincompress=threshold=0.015:ratio=12:"
+            + "attack=12:release=350[ducked];"
+            + "[ducked][fg2]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mixed]"
+        )
+    return bg + "[bg][fg]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mixed]"

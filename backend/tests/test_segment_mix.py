@@ -1,7 +1,10 @@
 from dv_backend.segment_mix import (
     annotate_segment_mix_caps,
+    build_background_narration_mix_filter,
     build_narration_amix_filter,
     build_narration_segment_filter,
+    duration_lock_audio_chain,
+    format_mix_target_duration,
     scaled_segment_fades,
 )
 
@@ -53,3 +56,19 @@ def test_build_narration_amix_filter_uses_dropout_transition() -> None:
     expr = build_narration_amix_filter(2)
     assert "amix=inputs=2" in expr
     assert "dropout_transition=0.040" in expr
+
+
+def test_duration_lock_uses_high_precision_atrim() -> None:
+    assert duration_lock_audio_chain(5.123456789) == "apad,atrim=0:5.123457,asetpts=PTS-STARTPTS"
+    assert format_mix_target_duration(5.0) == "5.000000"
+
+
+def test_build_background_narration_mix_filter_locks_both_inputs_before_amix() -> None:
+    duck = build_background_narration_mix_filter(duck=True, target_duration_sec=5.0)
+    bg_only = build_background_narration_mix_filter(duck=False, target_duration_sec=5.0)
+    assert duck.count("apad,atrim=0:5.000000") == 2
+    assert bg_only.count("apad,atrim=0:5.000000") == 2
+    assert "sidechaincompress" in duck
+    assert "sidechaincompress" not in bg_only
+    assert duck.endswith("[mixed]")
+    assert bg_only.endswith("[mixed]")

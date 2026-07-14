@@ -402,6 +402,17 @@ class SegmentSpeakerPayload(BaseModel):
     speaker_id: str
 
 
+class TimingReviewEdit(BaseModel):
+    index: int
+    spoken_text: str
+    expected_plan_version: int | None = None
+
+
+class TimingReviewSubmit(BaseModel):
+    edits: list[TimingReviewEdit]
+    resume_pipeline: bool = True
+
+
 class BootstrapPayload(BaseModel):
     profile: str
 
@@ -714,8 +725,35 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             )
         return dict(updated_segment)
 
+    @app.get("/api/jobs/{job_id}/timing-review")
+    def get_timing_review(job_id: str) -> dict:
+        from .timing_review_ops import get_timing_review_payload
+
+        return get_timing_review_payload(config, job_id, settings=settings.get_all())
+
+    @app.post("/api/jobs/{job_id}/timing-review/submit")
+    def submit_timing_review(job_id: str, payload: TimingReviewSubmit) -> dict:
+        from .timing_review_ops import submit_timing_review_edits
+
+        return submit_timing_review_edits(
+            config=config,
+            database=database,
+            runner=runner,
+            job_id=job_id,
+            edits=[edit.model_dump() for edit in payload.edits],
+            resume_pipeline=bool(payload.resume_pipeline),
+        )
+
     @app.get("/api/jobs/{job_id}/output")
     def get_job_output(job_id: str) -> FileResponse:
+        from .release_eligibility import assert_formal_release_allowed
+
+        assert_formal_release_allowed(
+            config,
+            job_id,
+            settings=settings.get_all(),
+            stage="export",
+        )
         output_file = config.data_dir / "jobs" / job_id / "output" / "dubbed.mp4"
         if not output_file.is_file():
             raise AppError(
@@ -737,8 +775,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
         from .tts_provenance import resolve_voiced_tts_path
 
+        # Prefer duration_repair first — timing-review writes there before align sync.
         wav_path = None
-        for step in ("align_final_dub", "duration_repair", "tts"):
+        for step in ("duration_repair", "align_final_dub", "tts"):
             cp = load_checkpoint(config.data_dir, job_id, step) or {}
             for seg in cp.get("segments") or []:
                 if int(seg.get("index", -1)) != int(index):
@@ -757,7 +796,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     action="Wait for the TTS/duration repair steps to complete."
                 )
             )
-        return FileResponse(str(wav_path), media_type="audio/wav", filename=f"seg_{index}.wav")
+        return FileResponse(
+            str(wav_path),
+            media_type="audio/wav",
+            filename=f"seg_{index}.wav",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/api/jobs/{job_id}/folder")
     def get_job_folder(job_id: str) -> dict:
