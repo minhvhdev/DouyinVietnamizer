@@ -9,14 +9,17 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from .dubbing_languages import normalize_dub_language
+
 DATASET_VERSION = "vi_duration_v1"
 DATASET_FILENAME = "voice_duration_calibration_vi_v1.json"
 
-CALIBRATION_MODES = {
-    "quick": 20,
-    "standard": 50,
-    "full": None,
+DATASET_BY_LANGUAGE: dict[str, tuple[str, str]] = {
+    "vi": ("vi_duration_v1", "voice_duration_calibration_vi_v1.json"),
+    "th": ("th_duration_v1", "voice_duration_calibration_th_v1.json"),
 }
+
+CALIBRATION_MODES = {"full": 100}
 
 
 @dataclass(frozen=True)
@@ -29,17 +32,30 @@ class CalibrationSample:
     tags: tuple[str, ...] = ()
 
 
-def dataset_path() -> Path:
-    return Path(__file__).resolve().parent / "data" / DATASET_FILENAME
+def dataset_path(language: str | None = None) -> Path:
+    lang = normalize_dub_language(language)
+    filename = DATASET_BY_LANGUAGE.get(lang, DATASET_BY_LANGUAGE["vi"])[1]
+    return Path(__file__).resolve().parent / "data" / filename
 
 
-@lru_cache(maxsize=1)
-def load_calibration_dataset(path: Path | None = None) -> dict[str, Any]:
-    target = path or dataset_path()
+def dataset_version_for_language(language: str | None = None) -> str:
+    lang = normalize_dub_language(language)
+    return DATASET_BY_LANGUAGE.get(lang, DATASET_BY_LANGUAGE["vi"])[0]
+
+
+@lru_cache(maxsize=4)
+def load_calibration_dataset(path: Path | None = None, language: str | None = None) -> dict[str, Any]:
+    if path is None:
+        lang = normalize_dub_language(language)
+        target = dataset_path(lang)
+        default_version = dataset_version_for_language(lang)
+    else:
+        target = path
+        default_version = DATASET_VERSION
     payload = json.loads(target.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("Calibration dataset must be a JSON object.")
-    payload.setdefault("version", DATASET_VERSION)
+    payload.setdefault("version", default_version)
     samples = payload.get("samples") or []
     if not isinstance(samples, list):
         raise ValueError("Calibration dataset samples must be a list.")
@@ -96,7 +112,7 @@ def select_calibration_samples(
     mode: str,
     dataset_version: str | None = None,
 ) -> list[CalibrationSample]:
-    mode_key = (mode or "standard").strip().lower()
+    mode_key = (mode or "full").strip().lower()
     if mode_key not in CALIBRATION_MODES:
         raise ValueError(f"Unsupported calibration mode: {mode}")
     version = dataset_version or str(dataset.get("version") or DATASET_VERSION)

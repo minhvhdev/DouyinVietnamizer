@@ -49,3 +49,31 @@ def test_release_vram_resources_runs_cleanup(monkeypatch) -> None:
     }
     assert result.terminated_processes == ["job-1:1234", "llama-tts-server.exe (42)"]
     assert calls == ["clients", "asr", "torch"]
+
+
+def test_release_clients_can_target_preview_scope(monkeypatch) -> None:
+    from dv_backend.adapters import omnivoice_client
+
+    class _Client:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    preview = _Client()
+    pipeline = _Client()
+    monkeypatch.setattr(
+        omnivoice_client,
+        "_clients",
+        {
+            "scope=preview|voice-a": preview,
+            "scope=shared|voice-a": pipeline,
+        },
+    )
+
+    omnivoice_client.release_clients("preview")
+
+    assert preview.closed is True
+    assert pipeline.closed is False
+    assert list(omnivoice_client._clients) == ["scope=shared|voice-a"]

@@ -1,4 +1,4 @@
-import type { Job, JobFolder, JobsApi, RuntimeReport, TimingReviewPayload, TimingReviewSubmitResult, VoiceCalibrationStatus } from "./contracts";
+import type { Job, JobFolder, JobsApi, RuntimeReport, SegmentEditPlanResponse, SegmentEditSaveRequest, SegmentExportRequest, SegmentExportResponse, TimingReviewPayload, TimingReviewSubmitResult, VoiceCalibrationStatus, VoiceWpsEntry, VoiceWpsMeasureResult } from "./contracts";
 
 const baseUrl = import.meta.env.VITE_BACKEND_URL ?? "http://127.0.0.1:8765";
 
@@ -8,6 +8,16 @@ export function formatApiError(body: { error?: { message?: string; action?: stri
   return parts.join("\n\n") || "Backend unavailable";
 }
 
+export class ApiError extends Error {
+  code?: string;
+
+  constructor(message: string, code?: string) {
+    super(message);
+    this.name = "ApiError";
+    this.code = code;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${baseUrl}${path}`, {
     ...init,
@@ -15,7 +25,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   const body = await response.json();
   if (!response.ok) {
-    throw new Error(formatApiError(body));
+    throw new ApiError(formatApiError(body), body?.error?.code);
   }
   return body;
 }
@@ -52,7 +62,6 @@ export const api: JobsApi = {
   getSettings: () => request("/api/settings"),
   updateSettings: (payload) => request("/api/settings", { method: "PUT", body: JSON.stringify(payload) }),
   getEvents: () => request("/api/events"),
-  listOutputs: () => request("/api/outputs"),
   listClonedVoices: (backend = "omnivoice") => request<any[]>(`/api/cloned-voices?backend=${encodeURIComponent(backend)}`),
   createClonedVoice: async (name, file, backend = "omnivoice", refText) => {
     const formData = new FormData();
@@ -84,7 +93,7 @@ export const api: JobsApi = {
     }
     return response.blob();
   },
-  startVoiceCalibration: (voiceId, mode = "standard") =>
+  startVoiceCalibration: (voiceId, mode = "full") =>
     request<VoiceCalibrationStatus>(`/api/cloned-voices/${voiceId}/calibration`, {
       method: "POST",
       body: JSON.stringify({ mode }),
@@ -96,6 +105,25 @@ export const api: JobsApi = {
     request<VoiceCalibrationStatus>(`/api/cloned-voices/${voiceId}/calibration/resume`, { method: "POST" }),
   resetVoiceDurationProfile: (voiceId) =>
     request(`/api/cloned-voices/${voiceId}/duration-profile`, { method: "DELETE" }),
+  getVoiceWpsCatalog: (language) => {
+    const params = language ? `?language=${encodeURIComponent(language)}` : "";
+    return request<VoiceWpsEntry[]>(`/api/voices/wps-catalog${params}`);
+  },
+  updateVoiceWps: (catalogKey, wordsPerSecond, language) =>
+    request(`/api/voices/wps`, {
+      method: "PUT",
+      body: JSON.stringify({
+        catalog_key: catalogKey,
+        words_per_second: wordsPerSecond,
+        language,
+      }),
+    }),
+  measureVoiceWps: (catalogKey, language) =>
+    request<VoiceWpsMeasureResult>(`/api/voices/wps/measure`, {
+      method: "POST",
+      body: JSON.stringify({ catalog_key: catalogKey, language }),
+      signal: AbortSignal.timeout(1_800_000),
+    }),
   previewPresetVoice: async (voice, text) => {
     const response = await fetch(`${baseUrl}/api/voices/preview`, {
       method: "POST",
@@ -155,10 +183,21 @@ export const api: JobsApi = {
     });
     const body = await response.json();
     if (!response.ok) {
-      throw new Error(formatApiError(body));
+      throw new ApiError(formatApiError(body), body?.error?.code);
     }
     return body as TimingReviewSubmitResult;
   },
+  getSegmentEditPlan: (jobId) => request<SegmentEditPlanResponse>(`/api/jobs/${jobId}/segments/edit-plan`),
+  saveSegmentEditPlan: (jobId, payload: SegmentEditSaveRequest) =>
+    request<SegmentEditPlanResponse>(`/api/jobs/${jobId}/segments/edit-plan`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+  exportSegmentDraft: (jobId, payload: SegmentExportRequest) =>
+    request<SegmentExportResponse>(`/api/jobs/${jobId}/segments/export`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   detectHardware: () => request("/api/runtime/detect-hardware"),
   bootstrapVendor: (profile) => request("/api/runtime/bootstrap-vendor", { method: "POST", body: JSON.stringify({ profile }) }),
   bootstrapProgress: () => request("/api/runtime/bootstrap-progress")

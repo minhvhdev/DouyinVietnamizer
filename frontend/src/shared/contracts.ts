@@ -57,13 +57,34 @@ export type VoiceCalibrationStatus = {
   duration_profile_sample_count?: number;
 };
 
-export type OutputItem = {
-  job_id: string;
-  title: string;
-  title_vi: string | null;
-  source_url: string;
-  completed_at: string;
-  file_size: number;
+export type VoiceWpsEntry = {
+  catalog_key: string;
+  provider: string;
+  provider_label: string;
+  kind: string;
+  voice_id: string;
+  voice_name: string;
+  language: string;
+  words_per_second: number | null;
+  effective_words_per_second: number;
+  default_words_per_second: number;
+  profile_source: string | null;
+  profile_key: string | null;
+  cloned_voice_id: string | null;
+  duration_profile_status?: string | null;
+  measure_supported: boolean;
+};
+
+export type VoiceWpsMeasureResult = {
+  catalog_key: string;
+  words_per_second: number;
+  syllables_per_second?: number;
+  sample_count_total?: number;
+  sample_count_accepted?: number;
+  sample_count_rejected?: number;
+  prediction_mae_ms?: number;
+  profile_source?: string;
+  profile_key?: string;
 };
 
 export type JobFolder = {
@@ -119,6 +140,65 @@ export type TimingReviewSubmitResult = {
   detail?: string | null;
 };
 
+export type EditableSegmentOrigin = "pipeline" | "user";
+
+export type EditableSegmentDto = {
+  segment_id: string;
+  start_ms: number;
+  end_ms: number;
+  spoken_text: string;
+  source_text: string | null;
+  origin: EditableSegmentOrigin;
+  source_segment_index: number | null;
+};
+
+export type SegmentEditDelta = {
+  segment_id: string;
+  added?: boolean;
+  deleted?: boolean;
+  text_changed?: boolean;
+  timing_changed?: boolean;
+  order_changed?: boolean;
+};
+
+export type SegmentEditDiff = {
+  has_changes: boolean;
+  structural_changed: boolean;
+  deltas: SegmentEditDelta[];
+  requires_tts_segment_ids: string[];
+  requires_duration_check_segment_ids: string[];
+  reusable_tts_segment_ids: string[];
+  deleted_segment_ids: string[];
+};
+
+export type SegmentEditPlanResponse = {
+  schema_version: number;
+  plan_version: number;
+  applied_plan_version: number;
+  draft_segments: EditableSegmentDto[];
+  diff: SegmentEditDiff;
+};
+
+export type SegmentEditSaveRequest = {
+  expected_plan_version: number;
+  segments: Array<{
+    segment_id: string | null;
+    start_ms: number;
+    end_ms: number;
+    spoken_text: string;
+  }>;
+};
+
+export type SegmentExportRequest = {
+  expected_plan_version: number;
+};
+
+export type SegmentExportResponse = {
+  status: "unchanged" | "queued" | string;
+  captured_plan_version?: number;
+  [key: string]: unknown;
+};
+
 export type JobsApi = {
   listJobs(): Promise<Job[]>;
   createJob(sourceUrl: string): Promise<Job>;
@@ -135,16 +215,18 @@ export type JobsApi = {
   getSettings(): Promise<Record<string, any>>;
   updateSettings(payload: Record<string, any>): Promise<Record<string, any>>;
   getEvents(): Promise<any[]>;
-  listOutputs(): Promise<OutputItem[]>;
   listClonedVoices(backend?: "omnivoice"): Promise<ClonedVoice[]>;
   createClonedVoice(name: string, file: File, backend?: "omnivoice", refText?: string): Promise<ClonedVoice>;
   deleteClonedVoice(voiceId: string, backend?: "omnivoice"): Promise<{ status: string }>;
   testClonedVoice(voiceId: string, text: string, mode?: "reference" | "ultimate", backend?: "omnivoice"): Promise<Blob>;
-  startVoiceCalibration(voiceId: string, mode?: "quick" | "standard" | "full"): Promise<VoiceCalibrationStatus>;
+  startVoiceCalibration(voiceId: string, mode?: "full"): Promise<VoiceCalibrationStatus>;
   getVoiceCalibration(voiceId: string): Promise<VoiceCalibrationStatus>;
   cancelVoiceCalibration(voiceId: string): Promise<{ status: string; job_id?: string; voice_id: string }>;
   resumeVoiceCalibration(voiceId: string): Promise<VoiceCalibrationStatus>;
   resetVoiceDurationProfile(voiceId: string): Promise<{ status: string; voice_id: string }>;
+  getVoiceWpsCatalog(language?: string): Promise<VoiceWpsEntry[]>;
+  updateVoiceWps(catalogKey: string, wordsPerSecond: number, language?: string): Promise<{ catalog_key: string; words_per_second: number }>;
+  measureVoiceWps(catalogKey: string, language?: string): Promise<VoiceWpsMeasureResult>;
   previewPresetVoice(voice: string, text: string): Promise<Blob>;
   listTtsVoices(backend: string, locale?: string): Promise<Array<{ id: string; name: string; gender?: string; kind?: string }>>;
   listOpenAiModels(options?: { baseUrl?: string; apiKey?: string }): Promise<Array<{ id: string; name: string }>>;
@@ -159,6 +241,9 @@ export type JobsApi = {
     edits: Array<{ index: number; spoken_text: string; expected_plan_version?: number }>,
     resumePipeline?: boolean,
   ): Promise<TimingReviewSubmitResult>;
+  getSegmentEditPlan(jobId: string): Promise<SegmentEditPlanResponse>;
+  saveSegmentEditPlan(jobId: string, payload: SegmentEditSaveRequest): Promise<SegmentEditPlanResponse>;
+  exportSegmentDraft(jobId: string, payload: SegmentExportRequest): Promise<SegmentExportResponse>;
   detectHardware(): Promise<{ cuda_supported: boolean; vulkan_supported: boolean; avx2_supported: boolean; espeak_installed: boolean; recommendation: string }>;
   bootstrapVendor(profile: string): Promise<{ status: string }>;
   bootstrapProgress(): Promise<{

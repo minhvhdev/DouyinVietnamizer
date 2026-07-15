@@ -22,7 +22,7 @@ from dv_backend.voice_calibration_store import job_dir
 def main() -> int:
     parser = argparse.ArgumentParser(description="Calibrate voice duration profile for a cloned voice.")
     parser.add_argument("voice_id", help="Cloned voice UUID")
-    parser.add_argument("--mode", choices=["quick", "standard", "full"], default="standard")
+    parser.add_argument("--mode", choices=["full"], default="full")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dataset-version", default=None)

@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .duration_predictor import count_vietnamese_syllables, default_voice_profile, predict_spoken_duration
+from .duration_predictor import count_speech_units, default_voice_profile, predict_spoken_duration
+from .dubbing_languages import normalize_dub_language
 from .tts_speech_analysis import SpeechEnvelope, measure_speech_envelope
 from .voice_calibration_dataset import CalibrationSample
 
@@ -66,6 +67,7 @@ def evaluate_calibration_sample(
     identity_mismatch: bool = False,
     duplicate: bool = False,
     tts_failed: bool = False,
+    language: str | None = None,
 ) -> SampleEvaluation:
     if cancelled:
         return SampleEvaluation(sample.id, False, "cancelled", 0, None, None, 0.0, {})
@@ -91,7 +93,17 @@ def evaluate_calibration_sample(
         return SampleEvaluation(sample.id, False, "invalid_wav", 0, None, None, 1.0, {})
 
     clipping = _clipping_ratio(wav_path)
-    syllables = count_vietnamese_syllables(text)
+    sample_language = language
+    if not sample_language:
+        sample_id = str(sample.id or "")
+        if sample_id.startswith("th_"):
+            sample_language = "th"
+        elif sample_id.startswith("vi_"):
+            sample_language = "vi"
+        else:
+            sample_language = "vi"
+    lang = normalize_dub_language(sample_language)
+    syllables = count_speech_units(text, lang)
     analysis = {
         "analysis_schema_version": ANALYSIS_SCHEMA_VERSION,
         "raw_wav_duration": envelope.raw_wav_duration,
@@ -103,6 +115,7 @@ def evaluate_calibration_sample(
         "measurement_confidence": envelope.measurement_confidence,
         "clipping_ratio": round(clipping, 4),
         "syllables": syllables,
+        "language": lang,
     }
 
     if envelope.speech_duration <= 0.0 or envelope.measurement_confidence < 0.2:

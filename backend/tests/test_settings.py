@@ -46,13 +46,15 @@ def test_defaults_use_free_pipeline(tmp_path: Path) -> None:
     assert settings.get_all()["qwen3_asr_model"] == "Qwen/Qwen3-ASR-1.7B"
     assert settings.get_all()["gemini_api_keys"] == []
     assert settings.get_all()["asr_alignment_mode"] == "accurate"
-    assert settings.get_all()["sparse_asr_enabled"] is False
+    assert settings.get_all()["sparse_asr_enabled"] is True
     assert settings.get_all()["sparse_asr_min_silence_ratio"] == 0.35
     assert settings.get_all()["sparse_asr_chunk_sec"] == 25
     assert settings.get_all()["sparse_asr_padding_ms"] == 200
     assert settings.get_all()["sparse_asr_merge_gap_sec"] == 0.25
     assert settings.get_all()["vad_engine"] == "silero"
-    assert settings.get_all()["silero_vad_threshold"] == 0.5
+    assert settings.get_all()["silero_vad_threshold"] == 0.25
+    assert settings.get_all()["silero_vad_min_silence_duration_ms"] == 750
+    assert settings.get_all()["silero_vad_speech_pad_ms"] == 100
     assert settings.get_all()["vad_false_positive_filter_enabled"] is True
     assert settings.get_all()["vad_energy_filter_enabled"] is True
     assert settings.get_all()["vad_energy_min_vocal_ratio"] == 1.15

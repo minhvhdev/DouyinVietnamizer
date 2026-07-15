@@ -93,10 +93,10 @@ def test_outlier_detection() -> None:
 
 
 def test_quality_policy() -> None:
-    assert classify_profile_quality(accepted_count=5, validation_mae_ms=500, mode="quick") == "insufficient"
-    assert classify_profile_quality(accepted_count=12, validation_mae_ms=500, mode="quick") == "partial"
-    assert classify_profile_quality(accepted_count=30, validation_mae_ms=500, mode="standard") == "good"
-    assert classify_profile_quality(accepted_count=30, validation_mae_ms=1200, mode="standard") == "poor"
+    assert classify_profile_quality(accepted_count=5, validation_mae_ms=500, mode="full") == "insufficient"
+    assert classify_profile_quality(accepted_count=12, validation_mae_ms=500, mode="full") == "partial"
+    assert classify_profile_quality(accepted_count=30, validation_mae_ms=500, mode="full") == "good"
+    assert classify_profile_quality(accepted_count=30, validation_mae_ms=1200, mode="full") == "poor"
 
 
 def test_train_validation_split_deterministic() -> None:

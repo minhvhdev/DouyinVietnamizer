@@ -36,6 +36,37 @@ def count_vietnamese_syllables(text: str) -> int:
     return max(1, len(words)) if words else 0
 
 
+_THAI_CHAR = re.compile(r"[\u0E00-\u0E7F]")
+
+
+def count_thai_speech_units(text: str) -> int:
+    """Estimate Thai speech units (words/syllable-like) for duration calibration."""
+    cleaned = normalize_text_nfc((text or "").strip())
+    if not cleaned:
+        return 0
+    try:
+        from .subtitle_timing import _thai_word_tokens
+
+        tokens = [tok for tok in _thai_word_tokens(cleaned) if tok.strip()]
+    except Exception:
+        tokens = []
+    if len(tokens) >= 2:
+        return len(tokens)
+    thai_chars = len(_THAI_CHAR.findall(cleaned))
+    if thai_chars:
+        # Rough syllable estimate when tokenization returns a single blob.
+        return max(2, round(thai_chars / 2.4))
+    words = _WORD.findall(cleaned)
+    return max(1, len(words)) if words else 0
+
+
+def count_speech_units(text: str, language: str = "vi") -> int:
+    lang = str(language or "vi").strip().lower()
+    if lang in {"th", "thai", "thailand"}:
+        return count_thai_speech_units(text)
+    return count_vietnamese_syllables(text)
+
+
 def extract_punctuation_features(text: str) -> dict[str, int]:
     cleaned = normalize_text_nfc(text or "")
     return {

@@ -9,16 +9,8 @@ from ..errors import AppError
 from ..models import ErrorInfo
 from ..omnivoice_mps import plan_omnivoice_device
 
-SUPPORTED_TTS_BACKENDS = ("omnivoice", "edge_tts", "google_tts", "gemini_tts")
-CLOUD_TTS_BACKENDS = frozenset({"edge_tts", "google_tts", "gemini_tts"})
-GEMINI_TTS_VOICES = (
-    {"id": "Zephyr", "name": "Zephyr (Bright)"},
-    {"id": "Puck", "name": "Puck (Upbeat)"},
-    {"id": "Charon", "name": "Charon (Informative)"},
-    {"id": "Kore", "name": "Kore (Firm)"},
-    {"id": "Fenrir", "name": "Fenrir (Excitable)"},
-    {"id": "Aoede", "name": "Aoede (Breezy)"},
-)
+SUPPORTED_TTS_BACKENDS = ("omnivoice", "edge_tts", "google_tts")
+CLOUD_TTS_BACKENDS = frozenset({"edge_tts", "google_tts"})
 OMNIVOICE_DEFAULT_MODEL = "k2-fsa/OmniVoice"
 TTS_VOICE_INSTRUCT_PREFIX = "instruct:"
 MAX_TTS_CHARS = 450
@@ -205,8 +197,6 @@ def resolve_tts_voice(settings: dict) -> str:
     if backend == "google_tts":
         default_voice = str(lang_config["default_google_voice"])
         return str(settings.get("google_tts_voice") or default_voice).strip() or default_voice
-    if backend == "gemini_tts":
-        return str(settings.get("gemini_tts_voice") or "Zephyr").strip() or "Zephyr"
     if backend == "omnivoice":
         instruct = str(settings.get("omnivoice_instruct") or "").strip()
         if instruct:
@@ -359,7 +349,7 @@ class TtsSession:
             ErrorInfo(
                 code="UNSUPPORTED_TTS_BACKEND",
                 message=f"Unsupported TTS backend for session: {self.backend}",
-                action="Use omnivoice, edge_tts, google_tts, or gemini_tts.",
+                action="Use omnivoice, edge_tts, or google_tts.",
             ),
         )
 
@@ -633,17 +623,6 @@ def create_tts_adapter(settings: dict, *, data_dir: Path | None = None, runner: 
             voice=voice,
             speaking_rate=max(0.5, min(1.5, speaking_rate)),
         )
-    if backend == "gemini_tts":
-        from .gemini import GeminiKeyPool, GeminiTtsAdapter
-
-        keys = [
-            item for item in settings.get("gemini_api_keys", [])
-            if isinstance(item, dict) and item.get("key")
-        ]
-        return GeminiTtsAdapter(
-            GeminiKeyPool(keys, cursor=int(settings.get("gemini_key_cursor", 0) or 0)),
-            model=str(settings.get("gemini_tts_model") or "gemini-2.5-flash-preview-tts"),
-        )
     if backend == "omnivoice":
         from ..omnivoice_env import OMNIVOICE_DEFAULT_MODEL
         from .omnivoice_tts import (
@@ -669,6 +648,6 @@ def create_tts_adapter(settings: dict, *, data_dir: Path | None = None, runner: 
         ErrorInfo(
             code="UNSUPPORTED_TTS_BACKEND",
             message=f"Unsupported TTS backend: {backend}",
-            action="Choose omnivoice, edge_tts, google_tts, or gemini_tts.",
+            action="Choose omnivoice, edge_tts, or google_tts.",
         ),
     )

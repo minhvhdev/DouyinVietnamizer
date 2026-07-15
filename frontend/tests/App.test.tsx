@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { vi } from "vitest";
 
 import { App } from "../src/renderer/App";
@@ -53,7 +53,6 @@ const baseApi: JobsApi = {
   getSettings: vi.fn().mockResolvedValue({}),
   updateSettings: vi.fn().mockResolvedValue({}),
   getEvents: vi.fn().mockResolvedValue([]),
-  listOutputs: vi.fn().mockResolvedValue([]),
   listClonedVoices: vi.fn().mockResolvedValue([]),
   createClonedVoice: vi.fn().mockResolvedValue({ id: "voice-1", name: "Voice 1", wav_filename: "v1.wav", wav_path: "", transcript: "", transcribed: false, created_at: "" }),
   deleteClonedVoice: vi.fn().mockResolvedValue({ status: "deleted" }),
@@ -62,6 +61,42 @@ const baseApi: JobsApi = {
   cancelVoiceCalibration: vi.fn().mockResolvedValue({ status: "cancelled", voice_id: "voice-1" }),
   resumeVoiceCalibration: vi.fn().mockResolvedValue({ voice_id: "voice-1", status: "idle" }),
   resetVoiceDurationProfile: vi.fn().mockResolvedValue({ status: "reset", voice_id: "voice-1" }),
+  getVoiceWpsCatalog: vi.fn().mockResolvedValue([
+    {
+      catalog_key: "edge_tts:preset:vi-VN-HoaiMyNeural",
+      provider: "edge_tts",
+      provider_label: "Edge TTS",
+      kind: "preset",
+      voice_id: "vi-VN-HoaiMyNeural",
+      voice_name: "Hoài My",
+      language: "vi",
+      words_per_second: null,
+      effective_words_per_second: 3.2,
+      default_words_per_second: 3.2,
+      profile_source: null,
+      profile_key: "id:test",
+      cloned_voice_id: null,
+      measure_supported: true,
+    },
+    {
+      catalog_key: "edge_tts:preset:th-TH-PremwadeeNeural",
+      provider: "edge_tts",
+      provider_label: "Edge TTS",
+      kind: "preset",
+      voice_id: "th-TH-PremwadeeNeural",
+      voice_name: "Premwadee",
+      language: "th",
+      words_per_second: null,
+      effective_words_per_second: 2.8,
+      default_words_per_second: 2.8,
+      profile_source: null,
+      profile_key: "id:test-th",
+      cloned_voice_id: null,
+      measure_supported: true,
+    },
+  ]),
+  updateVoiceWps: vi.fn().mockResolvedValue({ catalog_key: "edge_tts:preset:vi-VN-HoaiMyNeural", words_per_second: 3.5 }),
+  measureVoiceWps: vi.fn().mockResolvedValue({ catalog_key: "edge_tts:preset:vi-VN-HoaiMyNeural", words_per_second: 3.4 }),
   testClonedVoice: vi.fn().mockResolvedValue(new Blob()),
   previewPresetVoice: vi.fn().mockResolvedValue(new Blob()),
   listTtsVoices: vi.fn().mockResolvedValue([
@@ -91,6 +126,37 @@ const baseApi: JobsApi = {
     remaining_count: 0,
     overlap_count: 0,
   }),
+  getSegmentEditPlan: vi.fn().mockResolvedValue({
+    schema_version: 1,
+    plan_version: 1,
+    applied_plan_version: 1,
+    draft_segments: [],
+    diff: {
+      has_changes: false,
+      structural_changed: false,
+      deltas: [],
+      requires_tts_segment_ids: [],
+      requires_duration_check_segment_ids: [],
+      reusable_tts_segment_ids: [],
+      deleted_segment_ids: [],
+    },
+  }),
+  saveSegmentEditPlan: vi.fn().mockResolvedValue({
+    schema_version: 1,
+    plan_version: 1,
+    applied_plan_version: 1,
+    draft_segments: [],
+    diff: {
+      has_changes: false,
+      structural_changed: false,
+      deltas: [],
+      requires_tts_segment_ids: [],
+      requires_duration_check_segment_ids: [],
+      reusable_tts_segment_ids: [],
+      deleted_segment_ids: [],
+    },
+  }),
+  exportSegmentDraft: vi.fn().mockResolvedValue({ status: "unchanged" }),
   detectHardware: vi.fn().mockResolvedValue({ cuda_supported: true, vulkan_supported: true, avx2_supported: true, espeak_installed: true, recommendation: "gpu_cuda" }),
   bootstrapVendor: vi.fn().mockResolvedValue({ status: "started" }),
   bootstrapProgress: vi.fn().mockResolvedValue({ status: "idle", current_task: "", download_percent: 0, download_speed_kb: 0, downloaded_bytes: 0, total_bytes: 0, error_message: "", logs: [] })
@@ -219,6 +285,31 @@ test("job details opens only by click and closes without leaving selection activ
   expect(container.querySelector(".selected-card")).toBeNull();
 });
 
+test("hides subtitle files that have no in-app action", async () => {
+  const completedJob = { ...job, status: "completed" };
+  const getJobFiles = vi.fn().mockResolvedValue([
+    {
+      key: "subtitles",
+      name: "Phụ đề (subtitles.ass)",
+      media_type: "text/plain",
+      size: 1024,
+      url: "/api/jobs/job-1/files/subtitles",
+    },
+  ]);
+  const api: JobsApi = {
+    ...baseApi,
+    listJobs: vi.fn().mockResolvedValue([completedJob]),
+    getJobFiles,
+  };
+  render(<App api={api} />);
+
+  fireEvent.click(await screen.findByText("demo"));
+
+  await waitFor(() => expect(getJobFiles).toHaveBeenCalledWith(job.id));
+  expect(screen.queryByRole("button", { name: /^Tập tin/ })).not.toBeInTheDocument();
+  expect(screen.queryByText("Phụ đề (subtitles.ass)")).not.toBeInTheDocument();
+});
+
 test("deletes completed jobs from the dashboard", async () => {
   const completedJob = { ...job, status: "completed" };
   const deleteJob = vi.fn().mockResolvedValue({ status: "deleted" });
@@ -249,6 +340,24 @@ test("shows runtime checks and reruns the smoke test", async () => {
 
   await waitFor(() => expect(api.runSmokeTest).toHaveBeenCalled());
   expect(await screen.findByText("Đã sẵn sàng")).toBeInTheDocument();
+});
+
+test("refreshes runtime status from the sidebar refresh button", async () => {
+  const runtimeStatus = vi.fn().mockResolvedValue(readyRuntime);
+  const api: JobsApi = {
+    ...baseApi,
+    listJobs: vi.fn().mockResolvedValue([]),
+    runtimeStatus,
+  };
+  render(<App api={api} />);
+
+  await waitFor(() => expect(runtimeStatus).toHaveBeenCalled());
+  const initialCalls = runtimeStatus.mock.calls.length;
+
+  fireEvent.click(screen.getByRole("button", { name: "Làm mới môi trường" }));
+
+  await waitFor(() => expect(runtimeStatus.mock.calls.length).toBeGreaterThan(initialCalls));
+  expect(screen.queryByText("Môi trường thực thi")).not.toBeInTheDocument();
 });
 
 test("opens the runtime panel and retries when the first status fetch fails", async () => {
@@ -348,6 +457,99 @@ test("shows translation and OmniVoice settings", async () => {
 
   expect(await screen.findByRole("tab", { name: "Dịch thuật" })).toBeInTheDocument();
   expect(await screen.findByText("Engine lồng tiếng")).toBeInTheDocument();
+});
+
+test("orders settings tabs to match pipeline: audio before translation", async () => {
+  const api: JobsApi = {
+    ...baseApi,
+    getSettings: vi.fn().mockResolvedValue({
+      translation_backend: "gemini",
+      tts_backend: "omnivoice",
+    }),
+  };
+  render(<App api={api} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Cài đặt" }));
+
+  const tabs = await screen.findAllByRole("tab");
+  const labels = tabs.map((tab) => tab.getAttribute("aria-label"));
+  expect(labels).toEqual(["Tải video", "Âm thanh", "Dịch thuật", "Lồng tiếng", "Phụ đề"]);
+});
+
+test("resets audio settings to defaults", async () => {
+  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+  const updateSettings = vi.fn().mockResolvedValue({});
+  const api: JobsApi = {
+    ...baseApi,
+    updateSettings,
+    getSettings: vi.fn().mockResolvedValue({
+      vad_engine: "silencedetect",
+      silero_vad_threshold: 0.8,
+      sparse_asr_enabled: true,
+      tts_backend: "omnivoice",
+    }),
+  };
+  render(<App api={api} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Cài đặt" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "Âm thanh" }));
+
+  const engineSelect = await screen.findByDisplayValue("FFmpeg silencedetect (legacy)");
+  expect(engineSelect).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Đặt lại cài đặt âm thanh" }));
+
+  expect(await screen.findByDisplayValue("Silero VAD (khuyến nghị)")).toBeInTheDocument();
+  await waitFor(() =>
+    expect(updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        vad_engine: "silero",
+        silero_vad_threshold: 0.25,
+        silero_vad_min_silence_duration_ms: 750,
+        silero_vad_speech_pad_ms: 100,
+        sparse_asr_enabled: true,
+      }),
+    ),
+  );
+  confirmSpy.mockRestore();
+});
+
+test("resets subtitle settings to defaults", async () => {
+  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+  const updateSettings = vi.fn().mockResolvedValue({});
+  const api: JobsApi = {
+    ...baseApi,
+    updateSettings,
+    getSettings: vi.fn().mockResolvedValue({
+      subtitles_enabled: true,
+      subtitle_font_size: 72,
+      subtitle_position: "top",
+      subtitle_max_chars_per_line: 20,
+      tts_backend: "omnivoice",
+    }),
+  };
+  render(<App api={api} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Cài đặt" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "Phụ đề" }));
+
+  expect(await screen.findByDisplayValue("72")).toBeInTheDocument();
+  expect(screen.getByDisplayValue("Trên cùng")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Đặt lại cài đặt phụ đề" }));
+
+  expect(await screen.findByDisplayValue("48")).toBeInTheDocument();
+  expect(screen.getByDisplayValue("Dưới cùng")).toBeInTheDocument();
+  await waitFor(() =>
+    expect(updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        subtitle_font_size: 48,
+        subtitle_position: "bottom",
+        subtitle_max_chars_per_line: 40,
+      }),
+    ),
+  );
+  confirmSpy.mockRestore();
 });
 
 test("manages Gemini API key pool from settings", async () => {
@@ -488,7 +690,7 @@ test("auto-saves settings when an input loses focus", async () => {
   );
 });
 
-test("navigates to Clone Giong tab and lists cloned voices", async () => {
+test("navigates to Giọng đọc tab and lists cloned voices", async () => {
   const clonedVoices = [
     { id: "voice-1", name: "Giọng Anh", wav_filename: "v1.wav", wav_path: "/path/v1.wav", transcript: "xin chào", transcribed: true, created_at: "2026-06-16T12:00:00Z" }
   ];
@@ -499,9 +701,233 @@ test("navigates to Clone Giong tab and lists cloned voices", async () => {
   };
   render(<App api={api} />);
 
-  fireEvent.click(await screen.findByRole("button", { name: "Clone Giọng" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Giọng đọc" }));
 
   expect(await screen.findByText("Giọng Anh")).toBeInTheDocument();
   expect(screen.getByText("OFFLINE CLONE")).toBeInTheDocument();
+  expect(screen.queryByText("Hiệu chỉnh tốc độ đọc")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Nhanh|Chuẩn|Đầy đủ|Cải thiện profile/ })).not.toBeInTheDocument();
+});
+
+test("shows WPS catalog on Tốc độ đọc mỗi giây tab", async () => {
+  render(<App api={baseApi} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Giọng đọc" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "Tốc độ đọc mỗi giây" }));
+  expect(await screen.findByText("Hoài My")).toBeInTheDocument();
+  expect(screen.getByText(/1 giọng đọc/)).toBeInTheDocument();
+  expect(screen.queryByText("Premwadee")).not.toBeInTheDocument();
+  expect(screen.getAllByRole("button", { name: "Tự đo 100 mẫu" }).length).toBeGreaterThanOrEqual(1);
+
+  fireEvent.click(screen.getByRole("tab", { name: /Tiếng Thái/ }));
+  expect(await screen.findByText("Premwadee")).toBeInTheDocument();
+  expect(screen.queryByText("Hoài My")).not.toBeInTheDocument();
+});
+
+const sampleEditPlan = {
+  schema_version: 1,
+  plan_version: 1,
+  applied_plan_version: 1,
+  draft_segments: [
+    {
+      segment_id: "seg-a",
+      start_ms: 0,
+      end_ms: 1000,
+      spoken_text: "Xin chào",
+      source_text: "你好",
+      origin: "pipeline" as const,
+      source_segment_index: 0,
+    },
+  ],
+  diff: {
+    has_changes: false,
+    structural_changed: false,
+    deltas: [],
+    requires_tts_segment_ids: [],
+    requires_duration_check_segment_ids: [],
+    reusable_tts_segment_ids: [],
+    deleted_segment_ids: [],
+  },
+};
+
+test("completed job shows editable Phân đoạn tab and loads edit-plan", async () => {
+  const completedJob = {
+    ...job,
+    status: "completed",
+    steps: job.steps.map((step) => ({ ...step, status: "completed" })),
+  };
+  const getSegmentEditPlan = vi.fn().mockResolvedValue(sampleEditPlan);
+  const api: JobsApi = {
+    ...baseApi,
+    listJobs: vi.fn().mockResolvedValue([completedJob]),
+    getSegmentEditPlan,
+  };
+  render(<App api={api} />);
+
+  fireEvent.click(await screen.findByText("demo"));
+  expect(await screen.findByText("Chi tiết tiến trình")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /^Phân đoạn/ }));
+
+  await waitFor(() => expect(getSegmentEditPlan).toHaveBeenCalledWith("job-1"));
+  expect(await screen.findByDisplayValue("Xin chào")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Lưu" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Xuất" })).toBeDisabled();
+});
+
+test("segment editor enables Save when dirty and valid, Export only after saved with diff", async () => {
+  const completedJob = {
+    ...job,
+    status: "completed",
+    steps: job.steps.map((step) => ({ ...step, status: "completed" })),
+  };
+  const savedPlan = {
+    ...sampleEditPlan,
+    plan_version: 2,
+    draft_segments: [
+      {
+        ...sampleEditPlan.draft_segments[0],
+        spoken_text: "Xin chào đã sửa",
+      },
+    ],
+    diff: { ...sampleEditPlan.diff, has_changes: true },
+  };
+  const getSegmentEditPlan = vi.fn().mockResolvedValue(sampleEditPlan);
+  const saveSegmentEditPlan = vi.fn().mockResolvedValue(savedPlan);
+  const api: JobsApi = {
+    ...baseApi,
+    listJobs: vi.fn().mockResolvedValue([completedJob]),
+    getSegmentEditPlan,
+    saveSegmentEditPlan,
+  };
+  render(<App api={api} />);
+
+  fireEvent.click(await screen.findByText("demo"));
+  fireEvent.click(await screen.findByRole("button", { name: /^Phân đoạn/ }));
+  const textarea = await screen.findByDisplayValue("Xin chào");
+  fireEvent.change(textarea, { target: { value: "Xin chào đã sửa" } });
+
+  const saveBtn = screen.getByRole("button", { name: "Lưu" });
+  expect(saveBtn).toBeEnabled();
+  expect(screen.getByText("Lưu thay đổi trước khi xuất")).toBeInTheDocument();
+
+  fireEvent.click(saveBtn);
+  await waitFor(() => expect(saveSegmentEditPlan).toHaveBeenCalled());
+  expect(saveSegmentEditPlan).toHaveBeenCalledWith("job-1", {
+    expected_plan_version: 1,
+    segments: [
+      {
+        segment_id: "seg-a",
+        start_ms: 0,
+        end_ms: 1000,
+        spoken_text: "Xin chào đã sửa",
+      },
+    ],
+  });
+  await waitFor(() => expect(screen.getByRole("button", { name: "Xuất" })).toBeEnabled());
+  expect(screen.getAllByText(/Đã lưu, chưa xuất lại|Đã lưu draft/).length).toBeGreaterThan(0);
+});
+
+test("confirms before closing drawer when segment draft is dirty", async () => {
+  const completedJob = {
+    ...job,
+    status: "completed",
+    steps: job.steps.map((step) => ({ ...step, status: "completed" })),
+  };
+  const api: JobsApi = {
+    ...baseApi,
+    listJobs: vi.fn().mockResolvedValue([completedJob]),
+    getSegmentEditPlan: vi.fn().mockResolvedValue(sampleEditPlan),
+  };
+  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+  render(<App api={api} />);
+
+  fireEvent.click(await screen.findByText("demo"));
+  fireEvent.click(await screen.findByRole("button", { name: /^Phân đoạn/ }));
+  const textarea = await screen.findByDisplayValue("Xin chào");
+  fireEvent.change(textarea, { target: { value: "Dirty" } });
+  fireEvent.click(screen.getByLabelText("Close job details"));
+
+  expect(confirmSpy).toHaveBeenCalled();
+  expect(screen.getByText("Chi tiết tiến trình")).toBeInTheDocument();
+  confirmSpy.mockRestore();
+});
+
+test("per-row Thêm đoạn sau inserts a new segment immediately after that row", async () => {
+  const completedJob = {
+    ...job,
+    status: "completed",
+    steps: job.steps.map((step) => ({ ...step, status: "completed" })),
+  };
+  const threeSegmentPlan = {
+    ...sampleEditPlan,
+    draft_segments: [
+      {
+        segment_id: "seg-a",
+        start_ms: 0,
+        end_ms: 1000,
+        spoken_text: "Đoạn A",
+        source_text: "A",
+        origin: "pipeline" as const,
+        source_segment_index: 0,
+      },
+      {
+        segment_id: "seg-b",
+        start_ms: 1000,
+        end_ms: 2000,
+        spoken_text: "Đoạn B",
+        source_text: "B",
+        origin: "pipeline" as const,
+        source_segment_index: 1,
+      },
+      {
+        segment_id: "seg-c",
+        start_ms: 2000,
+        end_ms: 3000,
+        spoken_text: "Đoạn C",
+        source_text: "C",
+        origin: "pipeline" as const,
+        source_segment_index: 2,
+      },
+    ],
+  };
+  const api: JobsApi = {
+    ...baseApi,
+    listJobs: vi.fn().mockResolvedValue([completedJob]),
+    getSegmentEditPlan: vi.fn().mockResolvedValue(threeSegmentPlan),
+  };
+  render(<App api={api} />);
+
+  fireEvent.click(await screen.findByText("demo"));
+  fireEvent.click(await screen.findByRole("button", { name: /^Phân đoạn/ }));
+  await screen.findByDisplayValue("Đoạn B");
+
+  const addButtons = screen.getAllByRole("button", { name: "Thêm đoạn sau" });
+  expect(addButtons).toHaveLength(3);
+
+  // Select C first so insert must not depend on selectedClientId.
+  fireEvent.click(screen.getByDisplayValue("Đoạn C"));
+
+  const spokenB = screen.getByDisplayValue("Đoạn B");
+  let rowB: HTMLElement | null = spokenB;
+  while (rowB && !rowB.classList.contains("seg-editor__card")) {
+    rowB = rowB.parentElement;
+  }
+  expect(rowB).toBeTruthy();
+  fireEvent.click(within(rowB as HTMLElement).getByRole("button", { name: "Thêm đoạn sau" }));
+
+  await waitFor(() => {
+    expect(screen.getAllByRole("button", { name: "Thêm đoạn sau" })).toHaveLength(4);
+  });
+  expect(screen.getByText("#1")).toBeInTheDocument();
+  expect(screen.getByText("#2")).toBeInTheDocument();
+  expect(screen.getByText("#3")).toBeInTheDocument();
+  expect(screen.getByText("#4")).toBeInTheDocument();
+
+  const spokenAreas = screen.getAllByLabelText("Bản dịch (nói)");
+  expect(spokenAreas.map((el) => (el as HTMLTextAreaElement).value)).toEqual([
+    "Đoạn A",
+    "Đoạn B",
+    "",
+    "Đoạn C",
+  ]);
 });
 

@@ -163,11 +163,11 @@ class VoiceCalibrationRunner:
                 ErrorInfo(code="VOICE_NOT_READY", message="Voice clone is not ready.", action="Finish voice clone first."),
             )
         wav_path, transcript = self._resolve_paths(row)
-        mode_key = (mode or "standard").strip().lower()
+        mode_key = (mode or "full").strip().lower()
         if mode_key not in CALIBRATION_MODES:
             raise AppError(
                 422,
-                ErrorInfo(code="INVALID_CALIBRATION_MODE", message="Invalid calibration mode.", action="Use quick, standard, or full."),
+                ErrorInfo(code="INVALID_CALIBRATION_MODE", message="Invalid calibration mode.", action="Use full (100 samples)."),
             )
         active = self.database.connection.execute(
             """
@@ -210,7 +210,7 @@ class VoiceCalibrationRunner:
             "dataset_version": dataset.get("version"),
         }
 
-    def start_calibration(self, voice_id: str, mode: str = "standard", *, resume_job_id: str | None = None) -> dict[str, Any]:
+    def start_calibration(self, voice_id: str, mode: str = "full", *, resume_job_id: str | None = None) -> dict[str, Any]:
         if resume_job_id:
             return self.resume_calibration(voice_id, resume_job_id)
         preflight = self.preflight(voice_id, mode)
@@ -343,7 +343,7 @@ class VoiceCalibrationRunner:
         quality = classify_profile_quality(
             accepted_count=accepted,
             validation_mae_ms=manifest.get("validation_mae_ms"),
-            mode=str(manifest.get("mode") or "standard"),
+            mode=str(manifest.get("mode") or "full"),
             status=str(manifest.get("status") or "running"),
         )
         return {
@@ -391,7 +391,7 @@ class VoiceCalibrationRunner:
             identity_key = identity_profile_key(identity)
             gen_hash = generation_config_hash({"speed": 1.0, "clone_mode": "reference"})
             dataset = load_calibration_dataset()
-            mode = str(manifest.get("mode") or "standard")
+            mode = str(manifest.get("mode") or "full")
             target_samples = select_calibration_samples(dataset, mode, str(manifest.get("dataset_version")))
             progress = load_progress(self.data_dir, job_id)
             sample_map = {sample.id: sample for sample in target_samples}

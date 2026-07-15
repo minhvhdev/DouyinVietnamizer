@@ -500,11 +500,13 @@ def acquire_client(
     audio_chunk_duration: float = 15.0,
     max_batch: int = DEFAULT_MAX_BATCH,
     flush_ms: int = DEFAULT_FLUSH_MS,
+    scope: str = "shared",
 ) -> OmniVoiceWorkerClient:
     max_batch = max(1, int(max_batch or DEFAULT_MAX_BATCH))
     flush_ms = max(20, int(flush_ms or DEFAULT_FLUSH_MS))
+    resolved_scope = (scope or "shared").strip().replace("|", "_") or "shared"
     key = (
-        f"{model}|{device}|{int(num_step)}|{float(speed)}|"
+        f"scope={resolved_scope}|{model}|{device}|{int(num_step)}|{float(speed)}|"
         f"{language_id or ''}|chunk={float(audio_chunk_threshold)}|{float(audio_chunk_duration)}|"
         f"batch={max_batch}|flush={flush_ms}"
     )
@@ -527,12 +529,21 @@ def acquire_client(
         return client
 
 
-def release_all_clients() -> None:
+def release_clients(scope: str | None = None) -> None:
     with _client_lock:
-        clients = list(_clients.values())
-        _clients.clear()
+        if scope is None:
+            clients = list(_clients.values())
+            _clients.clear()
+        else:
+            prefix = f"scope={scope}|"
+            keys = [key for key in _clients if key.startswith(prefix)]
+            clients = [_clients.pop(key) for key in keys]
     for client in clients:
         client.close()
+
+
+def release_all_clients() -> None:
+    release_clients()
 
 
 def client_debug_snapshot() -> dict[str, int]:

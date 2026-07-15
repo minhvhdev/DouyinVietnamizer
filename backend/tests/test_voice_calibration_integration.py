@@ -71,11 +71,11 @@ def calibration_env(tmp_path: Path):
     }
 
 
-def test_calibration_quick_job_completes_with_mock_tts(calibration_env) -> None:
+def test_calibration_full_job_completes_with_mock_tts(calibration_env) -> None:
     env = calibration_env
     runner: VoiceCalibrationRunner = env["runner"]
     dataset = load_calibration_dataset()
-    quick_samples = select_calibration_samples(dataset, "quick")
+    full_samples = select_calibration_samples(dataset, "full")
 
     with patch("dv_backend.voice_calibration_runner.TtsSession") as mock_tts_session:
         session = mock_tts_session.return_value
@@ -98,7 +98,7 @@ def test_calibration_quick_job_completes_with_mock_tts(calibration_env) -> None:
 
         session.synthesize.side_effect = synthesize
 
-        result = runner.start_calibration(env["voice_id"], "quick")
+        result = runner.start_calibration(env["voice_id"], "full")
         job_id = result["job_id"]
         thread = runner.threads.get(job_id)
         if thread:
@@ -106,7 +106,7 @@ def test_calibration_quick_job_completes_with_mock_tts(calibration_env) -> None:
 
     status = runner.get_status(env["voice_id"]) or {}
     assert status["status"] in {"ready", "partial"}
-    assert status["completed"] == len(quick_samples)
+    assert status["completed"] == len(full_samples)
 
     row = env["database"].connection.execute(
         "SELECT duration_profile_status, duration_profile_key, voice_status FROM cloned_voices WHERE id = ?",

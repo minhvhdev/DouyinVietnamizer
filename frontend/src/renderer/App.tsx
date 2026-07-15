@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
   Activity,
   AudioLines,
@@ -9,8 +9,8 @@ import {
   Languages,
   Mic2,
   Plus,
-  Radio,
   RefreshCw,
+  RotateCcw,
   Settings2,
   Subtitles,
   X,
@@ -20,6 +20,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Save,
+  ChevronLeft,
   ChevronRight,
   Trash2,
   Mic,
@@ -30,9 +31,10 @@ import {
   Server,
 } from "lucide-react";
 
-import type { ClonedVoice, Job, JobsApi, OutputItem, ReleaseVramResult, RuntimeCheck, RuntimeReport, TimingReviewPayload, VoiceCalibrationStatus } from "../shared/contracts";
+import type { ClonedVoice, Job, JobsApi, ReleaseVramResult, RuntimeCheck, RuntimeReport, TimingReviewPayload, VoiceWpsEntry } from "../shared/contracts";
 import { api as defaultApi } from "../shared/api";
 import { invokeOpenFolder, invokeRestart, probeBackendHealth, subscribeBackendEvents, waitForBackend, type BackendConnectionState, type BackendStatus, BACKEND_BASE } from "../lib/tauri-bridge";
+import { SegmentEditorPanel } from "./SegmentEditorPanel";
 import "./styles.css";
 import "./runtime.css";
 
@@ -56,13 +58,53 @@ const PRESET_VOICES = [] as const;
 
 const SETTINGS_NAV = [
   { id: "download", label: "Tải video", hint: "Cookies & yt-dlp", Icon: Download },
-  { id: "translation", label: "Dịch thuật", hint: "Google / Gemini / OpenAI", Icon: Languages },
   { id: "audio", label: "Âm thanh", hint: "VAD & nhận dạng", Icon: AudioLines },
+  { id: "translation", label: "Dịch thuật", hint: "Google / Gemini / OpenAI", Icon: Languages },
   { id: "tts", label: "Lồng tiếng", hint: "Engine & giọng đọc", Icon: Mic2 },
   { id: "subtitles", label: "Phụ đề", hint: "Chữ trên video", Icon: Subtitles },
 ] as const;
 
+const VOICE_NAV = [
+  { id: "clone", label: "Clone giọng", Icon: Mic },
+  { id: "wps", label: "Tốc độ đọc mỗi giây", Icon: AudioLines },
+] as const;
+
+const DEFAULT_AUDIO_SETTINGS = {
+  vad_engine: "silero",
+  silero_vad_threshold: 0.25,
+  silero_vad_min_speech_duration_ms: 250,
+  silero_vad_min_silence_duration_ms: 750,
+  silero_vad_speech_pad_ms: 100,
+  silencedetect_noise_db: -30,
+  silencedetect_min_silence_sec: 0.5,
+  vad_false_positive_filter_enabled: true,
+  vad_energy_filter_enabled: true,
+  vad_energy_min_vocal_ratio: 1.15,
+  sparse_asr_enabled: true,
+  sparse_asr_min_silence_ratio: 0.35,
+  sparse_asr_chunk_sec: 25,
+  sparse_asr_padding_ms: 200,
+  sparse_asr_merge_gap_sec: 0.25,
+} as const;
+
+const DEFAULT_SUBTITLE_SETTINGS = {
+  subtitles_enabled: true,
+  subtitle_font_size: 48,
+  subtitle_font_color: "#FFFFFF",
+  subtitle_background_color: "#000000",
+  subtitle_background_opacity: 95,
+  subtitle_background_padding: 12,
+  subtitle_edge_margin: 80,
+  subtitle_position: "bottom",
+  subtitle_max_chars_per_line: 40,
+  subtitle_max_lines_per_cue: 2,
+  subtitle_min_cue_duration_ms: 700,
+  subtitle_max_cue_duration_ms: 5500,
+  subtitle_inter_cue_gap_ms: 50,
+} as const;
+
 type SettingsTabId = (typeof SETTINGS_NAV)[number]["id"];
+type VoiceScreenTabId = (typeof VOICE_NAV)[number]["id"];
 type SettingsHealth = "ready" | "attention" | "neutral";
 
 function evaluateSettingsTabHealth(
@@ -89,9 +131,6 @@ function evaluateSettingsTabHealth(
       if (activeTtsBackend === "google_tts" && !settings.google_tts_api_key_configured) {
         return "attention";
       }
-      if (activeTtsBackend === "gemini_tts" && (settings.gemini_api_keys ?? []).length === 0) {
-        return "attention";
-      }
       if (activeTtsBackend === "omnivoice" && !settings.omnivoice_ref_audio && !settings.omnivoice_instruct) {
         return "attention";
       }
@@ -104,11 +143,22 @@ function evaluateSettingsTabHealth(
   }
 }
 
-function SettingsSectionHead({ title, description }: { title: string; description?: string }) {
+function SettingsSectionHead({
+  title,
+  description,
+  action,
+}: {
+  title: string;
+  description?: string;
+  action?: ReactNode;
+}) {
   return (
-    <div className="settings-section-head">
-      <h3>{title}</h3>
-      {description ? <p>{description}</p> : null}
+    <div className={`settings-section-head${action ? " settings-section-head--with-action" : ""}`}>
+      <div className="settings-section-head__text">
+        <h3>{title}</h3>
+        {description ? <p>{description}</p> : null}
+      </div>
+      {action ? <div className="settings-section-head__action">{action}</div> : null}
     </div>
   );
 }
@@ -144,10 +194,42 @@ function SettingsTabBar({
           >
             <Icon size={16} aria-hidden="true" className="settings-tabbar__icon" />
             <span className="settings-tabbar__label">{tab.label}</span>
-            <span
-              className={`settings-tabbar__dot${health === "ready" ? " ready" : health === "attention" ? " attention" : ""}`}
-              title={health === "attention" ? "Cần cấu hình thêm" : health === "ready" ? "Sẵn sàng" : "Tùy chọn"}
-            />
+            {health === "attention" && (
+              <span className="settings-tabbar__dot attention" title="Cần cấu hình thêm" />
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function VoiceScreenTabBar({
+  activeTab,
+  onSelect,
+}: {
+  activeTab: VoiceScreenTabId;
+  onSelect: (id: VoiceScreenTabId) => void;
+}) {
+  return (
+    <div className="settings-tabbar" role="tablist" aria-label="Nhóm giọng đọc">
+      {VOICE_NAV.map((tab) => {
+        const Icon = tab.Icon;
+        return (
+          <button
+            key={tab.id}
+            type="button"
+            role="tab"
+            aria-label={tab.label}
+            aria-selected={activeTab === tab.id}
+            className={`settings-tabbar__item${activeTab === tab.id ? " active" : ""}`}
+            onClick={(event) => {
+              onSelect(tab.id);
+              event.currentTarget.scrollIntoView?.({ inline: "nearest", block: "nearest" });
+            }}
+          >
+            <Icon size={16} aria-hidden="true" className="settings-tabbar__icon" />
+            <span className="settings-tabbar__label">{tab.label}</span>
           </button>
         );
       })}
@@ -245,11 +327,6 @@ const TTS_BACKEND_OPTIONS = [
     label: "Google TTS",
     hint: "Google Cloud Standard, hỗ trợ vi-VN và th-TH",
   },
-  {
-    id: "gemini_tts",
-    label: "Gemini TTS",
-    hint: "Google AI Studio, cần khóa API",
-  },
 ] as const;
 
 const GOOGLE_TTS_VOICES = [
@@ -266,15 +343,6 @@ function googleTtsVoicesForLanguage(language?: string) {
   const locale = getDubLanguageOption(language).googleLocale.toLowerCase();
   return GOOGLE_TTS_VOICES.filter((voice) => voice.id.toLowerCase().startsWith(locale));
 }
-
-const GEMINI_TTS_VOICES = [
-  { id: "Zephyr", name: "Zephyr (Sáng)" },
-  { id: "Puck", name: "Puck (Vui)" },
-  { id: "Charon", name: "Charon (Trầm)" },
-  { id: "Kore", name: "Kore (Chắc)" },
-  { id: "Fenrir", name: "Fenrir (Sôi nổi)" },
-  { id: "Aoede", name: "Aoede (Nhẹ)" },
-] as const;
 
 const translateStatus = (status?: string) => {
   if (!status) return "đang kiểm tra";
@@ -537,7 +605,7 @@ function buildAppNotices(input: {
 }
 
 export function App({ api = defaultApi }: { api?: JobsApi }) {
-  const [activeTab, setActiveTab] = useState<"jobs" | "outputs" | "settings" | "cloning">("jobs");
+  const [activeTab, setActiveTab] = useState<"jobs" | "settings" | "cloning">("jobs");
   const [jobs, setJobs] = useState<Job[]>([]);
   const jobsRef = useRef<Job[]>([]);
   const [videoFiles, setVideoFiles] = useState<File[]>([]);
@@ -577,7 +645,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   const backendPollFailuresRef = useRef(0);
   const lastJobsPollAtRef = useRef(0);
   const lastJobDetailsRefreshAtRef = useRef(0);
-  const lastOutputsRefreshAtRef = useRef(0);
   const lastClonedVoicesRefreshAtRef = useRef(0);
 
   useEffect(() => {
@@ -589,6 +656,8 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
   const [drawerTab, setDrawerTab] = useState<"steps" | "segments" | "files">("steps");
   const [durationRepairCp, setDurationRepairCp] = useState<any | null>(null);
+  const [segmentEditDirty, setSegmentEditDirty] = useState(false);
+  const [segmentEditorEnabled, setSegmentEditorEnabled] = useState(false);
   const [timingReview, setTimingReview] = useState<TimingReviewPayload | null>(null);
   const [timingReviewDrafts, setTimingReviewDrafts] = useState<Record<number, string>>({});
   const [timingReviewSubmitting, setTimingReviewSubmitting] = useState(false);
@@ -596,14 +665,16 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   /** Per-segment audio cache-bust; only bump after successful re-TTS so typing does not reload WAVs. */
   const [timingReviewAudioBust, setTimingReviewAudioBust] = useState<Record<number, number>>({});
   const [jobFiles, setJobFiles] = useState<any[]>([]);
+  const playableJobFiles = useMemo(
+    () => jobFiles.filter((file) => getPlayableJobFileKind(file) !== null),
+    [jobFiles],
+  );
   const [rerunModalOpen, setRerunModalOpen] = useState(false);
   const [rerunKeepSteps, setRerunKeepSteps] = useState<string[]>([]);
   const [rerunSubmitting, setRerunSubmitting] = useState(false);
   const [jobStartBusyId, setJobStartBusyId] = useState<string | null>(null);
   const jobStartInFlightRef = useRef<string | null>(null);
 
-  // Outputs gallery state
-  const [outputs, setOutputs] = useState<OutputItem[]>([]);
   const [activeVideoUrl, setActiveVideoUrl] = useState<string | null>(null);
 
   // Settings form state
@@ -628,8 +699,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     gemini_translation_model: "gemini-2.5-flash",
     openai_api_base: "https://api.openai.com/v1",
     openai_translation_model: "",
-    gemini_tts_model: "gemini-2.5-flash-preview-tts",
-    gemini_tts_voice: "Zephyr",
     tts_backend: "omnivoice",
     edge_tts_voice: "vi-VN-HoaiMyNeural",
     google_tts_voice: "vi-VN-Standard-A",
@@ -655,6 +724,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   const [openAiModels, setOpenAiModels] = useState<Array<{ id: string; name: string }>>([]);
   const [openAiModelsLoading, setOpenAiModelsLoading] = useState(false);
   const ttsPreviewUrlRef = useRef<string | null>(null);
+  const ttsPreviewShouldAutoPlayRef = useRef(false);
 
   // Cloned voices states
   const [clonedVoicesByBackend, setClonedVoicesByBackend] = useState<Record<CloneBackend, ClonedVoice[]>>({
@@ -670,9 +740,16 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   const [testText, setTestText] = useState<Record<string, string>>({});
   const [testSynthesizing, setTestSynthesizing] = useState<Record<string, boolean>>({});
   const [testAudioUrls, setTestAudioUrls] = useState<Record<string, string>>({});
-  const [calibrationStatusByVoice, setCalibrationStatusByVoice] = useState<Record<string, VoiceCalibrationStatus>>({});
-  const [calibrationBusy, setCalibrationBusy] = useState<Record<string, boolean>>({});
-  const [calibrationDialogVoiceId, setCalibrationDialogVoiceId] = useState<string | null>(null);
+  const [voiceScreenTab, setVoiceScreenTab] = useState<VoiceScreenTabId>("clone");
+  const [wpsCatalog, setWpsCatalog] = useState<VoiceWpsEntry[]>([]);
+  const [wpsDrafts, setWpsDrafts] = useState<Record<string, string>>({});
+  const [wpsLoading, setWpsLoading] = useState(false);
+  const [wpsSaving, setWpsSaving] = useState<Record<string, boolean>>({});
+  const [wpsMeasuring, setWpsMeasuring] = useState<Record<string, boolean>>({});
+  const [wpsError, setWpsError] = useState<string | null>(null);
+  const [wpsPage, setWpsPage] = useState(1);
+  const [wpsLanguage, setWpsLanguage] = useState<string>("vi");
+  const WPS_PAGE_SIZE = 6;
   const activeTtsBackend = settings.tts_backend ?? "omnivoice";
   const activeCloneBackend: CloneBackend = "omnivoice";
   const clonedVoices = clonedVoicesByBackend[activeCloneBackend] ?? [];
@@ -839,7 +916,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     void (async () => {
       try {
         await refreshJobs();
-        await refreshOutputs();
         await loadSettings();
         if (activeTab === "cloning" || activeTab === "settings") {
           await refreshClonedVoices();
@@ -889,10 +965,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
       }).catch(() => {
         // Connection recovery is handled by the dedicated backend health poll.
       });
-      if (activeTab === "outputs" && now - lastOutputsRefreshAtRef.current >= 6_000) {
-        lastOutputsRefreshAtRef.current = now;
-        refreshOutputs();
-      }
       if (activeTab === "cloning" && now - lastClonedVoicesRefreshAtRef.current >= 8_000) {
         lastClonedVoicesRefreshAtRef.current = now;
         refreshClonedVoices();
@@ -972,110 +1044,109 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     }
   }
 
-  function formatDurationProfileStatus(voice: ClonedVoice, live?: VoiceCalibrationStatus): string {
-    const status = live?.status || voice.duration_profile_status || "not_started";
-    if (status === "running" || status === "queued") {
-      const completed = live?.completed ?? 0;
-      const total = live?.total ?? 0;
-      return total > 0 ? `Đang hiệu chỉnh ${completed}/${total}` : "Đang hiệu chỉnh";
-    }
-    if (status === "ready") {
-      const count = voice.duration_profile_sample_count || live?.accepted || 0;
-      return `Sẵn sàng — ${count} mẫu`;
-    }
-    if (status === "partial") {
-      const count = voice.duration_profile_sample_count || live?.accepted || 0;
-      return `Một phần — ${count} mẫu`;
-    }
-    if (status === "failed") return "Lỗi hiệu chỉnh";
-    if (status === "stale") return "Cần chạy lại";
-    if (status === "cancelled") return "Đã hủy hiệu chỉnh";
-    return "Chưa hiệu chỉnh";
-  }
-
-  async function refreshCalibrationStatus(voiceId: string) {
+  const loadWpsCatalog = useCallback(async () => {
+    setWpsLoading(true);
+    setWpsError(null);
     try {
-      const status = await api.getVoiceCalibration(voiceId);
-      setCalibrationStatusByVoice((prev) => ({ ...prev, [voiceId]: status }));
-      return status;
-    } catch {
-      return null;
-    }
-  }
-
-  async function handleStartCalibration(voiceId: string, mode: "quick" | "standard" | "full") {
-    setCalibrationBusy((prev) => ({ ...prev, [voiceId]: true }));
-    setVoiceError(null);
-    try {
-      const status = await api.startVoiceCalibration(voiceId, mode);
-      setCalibrationStatusByVoice((prev) => ({ ...prev, [voiceId]: status }));
-      setCalibrationDialogVoiceId(null);
-      await refreshClonedVoices(cloningBackend);
+      const entries = await api.getVoiceWpsCatalog("all");
+      setWpsCatalog(entries);
+      setWpsPage(1);
+      setWpsDrafts(
+        Object.fromEntries(
+          entries.map((entry) => [
+            entry.catalog_key,
+            String(entry.words_per_second ?? entry.effective_words_per_second ?? entry.default_words_per_second),
+          ]),
+        ),
+      );
     } catch (cause) {
-      setVoiceError(cause instanceof Error ? cause.message : "Không thể bắt đầu hiệu chỉnh");
+      setWpsError(cause instanceof Error ? cause.message : "Không thể tải danh sách tốc độ đọc");
     } finally {
-      setCalibrationBusy((prev) => ({ ...prev, [voiceId]: false }));
+      setWpsLoading(false);
     }
-  }
+  }, []);
 
-  async function handleCancelCalibration(voiceId: string) {
-    setCalibrationBusy((prev) => ({ ...prev, [voiceId]: true }));
+  const wpsFiltered = useMemo(
+    () => wpsCatalog.filter((entry) => entry.language === wpsLanguage),
+    [wpsCatalog, wpsLanguage],
+  );
+  const wpsTotalPages = Math.max(1, Math.ceil(wpsFiltered.length / WPS_PAGE_SIZE));
+  const wpsPageSafe = Math.min(wpsPage, wpsTotalPages);
+  const wpsPageEntries = useMemo(() => {
+    const start = (wpsPageSafe - 1) * WPS_PAGE_SIZE;
+    return wpsFiltered.slice(start, start + WPS_PAGE_SIZE);
+  }, [wpsFiltered, wpsPageSafe]);
+
+  useEffect(() => {
+    setWpsPage(1);
+  }, [wpsLanguage]);
+
+  async function handleSaveVoiceWps(catalogKey: string) {
+    const raw = wpsDrafts[catalogKey];
+    const parsed = Number.parseFloat(raw);
+    if (!Number.isFinite(parsed) || parsed < 2 || parsed > 5) {
+      setWpsError("Tốc độ đọc phải từ 2.0 đến 5.0 từ/giây.");
+      return;
+    }
+    const entry = wpsCatalog.find((item) => item.catalog_key === catalogKey);
+    const language = entry?.language ?? "vi";
+    setWpsSaving((prev) => ({ ...prev, [catalogKey]: true }));
+    setWpsError(null);
     try {
-      await api.cancelVoiceCalibration(voiceId);
-      await refreshCalibrationStatus(voiceId);
-      await refreshClonedVoices(cloningBackend);
+      const result = await api.updateVoiceWps(catalogKey, parsed, language);
+      setWpsCatalog((prev) =>
+        prev.map((item) =>
+          item.catalog_key === catalogKey
+            ? {
+                ...item,
+                words_per_second: result.words_per_second,
+                effective_words_per_second: result.words_per_second,
+                profile_source: "manual",
+              }
+            : item,
+        ),
+      );
+      setWpsDrafts((prev) => ({ ...prev, [catalogKey]: String(result.words_per_second) }));
+      setVoiceNotice(`Đã lưu tốc độ ${result.words_per_second} từ/giây.`);
     } catch (cause) {
-      setVoiceError(cause instanceof Error ? cause.message : "Không thể hủy hiệu chỉnh");
+      setWpsError(cause instanceof Error ? cause.message : "Không thể lưu tốc độ đọc");
     } finally {
-      setCalibrationBusy((prev) => ({ ...prev, [voiceId]: false }));
+      setWpsSaving((prev) => ({ ...prev, [catalogKey]: false }));
     }
   }
 
-  async function handleResumeCalibration(voiceId: string) {
-    setCalibrationBusy((prev) => ({ ...prev, [voiceId]: true }));
+  async function handleMeasureVoiceWps(catalogKey: string) {
+    setWpsMeasuring((prev) => ({ ...prev, [catalogKey]: true }));
+    setWpsError(null);
     try {
-      const status = await api.resumeVoiceCalibration(voiceId);
-      setCalibrationStatusByVoice((prev) => ({ ...prev, [voiceId]: status }));
-      await refreshClonedVoices(cloningBackend);
+      const entry = wpsCatalog.find((item) => item.catalog_key === catalogKey);
+      const language = entry?.language ?? "vi";
+      const result = await api.measureVoiceWps(catalogKey, language);
+      setWpsCatalog((prev) =>
+        prev.map((item) =>
+          item.catalog_key === catalogKey
+            ? {
+                ...item,
+                words_per_second: result.words_per_second,
+                effective_words_per_second: result.words_per_second,
+                profile_source: result.profile_source ?? "auto_measure",
+              }
+            : item,
+        ),
+      );
+      setWpsDrafts((prev) => ({ ...prev, [catalogKey]: String(result.words_per_second) }));
     } catch (cause) {
-      setVoiceError(cause instanceof Error ? cause.message : "Không thể tiếp tục hiệu chỉnh");
+      setWpsError(cause instanceof Error ? cause.message : "Không thể tự đo tốc độ đọc");
     } finally {
-      setCalibrationBusy((prev) => ({ ...prev, [voiceId]: false }));
-    }
-  }
-
-  async function handleResetDurationProfile(voiceId: string) {
-    if (!confirm("Đặt lại profile tốc độ đọc? Giọng clone vẫn giữ nguyên.")) return;
-    try {
-      await api.resetVoiceDurationProfile(voiceId);
-      await refreshClonedVoices(cloningBackend);
-      setCalibrationStatusByVoice((prev) => {
-        const next = { ...prev };
-        delete next[voiceId];
-        return next;
-      });
-    } catch (cause) {
-      setVoiceError(cause instanceof Error ? cause.message : "Không thể đặt lại profile");
+      setWpsMeasuring((prev) => ({ ...prev, [catalogKey]: false }));
     }
   }
 
   useEffect(() => {
-    if (activeTab !== "cloning") return;
-    const running = cloningVoices.filter((voice) =>
-      ["running", "queued"].includes(voice.duration_profile_status || calibrationStatusByVoice[voice.id]?.status || "")
-    );
-    if (running.length === 0) return;
-    const timer = window.setInterval(() => {
-      running.forEach((voice) => {
-        void refreshCalibrationStatus(voice.id).then((status) => {
-          if (status && ["ready", "partial", "failed", "cancelled"].includes(status.status)) {
-            void refreshClonedVoices(cloningBackend);
-          }
-        });
-      });
-    }, 2000);
-    return () => window.clearInterval(timer);
-  }, [activeTab, cloningBackend, cloningVoices, calibrationStatusByVoice]);
+    if (activeTab !== "cloning" || voiceScreenTab !== "wps") return;
+    void loadWpsCatalog();
+  }, [activeTab, voiceScreenTab, loadWpsCatalog]);
+
 
   async function handleUploadVoice(e: FormEvent) {
     e.preventDefault();
@@ -1100,7 +1171,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
       setVoiceNotice(
         `Đã lưu giọng OmniVoice với ref_text ${(created.transcript ?? "").length} ký tự. Sẵn sàng clone.`,
       );
-      setCalibrationDialogVoiceId(created.id);
       setVoiceName("");
       setVoiceFile(null);
       setVoiceRefText("");
@@ -1182,17 +1252,12 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     }
   }
 
-  async function refreshOutputs() {
-    try {
-      setOutputs(await api.listOutputs());
-    } catch (cause) {
-      console.error(cause);
-    }
-  }
-
   async function loadSettings() {
     try {
       const data = await api.getSettings();
+      if (data?.tts_backend === "gemini_tts") {
+        data.tts_backend = "omnivoice";
+      }
       setSettings(data);
     } catch (cause) {
       console.error(cause);
@@ -1475,10 +1540,15 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   }
 
   async function handleSelectJob(job: Job) {
+    if (selectedJobId && job.id !== selectedJobId && segmentEditDirty) {
+      if (!confirm("Bạn có thay đổi phân đoạn chưa lưu. Rời đi và hủy thay đổi?")) return;
+    }
     setSelectedJobId(job.id);
     setSelectedJob(job);
     setResolveCp(null);
     setDurationRepairCp(null);
+    setSegmentEditDirty(false);
+    setSegmentEditorEnabled(job.status === "completed");
     setTimingReview(null);
     setTimingReviewDrafts({});
     setTimingReviewAudioBust({});
@@ -1491,16 +1561,29 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   }
 
   function closeSelectedJob() {
+    if (segmentEditDirty) {
+      if (!confirm("Bạn có thay đổi phân đoạn chưa lưu. Rời đi và hủy thay đổi?")) return;
+    }
     setSelectedJobId(null);
     setSelectedJob(null);
     setResolveCp(null);
     setDurationRepairCp(null);
+    setSegmentEditDirty(false);
+    setSegmentEditorEnabled(false);
     setTimingReview(null);
     setTimingReviewDrafts({});
     setTimingReviewAudioBust({});
     setTimingReviewMessage(null);
     setJobFiles([]);
     closeRerunModal();
+  }
+
+  function switchDrawerTab(next: "steps" | "segments" | "files") {
+    if (drawerTab === "segments" && next !== "segments" && segmentEditDirty) {
+      if (!confirm("Bạn có thay đổi phân đoạn chưa lưu. Rời đi và hủy thay đổi?")) return;
+      setSegmentEditDirty(false);
+    }
+    setDrawerTab(next);
   }
 
   function getDefaultKeepSteps(job: Job): string[] {
@@ -1605,7 +1688,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
         closeSelectedJob();
       }
       refreshJobs();
-      refreshOutputs();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Không thể xóa tiến trình");
     }
@@ -1719,6 +1801,20 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     return () => window.clearTimeout(timer);
   }, [activeTab, settings, newGeminiKey, newGoogleTtsKey, newOpenAiKey]);
 
+  function resetAudioSettings() {
+    if (!window.confirm("Đặt lại toàn bộ cài đặt Âm thanh về mặc định?")) {
+      return;
+    }
+    setSettings((current) => ({ ...current, ...DEFAULT_AUDIO_SETTINGS }));
+  }
+
+  function resetSubtitleSettings() {
+    if (!window.confirm("Đặt lại toàn bộ cài đặt Phụ đề về mặc định?")) {
+      return;
+    }
+    setSettings((current) => ({ ...current, ...DEFAULT_SUBTITLE_SETTINGS }));
+  }
+
   async function handleAddGeminiKey() {
     const key = newGeminiKey.trim();
     if (!key) return;
@@ -1795,8 +1891,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
           ? settings.edge_tts_voice
           : backend === "google_tts"
             ? settings.google_tts_voice
-          : backend === "gemini_tts"
-            ? settings.gemini_tts_voice
             : undefined;
       const blob = await api.previewTts(text, {
         backend,
@@ -1806,8 +1900,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
           edge_tts_voice: settings.edge_tts_voice,
           google_tts_voice: settings.google_tts_voice,
           google_tts_api_key: newGoogleTtsKey.trim() || undefined,
-          gemini_tts_model: settings.gemini_tts_model,
-          gemini_tts_voice: settings.gemini_tts_voice,
           omnivoice_ref_audio: settings.omnivoice_ref_audio,
           omnivoice_ref_text: settings.omnivoice_ref_text,
           omnivoice_instruct: settings.omnivoice_instruct,
@@ -1820,6 +1912,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
       }
       const url = URL.createObjectURL(blob);
       ttsPreviewUrlRef.current = url;
+      ttsPreviewShouldAutoPlayRef.current = true;
       setTtsPreviewUrl(url);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : "Không thể nghe thử giọng đọc";
@@ -1851,6 +1944,20 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     const sizes = ["Bytes", "KB", "MB", "GB"];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+  }
+
+  type PlayableJobFileKind = "video" | "audio";
+
+  function getPlayableJobFileKind(file: { media_type?: string }): PlayableJobFileKind | null {
+    const mediaType = file.media_type ?? "";
+    if (mediaType.startsWith("video")) return "video";
+    if (mediaType.startsWith("audio")) return "audio";
+    return null;
+  }
+
+  function jobFileIcon(kind: PlayableJobFileKind) {
+    if (kind === "video") return <FileVideo size={18} style={{ color: "var(--dv-accent-ink)" }} />;
+    return <FileAudio size={18} style={{ color: "var(--dv-success)" }} />;
   }
 
   function formatBackendClock(timestamp: number | null): string {
@@ -2049,7 +2156,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
           <div>
             <strong>Douyin</strong>
             <br />
-            <small style={{ color: "#8170ff", fontWeight: 600 }}>Vietnamizer</small>
+            <small style={{ color: "var(--dv-accent)", fontWeight: 600 }}>Vietnamizer</small>
           </div>
         </div>
         <nav>
@@ -2057,10 +2164,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
             <Activity size={18} /> Tiến trình
           </button>
           <button className={activeTab === "cloning" ? "active" : ""} onClick={() => setActiveTab("cloning")}>
-            <Mic size={18} /> Clone Giọng
-          </button>
-          <button className={activeTab === "outputs" ? "active" : ""} onClick={() => setActiveTab("outputs")}>
-            <Radio size={18} /> Thành phẩm
+            <Mic size={18} /> Giọng đọc
           </button>
           <button className={activeTab === "settings" ? "active" : ""} onClick={() => setActiveTab("settings")}>
             <Settings2 size={18} /> Cài đặt
@@ -2079,57 +2183,84 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
               <small>{visibleNotices.length > 0 ? "Có thông báo cần xem" : "Không có thông báo"}</small>
             </div>
           </button>
-          <button
-            type="button"
-            className={`backend-status backend-status--${backendConnection}`}
-            onClick={() => void checkBackendHealth()}
-            disabled={backendChecking || recoveringBackendRef.current}
-            title={
-              backendConnection === "online"
-                ? `Backend phản hồi ổn định. Lần kiểm tra gần nhất: ${formatBackendClock(backendCheckedAt)}`
-                : `Backend ${backendConnectionLabel(backendConnection).toLowerCase()} — bấm để kiểm tra lại`
-            }
-            aria-label="Kiểm tra backend"
-          >
-            <i />
-            <div>
-              <strong>
-                <Server size={14} style={{ display: "inline", marginRight: 6, verticalAlign: "-2px" }} />
-                Backend: {backendConnectionLabel(backendConnection)}
-              </strong>
-              <small>
-                {backendConnection === "online"
-                  ? `OK lúc ${formatBackendClock(backendLastOkAt)}`
-                  : backendConnection === "restarting"
-                    ? (backendNotice ?? "Đang kết nối lại…")
-                    : backendCheckedAt
-                      ? `Mất kết nối · kiểm tra ${formatBackendClock(backendCheckedAt)}`
-                      : "Chưa kiểm tra"}
-              </small>
-            </div>
-            <RefreshCw size={14} className={backendChecking ? "spin" : undefined} />
-          </button>
-          <button
-            className={`runtime ${runtime?.status ?? (runtimeError ? "warning" : "loading")}`}
-            onClick={openRuntimePanel}
-          >
-            <i />
-            <div>
-              <strong>Môi trường: {formatSidebarEnvironment(runtime)}</strong>
-              <small>VRAM {formatSidebarVram(runtime)}</small>
-            </div>
-          </button>
+          <div className="runtime-row">
+            <button
+              type="button"
+              className="runtime"
+              onClick={() => void checkBackendHealth()}
+              disabled={backendChecking || recoveringBackendRef.current}
+              title={
+                backendConnection === "online"
+                  ? `Backend phản hồi ổn định. Lần kiểm tra gần nhất: ${formatBackendClock(backendCheckedAt)}`
+                  : `Backend ${backendConnectionLabel(backendConnection).toLowerCase()} — bấm để kiểm tra lại`
+              }
+              aria-label="Kiểm tra backend"
+            >
+              <div>
+                <strong>
+                  <Server size={14} style={{ display: "inline", marginRight: 6, verticalAlign: "-2px" }} />
+                  Backend: {backendConnectionLabel(backendConnection)}
+                </strong>
+                <small>
+                  {backendConnection === "online"
+                    ? `OK lúc ${formatBackendClock(backendLastOkAt)}`
+                    : backendConnection === "restarting"
+                      ? (backendNotice ?? "Đang kết nối lại…")
+                      : backendCheckedAt
+                        ? `Mất kết nối · kiểm tra ${formatBackendClock(backendCheckedAt)}`
+                        : "Chưa kiểm tra"}
+                </small>
+              </div>
+            </button>
+            <button
+              type="button"
+              className="runtime-refresh"
+              onClick={() => void checkBackendHealth()}
+              disabled={backendChecking || recoveringBackendRef.current}
+              title="Kiểm tra lại backend"
+              aria-label="Kiểm tra lại backend"
+            >
+              <RefreshCw size={14} className={backendChecking ? "spin" : undefined} />
+            </button>
+          </div>
+          <div className="runtime-row">
+            <button
+              type="button"
+              className={`runtime ${runtime?.status ?? (runtimeError ? "warning" : "loading")}`}
+              onClick={openRuntimePanel}
+              title="Xem chi tiết môi trường"
+              aria-label={`Môi trường: ${formatSidebarEnvironment(runtime)}`}
+            >
+              <div>
+                <strong>Môi trường: {formatSidebarEnvironment(runtime)}</strong>
+                <small>VRAM {formatSidebarVram(runtime)}</small>
+              </div>
+            </button>
+            <button
+              type="button"
+              className="runtime-refresh"
+              onClick={() => {
+                if (!runtimeLoading) {
+                  void refreshRuntime();
+                }
+              }}
+              disabled={runtimeLoading}
+              title="Làm mới trạng thái môi trường và VRAM"
+              aria-label="Làm mới môi trường"
+            >
+              <RefreshCw size={14} className={runtimeLoading ? "spin" : undefined} />
+            </button>
+          </div>
         </div>
       </aside>
 
-      <main className={activeTab === "settings" ? "main--settings" : undefined}>
+      <main className={activeTab === "settings" || activeTab === "cloning" ? "main--settings" : undefined}>
         {activeTab === "jobs" && (
           <>
             <header>
               <div>
                 <h1>Bảng điều khiển tiến trình</h1>
               </div>
-              <span className="phase">Tiến trình hoạt động</span>
             </header>
 
             <section className="new-job">
@@ -2212,41 +2343,39 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                       style={{ cursor: "pointer", transition: "border-color 0.2s" }}
                       className={`job-card ${selectedJobId === job.id ? "selected-card" : ""}`}
                     >
+                      {isDeletableJob(job) && (
+                        <button
+                          aria-label={`Xóa tiến trình ${job.id}`}
+                          className="danger-button job-delete"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            deleteJob(job.id);
+                          }}
+                        >
+                          <Trash2 size={14} /> Xóa
+                        </button>
+                      )}
                       <div className="job-top">
-                        <div style={{ flex: 1, marginRight: "12px" }}>
+                        <div className="job-top-main">
                           <span className={`status ${job.status}`}>{translateJobStatus(job.status)}</span>
-                          <h3 style={{ margin: "8px 0 4px", fontSize: "16px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          <h3 className="job-title">
                             {formatJobLabel(job)}
                           </h3>
                           {job.title_vi && job.title && job.title_vi !== job.title && (
-                            <small style={{ color: "#747d90", display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            <small className="job-subtitle">
                               {job.title}
                             </small>
                           )}
                           {job.last_error_code && job.status === "failed" && (
-                            <small style={{ color: "#f16f7e", display: "block", marginTop: "6px" }}>
+                            <small className="job-error">
                               {job.last_error_code}: {job.last_error_message}
                             </small>
                           )}
-                          <small style={{ fontFamily: "monospace", color: "#626b7d" }}>{job.id}</small>
+                          <small className="job-id">{job.id}</small>
                         </div>
-                        <div style={{ textAlign: "right" }}>
-                          <b>{completedSteps} / {job.steps.length} bước</b>
-                          <br />
-                          <small style={{ color: "#747d90" }}>{new Date(job.created_at).toLocaleTimeString()}</small>
-                          {isDeletableJob(job) && (
-                            <button
-                              aria-label={`Xóa tiến trình ${job.id}`}
-                              className="danger-button"
-                              style={{ marginTop: "8px", padding: "7px 10px" }}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                deleteJob(job.id);
-                              }}
-                            >
-                              <Trash2 size={14} /> Xóa
-                            </button>
-                          )}
+                        <div className="job-top-actions">
+                          <b className="job-progress">{completedSteps} / {job.steps.length} bước</b>
+                          <small className="job-time">{new Date(job.created_at).toLocaleTimeString()}</small>
                         </div>
                       </div>
                       <div className="timeline">
@@ -2266,22 +2395,28 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
           <>
             <header className="settings-header settings-header--cloning">
               <div>
-                <h1>Quản lý giọng nói nhân bản (Voice Cloning)</h1>
+                <h1>Giọng đọc</h1>
                 <p className="settings-subtitle">
-                  OmniVoice: upload audio mẫu 3–10 giây và dán ref_text khớp nguyên văn với nội dung audio.
+                  Quản lý giọng clone OmniVoice và tốc độ đọc (từ/giây) cho mọi provider TTS.
                 </p>
               </div>
             </header>
 
-            {voiceNotice && (
-              <div className="success" style={{ marginBottom: "20px" }}>
-                <span className="voice-notice-check" aria-hidden="true">
-                  <CheckCircle2 size={14} />
-                </span>
-                <span>{voiceNotice}</span>
+            <div className="settings-page">
+              <VoiceScreenTabBar activeTab={voiceScreenTab} onSelect={setVoiceScreenTab} />
+              <div className="settings-content-scroll">
+            {(voiceNotice || voiceError || wpsError) && (
+              <div className={voiceError || wpsError ? "error" : "success"} style={{ marginBottom: "20px" }}>
+                {!voiceError && !wpsError && voiceNotice ? (
+                  <span className="voice-notice-check" aria-hidden="true">
+                    <CheckCircle2 size={14} />
+                  </span>
+                ) : null}
+                <span>{voiceError || wpsError || voiceNotice}</span>
               </div>
             )}
 
+            {voiceScreenTab === "clone" && (
             <div className="settings-page-layout">
               {/* Cột Trái: Tải lên giọng đọc mẫu */}
               <div className="settings-column">
@@ -2362,7 +2497,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                           <div className="key-card-header">
                             <div className="key-info">
                               <span className="key-badge">OFFLINE CLONE</span>
-                              <code className="key-masked" style={{ fontWeight: 600, color: "#fff" }}>{voice.name}</code>
+                              <code className="key-masked" style={{ fontWeight: 600, color: "var(--dv-ink)" }}>{voice.name}</code>
                             </div>
                             <button
                               type="button"
@@ -2387,54 +2522,10 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                               </span>
                             </div>
 
-                            <div style={{ display: "flex", flexDirection: "column", gap: "8px", background: "rgba(90, 120, 255, 0.05)", border: "1px solid rgba(120, 140, 255, 0.15)", borderRadius: "8px", padding: "10px" }}>
-                              <span style={{ fontSize: "11px", color: "#a79aff", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.03em" }}>Hiệu chỉnh tốc độ đọc</span>
-                              <span style={{ fontSize: "12px", color: "#b6c0d0" }}>
-                                Tạo profile tốc độ riêng cho giọng này để dự đoán thời lượng lồng tiếng chính xác hơn.
-                              </span>
-                              <div style={{ fontSize: "12px", color: "#dbe7ff" }}>
-                                Trạng thái: {formatDurationProfileStatus(voice, calibrationStatusByVoice[voice.id])}
-                              </div>
-                              {(["running", "queued"].includes(voice.duration_profile_status || calibrationStatusByVoice[voice.id]?.status || "")) && (
-                                <div style={{ fontSize: "12px", color: "#cbd5e1" }}>
-                                  Đang hiệu chỉnh: {calibrationStatusByVoice[voice.id]?.completed ?? 0} / {calibrationStatusByVoice[voice.id]?.total ?? "?"}
-                                  {" · "}
-                                  Mẫu hợp lệ: {calibrationStatusByVoice[voice.id]?.accepted ?? 0}
-                                  {" · "}
-                                  Mẫu bỏ qua: {calibrationStatusByVoice[voice.id]?.rejected ?? 0}
-                                </div>
-                              )}
-                              {(voice.duration_profile_status === "ready" || voice.duration_profile_status === "partial") && (
-                                <div style={{ fontSize: "12px", color: "#9be7b1" }}>
-                                  Sai số dự đoán trung vị: {calibrationStatusByVoice[voice.id]?.validation_median_error_ms ?? "—"} ms
-                                </div>
-                              )}
-                              <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
-                                {!["running", "queued"].includes(voice.duration_profile_status || "") && (
-                                  <>
-                                    <button type="button" className="key-action-btn save-btn" disabled={calibrationBusy[voice.id]} onClick={() => handleStartCalibration(voice.id, "quick")}>Nhanh (~20)</button>
-                                    <button type="button" className="key-action-btn save-btn" disabled={calibrationBusy[voice.id]} onClick={() => handleStartCalibration(voice.id, "standard")}>Chuẩn (~50)</button>
-                                    <button type="button" className="key-action-btn save-btn" disabled={calibrationBusy[voice.id]} onClick={() => handleStartCalibration(voice.id, "full")}>Đầy đủ (~100)</button>
-                                  </>
-                                )}
-                                {["running", "queued"].includes(voice.duration_profile_status || calibrationStatusByVoice[voice.id]?.status || "") && (
-                                  <button type="button" className="key-action-btn delete-btn" disabled={calibrationBusy[voice.id]} onClick={() => handleCancelCalibration(voice.id)}>Hủy</button>
-                                )}
-                                {["cancelled", "failed"].includes(voice.duration_profile_status || "") && (
-                                  <button type="button" className="key-action-btn save-btn" disabled={calibrationBusy[voice.id]} onClick={() => handleResumeCalibration(voice.id)}>Tiếp tục</button>
-                                )}
-                                {(voice.duration_profile_status === "ready" || voice.duration_profile_status === "partial") && (
-                                  <>
-                                    <button type="button" className="key-action-btn save-btn" disabled={calibrationBusy[voice.id]} onClick={() => handleStartCalibration(voice.id, "full")}>Cải thiện profile</button>
-                                    <button type="button" className="key-action-btn delete-btn" onClick={() => handleResetDurationProfile(voice.id)}>Đặt lại profile</button>
-                                  </>
-                                )}
-                              </div>
-                            </div>
 
                             {/* Play reference audio */}
                             <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                              <span style={{ fontSize: "12px", color: "#8b949e" }}>Âm thanh mẫu:</span>
+                              <span style={{ fontSize: "12px", color: "var(--dv-text-muted)" }}>Âm thanh mẫu:</span>
                               <audio
                                 controls
                                 src={`http://127.0.0.1:8765/api/cloned-voices/${voice.id}/wav?backend=${encodeURIComponent(cloningBackend)}`}
@@ -2444,7 +2535,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
 
                             {/* Test synthesis */}
                             <div style={{ display: "flex", flexDirection: "column", gap: "8px", background: "rgba(255,255,255,0.015)", border: "1px solid rgba(255,255,255,0.04)", borderRadius: "8px", padding: "10px" }}>
-                              <span style={{ fontSize: "11px", color: "#a79aff", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.03em" }}>Chạy thử giọng (Synthesize Test)</span>
+                              <span style={{ fontSize: "11px", color: "var(--dv-accent-ink)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.03em" }}>Chạy thử giọng (Synthesize Test)</span>
                               <div style={{ display: "flex", gap: "8px" }}>
                                 <input
                                   className="settings-input"
@@ -2466,8 +2557,8 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
 
                               {testAudioUrls[voice.id] && (
                                 <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "6px", borderTop: "1px dashed rgba(255,255,255,0.05)", paddingTop: "6px" }}>
-                                  <Volume2 size={14} style={{ color: "#5bdd9a" }} />
-                                  <span style={{ fontSize: "12px", color: "#5bdd9a" }}>Kết quả:</span>
+                                  <Volume2 size={14} style={{ color: "var(--dv-success)" }} />
+                                  <span style={{ fontSize: "12px", color: "var(--dv-success)" }}>Kết quả:</span>
                                   <audio
                                     controls
                                     autoPlay
@@ -2485,81 +2576,168 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                 </section>
               </div>
             </div>
-
-            {calibrationDialogVoiceId && (
-              <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }}>
-                <div className="settings-card" style={{ width: "min(520px, 92vw)", padding: "20px" }}>
-                  <h3 style={{ marginTop: 0 }}>Voice clone thành công</h3>
-                  <p className="card-description">
-                    Bạn có muốn chạy hiệu chỉnh tốc độ đọc (Standard ~50 câu) để dự đoán thời lượng lồng tiếng tốt hơn ngay từ job đầu tiên?
-                  </p>
-                  <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-                    <button type="button" className="gradient-button" onClick={() => handleStartCalibration(calibrationDialogVoiceId, "standard")}>Bắt đầu Chuẩn</button>
-                    <button type="button" className="key-action-btn save-btn" onClick={() => handleStartCalibration(calibrationDialogVoiceId, "quick")}>Nhanh</button>
-                    <button type="button" className="key-action-btn delete-btn" onClick={() => setCalibrationDialogVoiceId(null)}>Bỏ qua</button>
-                  </div>
-                </div>
-              </div>
             )}
-          </>
-        )}
 
-        {activeTab === "outputs" && (
-          <>
-            <header>
-              <div>
-                <h1>Thư viện thành phẩm</h1>
-              </div>
-            </header>
-            <section style={{ marginTop: "24px" }}>
-              {outputs.length === 0 ? (
-                <div className="empty">
-                  <FileVideo size={40} />
-                  <h3>Chưa có thành phẩm nào</h3>
-                  <p>Video lồng tiếng sẽ xuất hiện ở đây sau khi tiến trình hoàn thành.</p>
+            {voiceScreenTab === "wps" && (
+              <section className="settings-card voice-wps-panel">
+                <SettingsSectionHead
+                  title="Tốc độ đọc mỗi giây (WPS)"
+                  description="Chọn ngôn ngữ rồi chỉnh tay hoặc chạy hiệu chỉnh 100 mẫu để đo chính xác từ/giây cho từng giọng."
+                  action={
+                    <button
+                      type="button"
+                      className="key-action-btn save-btn"
+                      disabled={wpsLoading}
+                      onClick={() => void loadWpsCatalog()}
+                    >
+                      <RefreshCw size={14} className={wpsLoading ? "spin" : undefined} /> Làm mới
+                    </button>
+                  }
+                />
+
+                <div className="voice-wps-lang-selector" role="tablist" aria-label="Ngôn ngữ giọng đọc">
+                  {DUB_LANGUAGE_OPTIONS.map((option) => {
+                    const count = wpsCatalog.filter((entry) => entry.language === option.id).length;
+                    return (
+                      <button
+                        key={option.id}
+                        type="button"
+                        role="tab"
+                        aria-selected={wpsLanguage === option.id}
+                        className={`voice-wps-lang-tab${wpsLanguage === option.id ? " active" : ""}`}
+                        onClick={() => setWpsLanguage(option.id)}
+                      >
+                        {option.label}
+                        <span className="voice-wps-lang-tab__count">{count}</span>
+                      </button>
+                    );
+                  })}
                 </div>
-              ) : (
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: "20px" }}>
-                  {outputs.map((out) => (
-                    <div key={out.job_id} className="output-card" style={{ background: "#12151c", border: "1px solid #292f3b", borderRadius: "14px", padding: "18px", display: "flex", flexDirection: "column" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "12px" }}>
-                        <FileVideo size={28} style={{ color: "#8170ff" }} />
-                        <div style={{ overflow: "hidden" }}>
-                          <h3 style={{ margin: 0, fontSize: "15px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                            {out.title_vi || out.title}
-                          </h3>
-                          {out.title_vi && out.title_vi !== out.title && (
-                            <small style={{ color: "#747d90", display: "block", marginTop: "4px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                              {out.title}
-                            </small>
-                          )}
-                          <small style={{ color: "#626b7d", display: "block", marginTop: "4px" }}>{formatBytes(out.file_size)}</small>
-                        </div>
-                      </div>
-                      <p style={{ color: "#8f97a6", fontSize: "13px", margin: "0 0 16px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        Nguồn: {out.source_url.startsWith("import://")
-                          ? out.source_url.slice("import://".length)
-                          : <a href={out.source_url} target="_blank" rel="noreferrer" style={{ color: "#8170ff" }}>{out.source_url}</a>}
-                      </p>
-                      <button
-                        className="smoke-button"
-                        style={{ marginTop: "auto", display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}
-                        onClick={() => setActiveVideoUrl(`http://127.0.0.1:8765/api/jobs/${out.job_id}/output`)}
-                      >
-                        <Play size={16} /> Phát Video Lồng Tiếng
-                      </button>
-                      <button
-                        className="smoke-button"
-                        style={{ marginTop: "8px", display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", background: "#20242e" }}
-                        onClick={() => openJobFolder(out.job_id)}
-                      >
-                        <FolderOpen size={16} /> Mở thư mục
-                      </button>
+
+                {wpsLoading && wpsCatalog.length === 0 ? (
+                  <p className="card-description">Đang tải danh sách giọng đọc…</p>
+                ) : wpsFiltered.length === 0 ? (
+                  <div className="empty-keys-placeholder">Chưa có giọng đọc nào cho ngôn ngữ này.</div>
+                ) : (
+                  <>
+                    <div className="voice-wps-list-head" aria-hidden="true">
+                      <span>Giọng đọc</span>
+                      <span>Nguồn</span>
+                      <span>Tốc độ</span>
+                      <span />
                     </div>
-                  ))}
-                </div>
-              )}
-            </section>
+                    <div className="voice-wps-list voice-wps-list--scroll">
+                      {wpsPageEntries.map((entry) => {
+                        const draft = wpsDrafts[entry.catalog_key] ?? String(entry.effective_words_per_second);
+                        const savedValue = entry.words_per_second ?? entry.effective_words_per_second;
+                        const dirty = Number.parseFloat(draft) !== savedValue;
+                        const sourceLabel =
+                          entry.profile_source === "manual"
+                            ? "Chỉnh tay"
+                            : entry.profile_source === "auto_measure"
+                              ? "Tự đo"
+                              : entry.profile_source === "bootstrap_calibration"
+                                ? "Hiệu chỉnh"
+                                : entry.profile_source
+                                  ? entry.profile_source
+                                  : "Mặc định";
+                        const sourceKind =
+                          entry.profile_source === "manual"
+                            ? "manual"
+                            : entry.profile_source === "auto_measure" || entry.profile_source === "bootstrap_calibration"
+                              ? "measured"
+                              : "default";
+                        return (
+                          <article key={entry.catalog_key} className="voice-wps-row">
+                            <div className="voice-wps-row__voice">
+                              <span className="voice-wps-provider">{entry.provider_label}</span>
+                              <div className="voice-wps-row__titles">
+                                <div className="voice-wps-name">{entry.voice_name}</div>
+                                <code className="voice-wps-id">{entry.voice_id}</code>
+                              </div>
+                            </div>
+                            <div className="voice-wps-row__source">
+                              <span className={`voice-wps-source voice-wps-source--${sourceKind}`}>{sourceLabel}</span>
+                            </div>
+                            <div className="voice-wps-row__rate">
+                              <div className="voice-wps-rate">
+                                <input
+                                  type="number"
+                                  min={2}
+                                  max={5}
+                                  step={0.1}
+                                  aria-label={`Tốc độ đọc ${entry.voice_name}`}
+                                  className="settings-input voice-wps-input"
+                                  value={draft}
+                                  onChange={(event) =>
+                                    setWpsDrafts((prev) => ({ ...prev, [entry.catalog_key]: event.target.value }))
+                                  }
+                                />
+                                <span className="voice-wps-rate__unit">từ/giây</span>
+                                <button
+                                  type="button"
+                                  className="key-action-btn save-btn voice-wps-save-btn"
+                                  disabled={!dirty || wpsSaving[entry.catalog_key]}
+                                  onClick={() => void handleSaveVoiceWps(entry.catalog_key)}
+                                >
+                                  {wpsSaving[entry.catalog_key] ? "…" : "Lưu"}
+                                </button>
+                              </div>
+                            </div>
+                            <div className="voice-wps-row__measure">
+                              <button
+                                type="button"
+                                className="voice-wps-measure-btn"
+                                disabled={wpsMeasuring[entry.catalog_key]}
+                                onClick={() => void handleMeasureVoiceWps(entry.catalog_key)}
+                              >
+                                {wpsMeasuring[entry.catalog_key] ? "Đang đo 100 mẫu…" : "Tự đo 100 mẫu"}
+                              </button>
+                            </div>
+                          </article>
+                        );
+                      })}
+                    </div>
+                    <div className="voice-wps-footer">
+                      <span className="voice-wps-summary">
+                        {wpsFiltered.length} giọng đọc
+                        {wpsTotalPages > 1
+                          ? ` · trang ${wpsPageSafe}/${wpsTotalPages}`
+                          : null}
+                      </span>
+                      {wpsTotalPages > 1 ? (
+                        <div className="voice-wps-pagination">
+                          <button
+                            type="button"
+                            className="voice-wps-page-btn"
+                            disabled={wpsPageSafe <= 1}
+                            aria-label="Trang trước"
+                            onClick={() => setWpsPage((page) => Math.max(1, page - 1))}
+                          >
+                            <ChevronLeft size={14} />
+                          </button>
+                          <span className="voice-wps-page-label">
+                            {(wpsPageSafe - 1) * WPS_PAGE_SIZE + 1}–{Math.min(wpsPageSafe * WPS_PAGE_SIZE, wpsFiltered.length)}
+                          </span>
+                          <button
+                            type="button"
+                            className="voice-wps-page-btn"
+                            disabled={wpsPageSafe >= wpsTotalPages}
+                            aria-label="Trang sau"
+                            onClick={() => setWpsPage((page) => Math.min(wpsTotalPages, page + 1))}
+                          >
+                            <ChevronRight size={14} />
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  </>
+                )}
+              </section>
+            )}
+              </div>
+            </div>
+
           </>
         )}
 
@@ -2760,7 +2938,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                         <section className="settings-card">
                           <SettingsSectionHead
                             title="Khóa API Gemini"
-                            description="Dùng cho dịch Gemini và Gemini TTS — thêm nhiều khóa để luân phiên quota."
+                            description="Dùng cho dịch Gemini — thêm nhiều khóa để luân phiên quota."
                           />
                         <div className="settings-section settings-section--nested">
                           <SettingsSectionHead title="Quản lý khóa Gemini" />
@@ -2839,6 +3017,18 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                         <SettingsSectionHead
                           title="Nhận diện giọng nói (VAD)"
                           description="Xác định vùng có lời nói trước khi nhận dạng tiếng Trung. Chạy lại job từ VAD hoặc ASR để áp dụng."
+                          action={
+                            <button
+                              type="button"
+                              className="settings-reset-btn"
+                              onClick={resetAudioSettings}
+                              title="Đặt lại toàn bộ cài đặt âm thanh về mặc định"
+                              aria-label="Đặt lại cài đặt âm thanh"
+                            >
+                              <RotateCcw size={14} />
+                              Đặt lại
+                            </button>
+                          }
                         />
                         <div className="settings-form-fields settings-form-fields--fluid">
                           <div className="settings-field-grid settings-field-grid--2">
@@ -3289,48 +3479,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                       </section>
                     )}
 
-                    {activeTtsBackend === "gemini_tts" && (
-                      <section className="settings-card">
-                        <div className="card-header-accent">
-                          <span className="accent-bar"></span>
-                          <h3>Gemini TTS — Google AI</h3>
-                        </div>
-                        <p className="card-description card-description--compact">
-                          Tổng hợp giọng qua Google AI Studio. Cần ít nhất một khóa API ở tab Dịch thuật.
-                        </p>
-                        <div className="settings-field-grid settings-field-grid--2">
-                          <label className="settings-label">
-                            <span>Mô hình TTS</span>
-                            <input
-                              className="settings-input"
-                              value={settings.gemini_tts_model ?? "gemini-2.5-flash-preview-tts"}
-                              onChange={(e) => setSettings({ ...settings, gemini_tts_model: e.target.value })}
-                            />
-                          </label>
-                          <label className="settings-label">
-                            <span>Giọng đọc</span>
-                            <select
-                              className="settings-input"
-                              value={settings.gemini_tts_voice ?? "Zephyr"}
-                              onChange={(e) => setSettings({ ...settings, gemini_tts_voice: e.target.value })}
-                            >
-                              {GEMINI_TTS_VOICES.map((voice) => (
-                                <option key={voice.id} value={voice.id}>
-                                  {voice.name}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                        </div>
-                        {(settings.gemini_api_keys ?? []).length === 0 && (
-                          <div className="alert-info-box warning">
-                            <CircleAlert size={14} />
-                            <span>Chưa có khóa Gemini. Thêm khóa ở tab Dịch thuật trước khi chạy job.</span>
-                          </div>
-                        )}
-                      </section>
-                    )}
-
                       </div>
 
                       <aside className="settings-tts-side">
@@ -3364,7 +3512,16 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                           </button>
                           {ttsPreviewUrl && (
                             <div className="settings-preview-player">
-                              <audio controls autoPlay src={ttsPreviewUrl} />
+                              <audio
+                                controls
+                                src={ttsPreviewUrl}
+                                onLoadedData={(e) => {
+                                  if (ttsPreviewShouldAutoPlayRef.current) {
+                                    ttsPreviewShouldAutoPlayRef.current = false;
+                                    void e.currentTarget.play().catch(() => {});
+                                  }
+                                }}
+                              />
                             </div>
                           )}
                         </div>
@@ -3374,10 +3531,22 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                 )}
 
                 {settingsTab === "subtitles" && (
-                  <div className="settings-tab-panel" role="tabpanel">
+                  <div className="settings-tab-panel settings-tab-panel--subtitles" role="tabpanel">
                     <SettingsSectionHead
                       title="Phụ đề trên video"
                       description="Chèn phụ đề tiếng Việt (bản dịch) trực tiếp vào video khi xuất thành phẩm."
+                      action={
+                        <button
+                          type="button"
+                          className="settings-reset-btn"
+                          onClick={resetSubtitleSettings}
+                          title="Đặt lại toàn bộ cài đặt phụ đề về mặc định"
+                          aria-label="Đặt lại cài đặt phụ đề"
+                        >
+                          <RotateCcw size={14} />
+                          Đặt lại
+                        </button>
+                      }
                     />
                     <div className="settings-form-fields">
                       <label className="settings-label settings-label--inline">
@@ -3532,7 +3701,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                             disabled={!settings.subtitles_enabled}
                           />
                         </label>
-                        <label className="settings-label settings-field-grid__span-2">
+                        <label className="settings-label">
                           <span>Khoảng cách tối thiểu giữa 2 cue (ms)</span>
                           <input
                             className="settings-input"
@@ -3621,19 +3790,19 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
               {(selectedJob.status === "completed" || selectedJob.status === "failed" || selectedJob.status === "interrupted") && (
                 <button
                   className="smoke-button"
-                  style={{ minWidth: 0, background: "linear-gradient(135deg, #6244f7, #3d29a6)", color: "#fff", whiteSpace: "nowrap" }}
+                  style={{ minWidth: 0, background: "linear-gradient(135deg, var(--dv-accent), #3d29a6)", color: "var(--dv-ink)", whiteSpace: "nowrap" }}
                   onClick={() => openRerunModal(selectedJob)}
                 >
                   <RefreshCw size={16} /> Chạy lại
                 </button>
               )}
               {selectedJob.status === "running" && (
-                <button className="smoke-button" style={{ minWidth: 0, background: "#f16f7e", whiteSpace: "nowrap" }} onClick={() => cancelJob(selectedJob.id)}>
+                <button className="smoke-button" style={{ minWidth: 0, background: "var(--dv-danger)", whiteSpace: "nowrap" }} onClick={() => cancelJob(selectedJob.id)}>
                   <X size={16} /> Hủy thực thi
                 </button>
               )}
               {isDeletableJob(selectedJob) && (
-                <button className="smoke-button" style={{ minWidth: 0, background: "#f16f7e", whiteSpace: "nowrap" }} onClick={() => deleteJob(selectedJob.id)}>
+                <button className="smoke-button" style={{ minWidth: 0, background: "var(--dv-danger)", whiteSpace: "nowrap" }} onClick={() => deleteJob(selectedJob.id)}>
                   <Trash2 size={16} /> Xóa tiến trình
                 </button>
               )}
@@ -3643,7 +3812,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
               <div
                 style={{
                   background: "#20242e",
-                  border: "1px solid #343a48",
+                  border: "1px solid var(--dv-border-strong)",
                   borderRadius: "12px",
                   padding: "16px",
                   margin: "12px 0",
@@ -3653,7 +3822,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                 }}
               >
                 <h3 style={{ margin: 0, fontSize: "15px" }}>Chọn bước bắt đầu chạy lại</h3>
-                <p style={{ margin: 0, fontSize: "13px", color: "#8f97a6", lineHeight: 1.5 }}>
+                <p style={{ margin: 0, fontSize: "13px", color: "var(--dv-text-muted)", lineHeight: 1.5 }}>
                   Các bước phía trên điểm bạn chọn sẽ giữ cache. Từ bước được chọn trở xuống sẽ chạy lại
                   (vì mỗi bước dùng kết quả của bước trước — không thể giữ cache bước sau khi chạy lại bước giữa).
                   {rerunKeepSteps.length < PIPELINE_STEPS.length && (
@@ -3680,12 +3849,12 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                           display: "flex",
                           alignItems: "center",
                           gap: "10px",
-                          background: kept ? "#152218" : isBoundary ? "#2a2240" : "#12151c",
+                          background: kept ? "#152218" : isBoundary ? "#2a2240" : "var(--dv-surface)",
                           border: isBoundary
-                            ? "1px solid #6244f7"
+                            ? "1px solid var(--dv-accent)"
                             : kept
                               ? "1px solid #2f6b4a"
-                              : "1px solid #292f3b",
+                              : "1px solid var(--dv-border)",
                           borderRadius: "8px",
                           padding: "10px 12px",
                           cursor: "pointer",
@@ -3701,12 +3870,12 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                             height: "18px",
                             borderRadius: "50%",
                             flexShrink: 0,
-                            border: isBoundary ? "5px solid #6244f7" : kept ? "none" : "2px solid #4a5160",
-                            background: kept ? "#3ecf8e" : isBoundary ? "#12151c" : "transparent",
+                            border: isBoundary ? "5px solid var(--dv-accent)" : kept ? "none" : "2px solid #4a5160",
+                            background: kept ? "#3ecf8e" : isBoundary ? "var(--dv-surface)" : "transparent",
                           }}
                         />
                         <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: "13px", color: "#fff" }}>{translateStepName(stepName, settings.translation_target_language)}</div>
+                          <div style={{ fontSize: "13px", color: "var(--dv-ink)" }}>{translateStepName(stepName, settings.translation_target_language)}</div>
                           <small style={{ color: "#747d90" }}>
                             {step ? translateStepStatus(step.status) : "Chưa có"} ·{" "}
                             {kept ? "Giữ cache" : isBoundary ? "Chạy lại từ đây" : "Sẽ chạy lại"}
@@ -3722,7 +3891,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                   </button>
                   <button
                     className="smoke-button"
-                    style={{ flex: 1, background: "linear-gradient(135deg, #6244f7, #3d29a6)", color: "#fff" }}
+                    style={{ flex: 1, background: "linear-gradient(135deg, var(--dv-accent), #3d29a6)", color: "var(--dv-ink)" }}
                     onClick={handleRerunJob}
                     disabled={rerunSubmitting || rerunKeepSteps.length >= PIPELINE_STEPS.length}
                   >
@@ -3734,7 +3903,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
 
             {/* Error messaging */}
             {selectedJob.status === "waiting_for_selection" && resolveCp?.videos && (
-              <div style={{ background: "#20242e", border: "1px solid #343a48", borderRadius: "12px", padding: "16px", margin: "12px 0" }}>
+              <div style={{ background: "#20242e", border: "1px solid var(--dv-border-strong)", borderRadius: "12px", padding: "16px", margin: "12px 0" }}>
                 <h3 style={{ margin: "0 0 12px", fontSize: "15px" }}>Chọn video trong playlist</h3>
                 <div style={{ display: "grid", gap: "8px", maxHeight: "250px", overflowY: "auto" }}>
                   {resolveCp.videos.map((vid: any, idx: number) => (
@@ -3743,7 +3912,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                       type="button"
                       onClick={() => void handleSelectPlaylistVideo(selectedJob.id, idx)}
                       className="playlist-item"
-                      style={{ display: "flex", gap: "10px", background: "#12151c", padding: "10px", borderRadius: "8px", cursor: "pointer", border: "1px solid #292f3b", textAlign: "left", color: "inherit" }}
+                      style={{ display: "flex", gap: "10px", background: "var(--dv-surface)", padding: "10px", borderRadius: "8px", cursor: "pointer", border: "1px solid var(--dv-border)", textAlign: "left", color: "inherit" }}
                     >
                       <div style={{ flex: 1 }}>
                         <strong style={{ fontSize: "14px" }}>{vid.title || `Video ${idx + 1}`}</strong>
@@ -3773,7 +3942,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                 }}
               >
                 <div>
-                  <h3 style={{ margin: 0, fontSize: "15px", color: "#ffb347" }}>Cần chỉnh TTS — đoạn quá dài</h3>
+                  <h3 style={{ margin: 0, fontSize: "15px", color: "var(--dv-warning)" }}>Cần chỉnh TTS — đoạn quá dài</h3>
                   <p style={{ margin: "6px 0 0", fontSize: "13px", color: "#c4b39a", lineHeight: 1.45 }}>
                     Hệ thống đã đạt tốc độ tối đa {timingReview?.max_speed?.toFixed(2) ?? "1.25"}×. Hãy rút gọn text các đoạn bên dưới,
                     rồi gửi — chỉ re-TTS các đoạn bạn sửa.
@@ -3798,7 +3967,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                       <div
                         key={row.index}
                         style={{
-                          background: "#12151c",
+                          background: "var(--dv-surface)",
                           border: "1px solid #3a2f22",
                           borderRadius: "10px",
                           padding: "12px",
@@ -3807,7 +3976,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                         }}
                       >
                         <div style={{ display: "flex", justifyContent: "space-between", gap: "8px" }}>
-                          <strong style={{ fontSize: "13px", color: "#fff" }}>Phân đoạn #{row.index + 1}</strong>
+                          <strong style={{ fontSize: "13px", color: "var(--dv-ink)" }}>Phân đoạn #{row.index + 1}</strong>
                           <small style={{ color: "#d0a56a" }}>
                             Thừa ~{overflowSec.toFixed(2)}s
                             {row.effective_start != null && row.effective_end != null
@@ -3835,9 +4004,9 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                           style={{
                             width: "100%",
                             resize: "vertical",
-                            background: "#0d1016",
-                            color: "#fff",
-                            border: "1px solid #343a48",
+                            background: "var(--dv-inset)",
+                            color: "var(--dv-ink)",
+                            border: "1px solid var(--dv-border-strong)",
                             borderRadius: "8px",
                             padding: "10px",
                             fontSize: "13px",
@@ -3855,14 +4024,14 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                     );
                   })}
                   {(!timingReview || timingReview.segments.length === 0) && (
-                    <p style={{ margin: 0, fontSize: "13px", color: "#8f97a6" }}>
+                    <p style={{ margin: 0, fontSize: "13px", color: "var(--dv-text-muted)" }}>
                       Đang tải danh sách đoạn cần chỉnh, hoặc không còn đoạn nào.
                     </p>
                   )}
                 </div>
                 <button
                   className="smoke-button"
-                  style={{ background: "linear-gradient(135deg, #c47a20, #8a4f12)", color: "#fff" }}
+                  style={{ background: "linear-gradient(135deg, #c47a20, #8a4f12)", color: "var(--dv-ink)" }}
                   disabled={timingReviewSubmitting || !timingReview || timingReview.segments.length === 0}
                   onClick={() => void submitTimingReviewEdits()}
                 >
@@ -3876,62 +4045,63 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
               <button
                 type="button"
                 className={`drawer-tab-btn ${drawerTab === "steps" ? "active" : ""}`}
-                onClick={() => setDrawerTab("steps")}
+                onClick={() => switchDrawerTab("steps")}
                 style={{
                   flex: 1,
                   padding: "10px",
                   background: "transparent",
-                  color: drawerTab === "steps" ? "#a79aff" : "#8f97a6",
+                  color: drawerTab === "steps" ? "var(--dv-accent-ink)" : "var(--dv-text-muted)",
                   border: "none",
-                  borderBottom: drawerTab === "steps" ? "2px solid #a79aff" : "none",
+                  borderBottom: drawerTab === "steps" ? "2px solid var(--dv-accent-ink)" : "none",
                   fontWeight: 600,
                   cursor: "pointer"
                 }}
               >
                 Trạng thái các bước
               </button>
-              {durationRepairCp && durationRepairCp.segments && (
+              {(segmentEditorEnabled || (durationRepairCp && durationRepairCp.segments)) && (
                 <button
                   type="button"
                   className={`drawer-tab-btn ${drawerTab === "segments" ? "active" : ""}`}
-                  onClick={() => setDrawerTab("segments")}
+                  onClick={() => switchDrawerTab("segments")}
                   style={{
                     flex: 1,
                     padding: "10px",
                     background: "transparent",
-                    color: drawerTab === "segments" ? "#a79aff" : "#8f97a6",
+                    color: drawerTab === "segments" ? "var(--dv-accent-ink)" : "var(--dv-text-muted)",
                     border: "none",
-                    borderBottom: drawerTab === "segments" ? "2px solid #a79aff" : "none",
+                    borderBottom: drawerTab === "segments" ? "2px solid var(--dv-accent-ink)" : "none",
                     fontWeight: 600,
                     cursor: "pointer"
                   }}
                 >
-                  Phân đoạn ({durationRepairCp.segments.length})
+                  Phân đoạn
+                  {durationRepairCp?.segments ? ` (${durationRepairCp.segments.length})` : ""}
                 </button>
               )}
-              {jobFiles.length > 0 && (
+              {playableJobFiles.length > 0 && (
                 <button
                   type="button"
                   className={`drawer-tab-btn ${drawerTab === "files" ? "active" : ""}`}
-                  onClick={() => setDrawerTab("files")}
+                  onClick={() => switchDrawerTab("files")}
                   style={{
                     flex: 1,
                     padding: "10px",
                     background: "transparent",
-                    color: drawerTab === "files" ? "#a79aff" : "#8f97a6",
+                    color: drawerTab === "files" ? "var(--dv-accent-ink)" : "var(--dv-text-muted)",
                     border: "none",
-                    borderBottom: drawerTab === "files" ? "2px solid #a79aff" : "none",
+                    borderBottom: drawerTab === "files" ? "2px solid var(--dv-accent-ink)" : "none",
                     fontWeight: 600,
                     cursor: "pointer"
                   }}
                 >
-                  Tập tin ({jobFiles.length})
+                  Tập tin ({playableJobFiles.length})
                 </button>
               )}
             </div>
 
              {/* Vertical step checklist or Segments preview */}
-             <div style={{ display: "grid", gap: "12px", margin: "10px 0 20px", overflowY: "auto", flex: 1 }}>
+             <div className="drawer-body-scroll" style={{ display: "grid", gap: "12px", margin: "10px 0 20px", overflowY: "auto", flex: 1 }}>
                {drawerTab === "steps" ? (
                  selectedJob.steps.map((step) => (
                    <div key={step.name} className="step-row" style={{ display: "flex", gap: "14px", alignItems: "center", padding: "10px 14px", background: "#1b1e26", borderRadius: "10px" }}>
@@ -3943,7 +4113,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                        ) : step.status === "failed" ? (
                          <CircleAlert size={18} />
                        ) : (
-                         <Clock3 size={18} style={{ color: "#626b7d" }} />
+                         <Clock3 size={18} style={{ color: "var(--dv-text-muted)" }} />
                        )}
                      </span>
                      <div style={{ flex: 1 }}>
@@ -3955,13 +4125,22 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                    </div>
                  ))
                ) : drawerTab === "segments" ? (
+                 segmentEditorEnabled ? (
+                   <SegmentEditorPanel
+                     key={selectedJob.id}
+                     api={api}
+                     jobId={selectedJob.id}
+                     jobStatus={selectedJob.status}
+                     onDirtyChange={setSegmentEditDirty}
+                   />
+                 ) : (
                  durationRepairCp?.segments?.map((seg: any) => (
                    <div
                      key={seg.index}
                      style={{
                        padding: "12px",
-                       background: "#12151c",
-                       border: "1px solid #292f3b",
+                       background: "var(--dv-surface)",
+                       border: "1px solid var(--dv-border)",
                        borderRadius: "10px",
                        display: "flex",
                        flexDirection: "column",
@@ -3969,7 +4148,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                      }}
                    >
                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                       <span style={{ fontSize: "12px", color: "#8170ff", fontWeight: 600 }}>
+                       <span style={{ fontSize: "12px", color: "var(--dv-accent)", fontWeight: 600 }}>
                          Phân đoạn #{seg.index + 1}
                        </span>
                        <small style={{ color: "#747d90" }}>
@@ -3984,15 +4163,15 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                        </small>
                      </div>
                      {seg.text && (
-                       <div style={{ fontSize: "12px", color: "#626b7d", fontStyle: "italic", background: "rgba(255,255,255,0.015)", padding: "6px 10px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.03)" }}>
+                       <div style={{ fontSize: "12px", color: "var(--dv-text-muted)", fontStyle: "italic", background: "rgba(255,255,255,0.015)", padding: "6px 10px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.03)" }}>
                          Gốc (Trung): {seg.text}
                        </div>
                      )}
-                     <div style={{ fontSize: "13.5px", color: "#fff", fontWeight: 500, lineHeight: 1.4 }}>
+                     <div style={{ fontSize: "13.5px", color: "var(--dv-ink)", fontWeight: 500, lineHeight: 1.4 }}>
                        Dịch (Việt): {seg.tts_spoken_text || seg.translation}
                      </div>
                      {(seg.timing_status && seg.timing_status !== "OK") && (
-                       <div style={{ fontSize: "11px", color: seg.timing_status === "OVERFLOW" ? "#ff8f8f" : "#ffb347" }}>
+                       <div style={{ fontSize: "11px", color: seg.timing_status === "OVERFLOW" ? "var(--dv-danger)" : "var(--dv-warning)" }}>
                          Timing: {seg.timing_status}
                          {seg.timing_overflow_sec > 0.05 ? ` · overflow ${Number(seg.timing_overflow_sec).toFixed(2)}s` : ""}
                          {seg.placement_drift_sec ? ` · drift ${Number(seg.placement_drift_sec).toFixed(2)}s` : ""}
@@ -4000,7 +4179,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                        </div>
                      )}
                      {(seg.tts_chunk_count != null && seg.tts_chunk_count > 0) && (
-                       <div style={{ fontSize: "11px", color: "#9aa3b5", display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                       <div style={{ fontSize: "11px", color: "var(--dv-text-muted)", display: "flex", flexWrap: "wrap", gap: "8px" }}>
                          <span>TTS: {seg.tts_chunk_count} chunk{seg.tts_chunk_count > 1 ? "s" : ""}</span>
                          {seg.tts_text_similarity != null && (
                            <span>Fidelity: {Math.round(Number(seg.tts_text_similarity) * 100)}%</span>
@@ -4016,7 +4195,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                            </span>
                          )}
                          {(seg.tts_fidelity_status === "poor" || seg.tts_fidelity_status === "failed" || seg.tts_fidelity_status === "review") && (
-                           <span style={{ color: "#ffb347" }}>Audio có thể chưa đọc đầy đủ bản dịch.</span>
+                           <span style={{ color: "var(--dv-warning)" }}>Audio có thể chưa đọc đầy đủ bản dịch.</span>
                          )}
                        </div>
                      )}
@@ -4034,14 +4213,19 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                      </div>
                    </div>
                  ))
+                 )
                ) : (
-                 jobFiles.map((file) => (
+                 playableJobFiles.map((file) => {
+                   const fileKind = getPlayableJobFileKind(file);
+                   if (!fileKind) return null;
+                   const fileUrl = `${BACKEND_BASE}${file.url}`;
+                   return (
                    <div
                      key={file.key}
                      style={{
                        padding: "12px",
-                       background: "#12151c",
-                       border: "1px solid #292f3b",
+                       background: "var(--dv-surface)",
+                       border: "1px solid var(--dv-border)",
                        borderRadius: "10px",
                        display: "flex",
                        flexDirection: "column",
@@ -4050,28 +4234,29 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                    >
                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                        <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-                         {file.media_type.startsWith("video") ? <FileVideo size={18} style={{ color: "#a79aff" }} /> : <FileAudio size={18} style={{ color: "#00d1b2" }} />}
-                         <span style={{ fontSize: "13.5px", color: "#fff", fontWeight: 500 }}>{file.name}</span>
+                         {jobFileIcon(fileKind)}
+                         <span style={{ fontSize: "13.5px", color: "var(--dv-ink)", fontWeight: 500 }}>{file.name}</span>
                        </div>
-                       <small style={{ color: "#747d90" }}>{formatBytes(file.size)}</small>
+                       <small style={{ color: "var(--dv-text-muted)" }}>{formatBytes(file.size)}</small>
                      </div>
-                     {file.media_type.startsWith("video") ? (
+                     {fileKind === "video" ? (
                        <button
                          className="smoke-button"
                          style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", fontSize: "12px", padding: "6px 12px" }}
-                         onClick={() => setActiveVideoUrl(`http://127.0.0.1:8765${file.url}`)}
+                         onClick={() => setActiveVideoUrl(fileUrl)}
                        >
                          <Play size={12} /> Xem thử video
                        </button>
                      ) : (
                        <audio
                          controls
-                         src={`http://127.0.0.1:8765${file.url}`}
+                         src={fileUrl}
                          style={{ height: "26px", width: "100%" }}
                        />
                      )}
                    </div>
-                 ))
+                   );
+                 })
                )}
              </div>
           </section>
@@ -4084,7 +4269,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
           <div className="video-overlay__panel" onClick={(e) => e.stopPropagation()}>
             <button
               onClick={() => setActiveVideoUrl(null)}
-              style={{ position: "absolute", right: "12px", top: "12px", background: "#00000080", color: "#fff", border: "0", borderRadius: "50%", width: "32px", height: "32px", display: "grid", placeItems: "center", zIndex: 1 }}
+              style={{ position: "absolute", right: "12px", top: "12px", background: "#00000080", color: "var(--dv-ink)", border: "0", borderRadius: "50%", width: "32px", height: "32px", display: "grid", placeItems: "center", zIndex: 1 }}
             >
               <X size={18} />
             </button>

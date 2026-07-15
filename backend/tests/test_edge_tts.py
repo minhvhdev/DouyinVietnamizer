@@ -15,14 +15,14 @@ def test_create_tts_adapter_selects_edge_tts() -> None:
     assert adapter.voice == "vi-VN-NamMinhNeural"
 
 
-def test_create_tts_adapter_selects_gemini_tts() -> None:
+def test_create_tts_adapter_migrates_legacy_gemini_tts_to_omnivoice() -> None:
     adapter = create_tts_adapter(
         {
             "tts_backend": "gemini_tts",
             "gemini_api_keys": [{"id": "a", "key": "key-a"}],
         }
     )
-    assert type(adapter).__name__ == "GeminiTtsAdapter"
+    assert type(adapter).__name__ == "OmniVoiceTtsAdapter"
 
 
 def test_list_edge_tts_voices_falls_back_without_network(monkeypatch) -> None:

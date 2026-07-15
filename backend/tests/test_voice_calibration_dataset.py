@@ -18,6 +18,15 @@ def test_dataset_load_valid() -> None:
     assert len(dataset["samples"]) >= 100
 
 
+def test_thai_dataset_load_valid() -> None:
+    dataset = load_calibration_dataset(language="th")
+    assert dataset["version"] == "th_duration_v1"
+    assert dataset.get("language") == "th"
+    assert len(dataset["samples"]) >= 100
+    assert len(select_calibration_samples(dataset, "full")) == 100
+    assert not any(issue.startswith("missing_categories") for issue in validate_dataset(dataset))
+
+
 def test_sample_ids_unique() -> None:
     dataset = load_calibration_dataset()
     ids = [entry["id"] for entry in dataset["samples"]]
@@ -29,31 +38,20 @@ def test_categories_present() -> None:
     assert not any(issue.startswith("missing_categories") for issue in issues)
 
 
-def test_quick_selection_balanced() -> None:
-    dataset = load_calibration_dataset()
-    selected = select_calibration_samples(dataset, "quick")
-    assert len(selected) == CALIBRATION_MODES["quick"]
-    categories = Counter(sample.category for sample in selected)
-    assert len(categories) >= 8
+def test_only_full_calibration_mode_is_available() -> None:
+    assert CALIBRATION_MODES == {"full": 100}
 
 
-def test_standard_selection_balanced() -> None:
+def test_full_uses_exactly_100_balanced_samples() -> None:
     dataset = load_calibration_dataset()
-    selected = select_calibration_samples(dataset, "standard")
-    assert len(selected) == CALIBRATION_MODES["standard"]
+    selected = select_calibration_samples(dataset, "full")
+    assert len(selected) == 100
     categories = Counter(sample.category for sample in selected)
     assert len(categories) >= 12
 
 
-def test_full_uses_all_enabled() -> None:
-    dataset = load_calibration_dataset()
-    selected = select_calibration_samples(dataset, "full")
-    enabled = [entry for entry in dataset["samples"] if entry.get("enabled", True)]
-    assert len(selected) == len(enabled)
-
-
 def test_selection_deterministic() -> None:
     dataset = load_calibration_dataset()
-    first = [sample.id for sample in select_calibration_samples(dataset, "standard")]
-    second = [sample.id for sample in select_calibration_samples(dataset, "standard")]
+    first = [sample.id for sample in select_calibration_samples(dataset, "full")]
+    second = [sample.id for sample in select_calibration_samples(dataset, "full")]
     assert first == second

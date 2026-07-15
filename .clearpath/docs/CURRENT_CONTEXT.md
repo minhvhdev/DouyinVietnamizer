@@ -7,13 +7,13 @@ canonical: true
 # Current Context
 
 ## Active Change
-`settings-ui-redesign` — **implemented**, design approved
+`app-color-system` — **implemented**, design approved
 
 ## What changed
-- Horizontal settings tab bar (replaced inner sidebar)
-- Single settings panel container
-- TTS engine horizontal rail + responsive 2-col layout
-- All 5 tabs preserved
+- OKLCH design tokens (`--dv-*`) in `styles.css`
+- Migrated `styles.css`, `runtime.css`, `App.tsx` colors to tokens
+- Segment editor refactored to CSS classes (no orphan blue/purple)
+- Neutral IDE-style palette: gray surfaces + muted blue accent
 
 ## Next Action
-User visual QA in running app
+User visual QA in running Tauri app

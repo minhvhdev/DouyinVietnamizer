@@ -21,7 +21,7 @@ def classify_profile_quality(
     *,
     accepted_count: int,
     validation_mae_ms: float | None,
-    mode: str = "standard",
+    mode: str = "full",
     status: str = "ready",
 ) -> str:
     if status in {"insufficient", "failed", "cancelled"}:
@@ -30,8 +30,6 @@ def classify_profile_quality(
         return "insufficient"
     if validation_mae_ms is not None and float(validation_mae_ms) > POOR_MAE_MS:
         return "poor"
-    if mode == "quick" and accepted_count >= PARTIAL_MIN_SAMPLES:
-        return "partial"
     if accepted_count >= GOOD_MIN_SAMPLES and (
         validation_mae_ms is None or float(validation_mae_ms) <= GOOD_MAE_MS
     ):

@@ -1,0 +1,1517 @@
+{
+  "version": "th_duration_v1",
+  "language": "th",
+  "description": "Thai voice duration calibration sentences v1",
+  "samples": [
+    {
+      "id": "th_short_utterance_001",
+      "text": "สวัสดีครับ.",
+      "category": "short_utterance",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "short"
+      ]
+    },
+    {
+      "id": "th_short_utterance_002",
+      "text": "ขอบคุณนะ.",
+      "category": "short_utterance",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "short"
+      ]
+    },
+    {
+      "id": "th_short_utterance_003",
+      "text": "ใช่แล้ว.",
+      "category": "short_utterance",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "short"
+      ]
+    },
+    {
+      "id": "th_short_utterance_004",
+      "text": "ไม่เป็นไร.",
+      "category": "short_utterance",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "short"
+      ]
+    },
+    {
+      "id": "th_short_utterance_005",
+      "text": "ยอดเยี่ยม!",
+      "category": "short_utterance",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "short"
+      ]
+    },
+    {
+      "id": "th_short_utterance_006",
+      "text": "สวัสดีค่ะ.",
+      "category": "short_utterance",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "short"
+      ]
+    },
+    {
+      "id": "th_short_utterance_007",
+      "text": "ไปกันเถอะ.",
+      "category": "short_utterance",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "short"
+      ]
+    },
+    {
+      "id": "th_short_utterance_008",
+      "text": "อร่อยมาก.",
+      "category": "short_utterance",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "short"
+      ]
+    },
+    {
+      "id": "th_short_utterance_009",
+      "text": "ได้เลย.",
+      "category": "short_utterance",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "short"
+      ]
+    },
+    {
+      "id": "th_short_utterance_010",
+      "text": "รอแป๊บ.",
+      "category": "short_utterance",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "short"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_001",
+      "text": "วันนี้สภาพอากาศดีมาก.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_002",
+      "text": "ฉันกำลังเดินทางไปตลาด.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_003",
+      "text": "เขากำลังอ่านหนังสืออยู่.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_004",
+      "text": "เราควรรีบไปให้ทันเวลา.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_005",
+      "text": "อาหารจานนี้หอมและอร่อย.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_006",
+      "text": "โปรดปิดไฟก่อนออกจากห้อง.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_007",
+      "text": "เธอทำงานที่บริษัทใหญ่.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_008",
+      "text": "ผมชอบฟังเพลงตอนเช้า.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_009",
+      "text": "เด็กๆ กำลังเล่นอยู่ในสวน.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_010",
+      "text": "โปรดพูดช้าลงอีกนิด.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_011",
+      "text": "รถเมล์จะมาถึงในอีกห้านาที.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_012",
+      "text": "เธอเรียนภาษาไทยทุกวัน.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_013",
+      "text": "ฉันจะโทรหาคุณตอนเย็น.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_014",
+      "text": "เขาซื้อของฝากให้ครอบครัว.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_015",
+      "text": "วันนี้งานเสร็จเร็วกว่าที่คิด.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_016",
+      "text": "โปรดตรวจสอบอีเมลของคุณ.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_017",
+      "text": "เรานัดเจอกันที่คาเฟ่หน้าห้าง.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_018",
+      "text": "อากาศเย็นทำให้รู้สึกสบาย.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_019",
+      "text": "เธอชอบทำอาหารไทยมาก.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_020",
+      "text": "ผมเพิ่งกลับจากกรุงเทพฯ.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_021",
+      "text": "โปรดรอสักครู่แล้วลองใหม่.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_022",
+      "text": "เขากำลังเตรียมเอกสารสำคัญ.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_023",
+      "text": "ฉันต้องการน้ำเย็นหนึ่งแก้ว.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_024",
+      "text": "เธอเดินเร็วมากวันนี้.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_025",
+      "text": "เราควรพักสักห้านาที.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_026",
+      "text": "โปรดส่งไฟล์ให้ฉันด้วย.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_027",
+      "text": "เขากำลังซ่อมคอมพิวเตอร์.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_028",
+      "text": "วันนี้ออฟฟิศค่อนข้างเงียบ.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_029",
+      "text": "ฉันจะไปพบแพทย์ตอนบ่าย.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_normal_sentence_030",
+      "text": "เธอเขียนรายงานเสร็จแล้ว.",
+      "category": "normal_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "normal"
+      ]
+    },
+    {
+      "id": "th_long_sentence_001",
+      "text": "หลังจากประชุมยาวทั้งเช้า ทีมงานตัดสินใจปรับแผนใหม่เพื่อให้ทันกำหนดส่งมอบในสัปดาห์หน้า.",
+      "category": "long_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "long"
+      ]
+    },
+    {
+      "id": "th_long_sentence_002",
+      "text": "เธอเล่าเรื่องการเดินทางไปเชียงใหม่เมื่อเดือนที่แล้ว พร้อมเล่าถึงอาหารพื้นเมืองและผู้คนที่เป็นมิตร.",
+      "category": "long_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "long"
+      ]
+    },
+    {
+      "id": "th_long_sentence_003",
+      "text": "หากต้องการความแม่นยำมากขึ้น โปรดตรวจสอบข้อมูลซ้ำและบันทึกผลทุกขั้นตอนอย่างละเอียด.",
+      "category": "long_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "long"
+      ]
+    },
+    {
+      "id": "th_long_sentence_004",
+      "text": "ระบบจะประมวลผลไฟล์เสียงแล้วสร้างบทแปลภาษาไทยก่อนสังเคราะห์เสียงพูดอัตโนมัติ.",
+      "category": "long_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "long"
+      ]
+    },
+    {
+      "id": "th_long_sentence_005",
+      "text": "แม้สภาพอากาศจะร้อน แต่ทุกคนยังช่วยกันทำงานอย่างเต็มที่เพื่อให้โครงการสำเร็จตามเป้าหมาย.",
+      "category": "long_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "long"
+      ]
+    },
+    {
+      "id": "th_long_sentence_006",
+      "text": "ลูกค้าขอให้ปรับโทนเสียงให้นุ่มขึ้น และเพิ่มความชัดของคำสำคัญในประโยคสุดท้าย.",
+      "category": "long_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "long"
+      ]
+    },
+    {
+      "id": "th_long_sentence_007",
+      "text": "ก่อนเริ่มถ่ายทำ โปรดตรวจสอบไมโครโฟน แสง และพื้นหลังให้เรียบร้อยเพื่อคุณภาพที่ดีที่สุด.",
+      "category": "long_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "long"
+      ]
+    },
+    {
+      "id": "th_long_sentence_008",
+      "text": "เขาวางแผนจะเรียนรู้เครื่องมือใหม่ภายในสองสัปดาห์แล้วทดลองใช้กับงานจริงทันที.",
+      "category": "long_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "long"
+      ]
+    },
+    {
+      "id": "th_long_sentence_009",
+      "text": "บทพูดนี้ควรสั้น กระชับ และฟังง่าย เพื่อให้ผู้ชมเข้าใจเนื้อหาหลักได้รวดเร็ว.",
+      "category": "long_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "long"
+      ]
+    },
+    {
+      "id": "th_long_sentence_010",
+      "text": "หลังจากทดสอบหลายรอบ ทีมพบว่าความเร็วการพูดที่เหมาะสมช่วยให้จังหวะภาพและเสียงตรงกันมากขึ้น.",
+      "category": "long_sentence",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "long"
+      ]
+    },
+    {
+      "id": "th_comma_pause_001",
+      "text": "เปิดไฟ, ปิดแอร์, แล้วล็อกประตู.",
+      "category": "comma_pause",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "comma"
+      ]
+    },
+    {
+      "id": "th_comma_pause_002",
+      "text": "ซื้อข้าว, ผัก, และไข่จากตลาด.",
+      "category": "comma_pause",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "comma"
+      ]
+    },
+    {
+      "id": "th_comma_pause_003",
+      "text": "อ่าน, ตรวจ, และบันทึกผลทันที.",
+      "category": "comma_pause",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "comma"
+      ]
+    },
+    {
+      "id": "th_comma_pause_004",
+      "text": "เดินเร็ว, พูดช้า, และหายใจลึก.",
+      "category": "comma_pause",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "comma"
+      ]
+    },
+    {
+      "id": "th_comma_pause_005",
+      "text": "เช็คไฟล์, ส่งอีเมล, แล้วพักสั้นๆ.",
+      "category": "comma_pause",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "comma"
+      ]
+    },
+    {
+      "id": "th_comma_pause_006",
+      "text": "ต้มน้ำ, ใส่ชา, รอสามนาที.",
+      "category": "comma_pause",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "comma"
+      ]
+    },
+    {
+      "id": "th_comma_pause_007",
+      "text": "ตั้งนาฬิกา, เตรียมเอกสาร, ออกเดินทาง.",
+      "category": "comma_pause",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "comma"
+      ]
+    },
+    {
+      "id": "th_comma_pause_008",
+      "text": "ฟังก่อน, คิดต่อ, แล้วตอบทีหลัง.",
+      "category": "comma_pause",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "comma"
+      ]
+    },
+    {
+      "id": "th_comma_pause_009",
+      "text": "ล้างมือ, สวมแมสก์, เข้าห้องประชุม.",
+      "category": "comma_pause",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "comma"
+      ]
+    },
+    {
+      "id": "th_comma_pause_010",
+      "text": "เปิดแอป, เลือกเสียง, กดเริ่มเลย.",
+      "category": "comma_pause",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "comma"
+      ]
+    },
+    {
+      "id": "th_question_001",
+      "text": "คุณพร้อมหรือยัง?",
+      "category": "question",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "question"
+      ]
+    },
+    {
+      "id": "th_question_002",
+      "text": "ไปไหนดีวันนี้?",
+      "category": "question",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "question"
+      ]
+    },
+    {
+      "id": "th_question_003",
+      "text": "เริ่มได้เลยไหม?",
+      "category": "question",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "question"
+      ]
+    },
+    {
+      "id": "th_question_004",
+      "text": "ไฟล์นี้ถูกต้องใช่ไหม?",
+      "category": "question",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "question"
+      ]
+    },
+    {
+      "id": "th_question_005",
+      "text": "ใครเป็นคนรับผิดชอบ?",
+      "category": "question",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "question"
+      ]
+    },
+    {
+      "id": "th_question_006",
+      "text": "จะเสร็จกี่โมง?",
+      "category": "question",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "question"
+      ]
+    },
+    {
+      "id": "th_question_007",
+      "text": "ต้องการความช่วยเหลือไหม?",
+      "category": "question",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "question"
+      ]
+    },
+    {
+      "id": "th_question_008",
+      "text": "เสียงนี้ชัดพอหรือเปล่า?",
+      "category": "question",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "question"
+      ]
+    },
+    {
+      "id": "th_question_009",
+      "text": "ทำไมถึงล่าช้า?",
+      "category": "question",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "question"
+      ]
+    },
+    {
+      "id": "th_question_010",
+      "text": "คุณเห็นด้วยหรือไม่?",
+      "category": "question",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "question"
+      ]
+    },
+    {
+      "id": "th_exclamation_001",
+      "text": "สุดยอดไปเลย!",
+      "category": "exclamation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "exclamation"
+      ]
+    },
+    {
+      "id": "th_exclamation_002",
+      "text": "ระวังหน่อย!",
+      "category": "exclamation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "exclamation"
+      ]
+    },
+    {
+      "id": "th_exclamation_003",
+      "text": "เร็วเข้า!",
+      "category": "exclamation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "exclamation"
+      ]
+    },
+    {
+      "id": "th_exclamation_004",
+      "text": "เยี่ยมมาก!",
+      "category": "exclamation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "exclamation"
+      ]
+    },
+    {
+      "id": "th_exclamation_005",
+      "text": "อย่าลืม!",
+      "category": "exclamation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "exclamation"
+      ]
+    },
+    {
+      "id": "th_exclamation_006",
+      "text": "สำเร็จแล้ว!",
+      "category": "exclamation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "exclamation"
+      ]
+    },
+    {
+      "id": "th_exclamation_007",
+      "text": "ดีมากจริงๆ!",
+      "category": "exclamation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "exclamation"
+      ]
+    },
+    {
+      "id": "th_exclamation_008",
+      "text": "หยุดเดี๋ยวนี้!",
+      "category": "exclamation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "exclamation"
+      ]
+    },
+    {
+      "id": "th_exclamation_009",
+      "text": "ยินดีด้วย!",
+      "category": "exclamation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "exclamation"
+      ]
+    },
+    {
+      "id": "th_exclamation_010",
+      "text": "สุดยอด!",
+      "category": "exclamation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "exclamation"
+      ]
+    },
+    {
+      "id": "th_numbers_001",
+      "text": "มีคนมาประชุมสิบสองคน.",
+      "category": "numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "numbers"
+      ]
+    },
+    {
+      "id": "th_numbers_002",
+      "text": "โปรดนับจากหนึ่งถึงสิบ.",
+      "category": "numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "numbers"
+      ]
+    },
+    {
+      "id": "th_numbers_003",
+      "text": "หมายเลขห้องคือสองศูนย์ห้า.",
+      "category": "numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "numbers"
+      ]
+    },
+    {
+      "id": "th_numbers_004",
+      "text": "เขาวิ่งได้ห้ากิโลเมตร.",
+      "category": "numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "numbers"
+      ]
+    },
+    {
+      "id": "th_numbers_005",
+      "text": "มีเก้าอี้สามสิบตัวในห้อง.",
+      "category": "numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "numbers"
+      ]
+    },
+    {
+      "id": "th_numbers_006",
+      "text": "หน้านี้มีหนึ่งร้อยคำ.",
+      "category": "numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "numbers"
+      ]
+    },
+    {
+      "id": "th_numbers_007",
+      "text": "รออีกเจ็ดนาทีแล้วเริ่ม.",
+      "category": "numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "numbers"
+      ]
+    },
+    {
+      "id": "th_numbers_008",
+      "text": "ไฟล์มีขนาดสองเมกะไบต์.",
+      "category": "numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "numbers"
+      ]
+    },
+    {
+      "id": "th_numbers_009",
+      "text": "ชั้นสองอยู่ทางขวามือ.",
+      "category": "numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "numbers"
+      ]
+    },
+    {
+      "id": "th_numbers_010",
+      "text": "ทีมงานมีสิบห้าคนวันนี้.",
+      "category": "numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "numbers"
+      ]
+    },
+    {
+      "id": "th_decimal_numbers_001",
+      "text": "อุณหภูมิอยู่ที่สามสิบจุดห้าองศา.",
+      "category": "decimal_numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "decimal"
+      ]
+    },
+    {
+      "id": "th_decimal_numbers_002",
+      "text": "คะแนนเฉลี่ยคือแปดจุดเจ็ดห้า.",
+      "category": "decimal_numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "decimal"
+      ]
+    },
+    {
+      "id": "th_decimal_numbers_003",
+      "text": "ความเร็วคือสามจุดสองคำต่อวินาที.",
+      "category": "decimal_numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "decimal"
+      ]
+    },
+    {
+      "id": "th_decimal_numbers_004",
+      "text": "อัตราเพิ่มขึ้นศูนย์จุดสองห้า.",
+      "category": "decimal_numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "decimal"
+      ]
+    },
+    {
+      "id": "th_decimal_numbers_005",
+      "text": "เวอร์ชันปัจจุบันคือหนึ่งจุดศูนย์สี่.",
+      "category": "decimal_numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "decimal"
+      ]
+    },
+    {
+      "id": "th_decimal_numbers_006",
+      "text": "ระยะทางประมาณสองจุดสามกิโลเมตร.",
+      "category": "decimal_numbers",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "decimal"
+      ]
+    },
+    {
+      "id": "th_percentages_001",
+      "text": "ยอดขายเพิ่มขึ้นสิบห้าเปอร์เซ็นต์.",
+      "category": "percentages",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "percentages"
+      ]
+    },
+    {
+      "id": "th_percentages_002",
+      "text": "แบตเตอรี่เหลือสามสิบเปอร์เซ็นต์.",
+      "category": "percentages",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "percentages"
+      ]
+    },
+    {
+      "id": "th_percentages_003",
+      "text": "ส่วนลดวันนี้สองสิบเปอร์เซ็นต์.",
+      "category": "percentages",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "percentages"
+      ]
+    },
+    {
+      "id": "th_percentages_004",
+      "text": "ความแม่นยำอยู่ที่เก้าสิบห้าเปอร์เซ็นต์.",
+      "category": "percentages",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "percentages"
+      ]
+    },
+    {
+      "id": "th_percentages_005",
+      "text": "โหลดงานเสร็จแล้วแปดสิบเปอร์เซ็นต์.",
+      "category": "percentages",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "percentages"
+      ]
+    },
+    {
+      "id": "th_currency_001",
+      "text": "ราคาสินค้าคือสองร้อยห้าสิบบาท.",
+      "category": "currency",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "currency"
+      ]
+    },
+    {
+      "id": "th_currency_002",
+      "text": "ค่าจัดส่งห้าสิบบาทต่อกล่อง.",
+      "category": "currency",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "currency"
+      ]
+    },
+    {
+      "id": "th_currency_003",
+      "text": "งบประมาณรวมหนึ่งหมื่นบาท.",
+      "category": "currency",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "currency"
+      ]
+    },
+    {
+      "id": "th_currency_004",
+      "text": "เขจ่ายหนึ่งพันสองร้อยบาท.",
+      "category": "currency",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "currency"
+      ]
+    },
+    {
+      "id": "th_currency_005",
+      "text": "ส่วนลดห้าสิบบาทเมื่อซื้อครบ.",
+      "category": "currency",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "currency"
+      ]
+    },
+    {
+      "id": "th_dates_001",
+      "text": "นัดหมายวันที่สิบสองมีนาคม.",
+      "category": "dates",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "dates"
+      ]
+    },
+    {
+      "id": "th_dates_002",
+      "text": "ประชุมวันจันทร์ที่ห้า.",
+      "category": "dates",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "dates"
+      ]
+    },
+    {
+      "id": "th_dates_003",
+      "text": "ส่งมอบภายในสิ้นเดือนมิถุนายน.",
+      "category": "dates",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "dates"
+      ]
+    },
+    {
+      "id": "th_dates_004",
+      "text": "เปิดตัววันที่หนึ่งมกราคม.",
+      "category": "dates",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "dates"
+      ]
+    },
+    {
+      "id": "th_dates_005",
+      "text": "ปิดรับสมัครวันที่สามสิบเมษายน.",
+      "category": "dates",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "dates"
+      ]
+    },
+    {
+      "id": "th_acronyms_001",
+      "text": "ใช้ API ของ Google TTS.",
+      "category": "acronyms",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "acronyms"
+      ]
+    },
+    {
+      "id": "th_acronyms_002",
+      "text": "ตรวจสอบ URL และ JSON ให้ถูกต้อง.",
+      "category": "acronyms",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "acronyms"
+      ]
+    },
+    {
+      "id": "th_acronyms_003",
+      "text": "เปิดใช้งาน GPU สำหรับ TTS.",
+      "category": "acronyms",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "acronyms"
+      ]
+    },
+    {
+      "id": "th_acronyms_004",
+      "text": "บันทึกเป็นไฟล์ WAV หรือ MP3.",
+      "category": "acronyms",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "acronyms"
+      ]
+    },
+    {
+      "id": "th_acronyms_005",
+      "text": "อัปเดต SDK ก่อนทดสอบ WPS.",
+      "category": "acronyms",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "acronyms"
+      ]
+    },
+    {
+      "id": "th_latin_words_001",
+      "text": "กดปุ่ม Preview เพื่อฟังตัวอย่าง.",
+      "category": "latin_words",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "latin"
+      ]
+    },
+    {
+      "id": "th_latin_words_002",
+      "text": "เลือกโหมด Offline Clone ได้เลย.",
+      "category": "latin_words",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "latin"
+      ]
+    },
+    {
+      "id": "th_latin_words_003",
+      "text": "ระบบรองรับ Edge TTS และ Google TTS.",
+      "category": "latin_words",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "latin"
+      ]
+    },
+    {
+      "id": "th_latin_words_004",
+      "text": "ตั้งค่า Duration Profile ก่อนเริ่ม.",
+      "category": "latin_words",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "latin"
+      ]
+    },
+    {
+      "id": "th_latin_words_005",
+      "text": "ใช้ Cache เพื่อเร่งความเร็ว.",
+      "category": "latin_words",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "latin"
+      ]
+    },
+    {
+      "id": "th_product_models_001",
+      "text": "ทดสอบกับรุ่น RTX 3060 Laptop.",
+      "category": "product_models",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "product"
+      ]
+    },
+    {
+      "id": "th_product_models_002",
+      "text": "รองรับ iPhone 15 และ Pixel 8.",
+      "category": "product_models",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "product"
+      ]
+    },
+    {
+      "id": "th_product_models_003",
+      "text": "ใช้ไมค์รุ่น Blue Yeti Nano.",
+      "category": "product_models",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "product"
+      ]
+    },
+    {
+      "id": "th_product_models_004",
+      "text": "อัปเดตเป็น Windows 11 แล้ว.",
+      "category": "product_models",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "product"
+      ]
+    },
+    {
+      "id": "th_product_models_005",
+      "text": "เชื่อมต่อจอ Dell UltraSharp.",
+      "category": "product_models",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "product"
+      ]
+    },
+    {
+      "id": "th_proper_names_001",
+      "text": "คุณสมชายเดินทางไปเชียงใหม่.",
+      "category": "proper_names",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "proper"
+      ]
+    },
+    {
+      "id": "th_proper_names_002",
+      "text": "คุณมาลีทำงานที่กรุงเทพฯ.",
+      "category": "proper_names",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "proper"
+      ]
+    },
+    {
+      "id": "th_proper_names_003",
+      "text": "ทีมของอานนท์เสร็จงานเร็ว.",
+      "category": "proper_names",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "proper"
+      ]
+    },
+    {
+      "id": "th_proper_names_004",
+      "text": "คุณพิมพ์ใจชอบเสียง Premwadee.",
+      "category": "proper_names",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "proper"
+      ]
+    },
+    {
+      "id": "th_proper_names_005",
+      "text": "คุณนิวัฒน์บันทึกตัวอย่างใหม่.",
+      "category": "proper_names",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "proper"
+      ]
+    },
+    {
+      "id": "th_parentheses_001",
+      "text": "เลือกเสียง (หญิง) แล้วกดบันทึก.",
+      "category": "parentheses",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "parentheses"
+      ]
+    },
+    {
+      "id": "th_parentheses_002",
+      "text": "ตั้งค่าความเร็ว (คำต่อวินาที) ให้เหมาะสม.",
+      "category": "parentheses",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "parentheses"
+      ]
+    },
+    {
+      "id": "th_parentheses_003",
+      "text": "ใช้โหมดเต็ม (หนึ่งร้อยตัวอย่าง) เพื่อวัด.",
+      "category": "parentheses",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "parentheses"
+      ]
+    },
+    {
+      "id": "th_parentheses_004",
+      "text": "ตรวจไฟล์เสียง (WAV) ก่อนอัปโหลด.",
+      "category": "parentheses",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "parentheses"
+      ]
+    },
+    {
+      "id": "th_parentheses_005",
+      "text": "เปิดแท็บความเร็ว (WPS) เพื่อปรับค่า.",
+      "category": "parentheses",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "parentheses"
+      ]
+    },
+    {
+      "id": "th_dash_001",
+      "text": "เริ่มเลย - อย่ารอช้า.",
+      "category": "dash",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "dash"
+      ]
+    },
+    {
+      "id": "th_dash_002",
+      "text": "ชัดเจน - สั้น - ฟังง่าย.",
+      "category": "dash",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "dash"
+      ]
+    },
+    {
+      "id": "th_dash_003",
+      "text": "ตรวจก่อน - แล้วค่อยส่ง.",
+      "category": "dash",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "dash"
+      ]
+    },
+    {
+      "id": "th_dash_004",
+      "text": "เร็วขึ้น - แต่ยังชัด.",
+      "category": "dash",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "dash"
+      ]
+    },
+    {
+      "id": "th_dash_005",
+      "text": "บันทึกแล้ว - พร้อมทดสอบ.",
+      "category": "dash",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "dash"
+      ]
+    },
+    {
+      "id": "th_ellipsis_001",
+      "text": "เดี๋ยวก่อน… ฉันคิดก่อน.",
+      "category": "ellipsis",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "ellipsis"
+      ]
+    },
+    {
+      "id": "th_ellipsis_002",
+      "text": "ถ้ารออีกนิด… คงเสร็จ.",
+      "category": "ellipsis",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "ellipsis"
+      ]
+    },
+    {
+      "id": "th_ellipsis_003",
+      "text": "เสียงนี้… ชัดขึ้นมาก.",
+      "category": "ellipsis",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "ellipsis"
+      ]
+    },
+    {
+      "id": "th_ellipsis_004",
+      "text": "ฉันไม่แน่ใจ… ลองใหม่ดีกว่า.",
+      "category": "ellipsis",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "ellipsis"
+      ]
+    },
+    {
+      "id": "th_ellipsis_005",
+      "text": "อีกแป๊บ… ได้ผลลัพธ์แล้ว.",
+      "category": "ellipsis",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "ellipsis"
+      ]
+    },
+    {
+      "id": "th_mixed_punctuation_001",
+      "text": "พร้อมหรือยัง? ถ้าพร้อม เริ่มเลย!",
+      "category": "mixed_punctuation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "mixed"
+      ]
+    },
+    {
+      "id": "th_mixed_punctuation_002",
+      "text": "ตรวจไฟล์, กดบันทึก, แล้วรอผล…",
+      "category": "mixed_punctuation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "mixed"
+      ]
+    },
+    {
+      "id": "th_mixed_punctuation_003",
+      "text": "ดีมาก! แต่ปรับความเร็วอีกนิดได้ไหม?",
+      "category": "mixed_punctuation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "mixed"
+      ]
+    },
+    {
+      "id": "th_mixed_punctuation_004",
+      "text": "หยุดก่อน — ตรวจค่า WPS ให้แน่ใจ.",
+      "category": "mixed_punctuation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "mixed"
+      ]
+    },
+    {
+      "id": "th_mixed_punctuation_005",
+      "text": "เสร็จแล้ว! ส่งรายงาน (PDF) ได้ทันที.",
+      "category": "mixed_punctuation",
+      "difficulty": "normal",
+      "enabled": true,
+      "tags": [
+        "mixed"
+      ]
+    }
+  ]
+}

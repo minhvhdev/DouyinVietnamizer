@@ -166,12 +166,42 @@ class JobRunner:
             self._release_and_start_next(job_id)
 
     def _execute_job(self, job_id: str) -> None:
+        exports = getattr(self, "segment_exports", None)
         now = utc_now()
         with self.database.connection:
             self.database.connection.execute(
                 "UPDATE jobs SET status = 'running', updated_at = ? WHERE id = ?",
                 (now, job_id)
             )
+
+        if exports is not None:
+            try:
+                prepared = exports.prepare_pending(job_id)
+                if prepared.get("status") == "prepared":
+                    from .checkpoints import load_checkpoint, save_checkpoint
+                    from .segment_export_ops import SEGMENT_EXPORT_STATE_CHECKPOINT
+
+                    state = load_checkpoint(
+                        self.config.data_dir, job_id, SEGMENT_EXPORT_STATE_CHECKPOINT
+                    )
+                    if state:
+                        state["status"] = "running"
+                        state["updated_at"] = utc_now()
+                        save_checkpoint(
+                            self.config.data_dir,
+                            job_id,
+                            SEGMENT_EXPORT_STATE_CHECKPOINT,
+                            state,
+                        )
+            except Exception as exc:
+                now_end = utc_now()
+                with self.database.connection:
+                    self.database.connection.execute(
+                        "INSERT INTO events (level, code, message, job_id, created_at) VALUES ('error', 'SEGMENT_EXPORT_PREPARE_FAILED', ?, ?, ?)",
+                        (str(exc), job_id, now_end),
+                    )
+                exports.finalize_failure(job_id, error=str(exc))
+                return
 
         for step_name in PIPELINE_STEPS:
             if self.is_cancelled(job_id):
@@ -237,6 +267,8 @@ class JobRunner:
                             "UPDATE jobs SET status = 'waiting_for_selection', updated_at = ? WHERE id = ?",
                             (now_end, job_id),
                         )
+                    if exports is not None:
+                        exports.finalize_failure(job_id, error=e.info.code)
                     return
 
                 if e.info.code in {
@@ -279,9 +311,13 @@ class JobRunner:
                             "INSERT INTO events (level, code, message, job_id, created_at) VALUES ('warning', ?, ?, ?, ?)",
                             (e.info.code, f"Step '{step_name}' halted: {e.info.message}", job_id, now_end),
                         )
+                    if exports is not None:
+                        exports.finalize_failure(job_id, error=e.info.code)
                     return
 
                 if e.info.code == "JOB_CANCELLED" or self.is_cancelled(job_id):
+                    if exports is not None:
+                        exports.finalize_failure(job_id, error="JOB_CANCELLED")
                     return
 
                 now_end = utc_now()
@@ -299,9 +335,13 @@ class JobRunner:
                         "INSERT INTO events (level, code, message, job_id, created_at) VALUES ('error', ?, ?, ?, ?)",
                         (e.info.code, f"Step '{step_name}' failed: {e.info.message}", job_id, now_end)
                     )
+                if exports is not None:
+                    exports.finalize_failure(job_id, error=e.info.code)
                 return
             except Exception as e:
                 if self.is_cancelled(job_id):
+                    if exports is not None:
+                        exports.finalize_failure(job_id, error="JOB_CANCELLED")
                     return
                 traceback.print_exc()
                 now_end = utc_now()
@@ -320,6 +360,8 @@ class JobRunner:
                         "INSERT INTO events (level, code, message, job_id, created_at) VALUES ('error', 'UNEXPECTED_ERROR', ?, ?, ?)",
                         (f"Step '{step_name}' crashed: {err_msg}", job_id, now_end)
                     )
+                if exports is not None:
+                    exports.finalize_failure(job_id, error=err_msg)
                 return
 
         if not self.is_cancelled(job_id):
@@ -345,3 +387,5 @@ class JobRunner:
                     "INSERT INTO events (level, code, message, job_id, created_at) VALUES ('info', 'JOB_COMPLETED', 'Job completed successfully.', ?, ?)",
                     (job_id, now_end)
                 )
+            if exports is not None:
+                exports.finalize_success(job_id)

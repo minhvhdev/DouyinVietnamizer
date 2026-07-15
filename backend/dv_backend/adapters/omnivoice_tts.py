@@ -69,6 +69,7 @@ class OmniVoiceTtsAdapter:
         self._data_dir = Path(data_dir) if data_dir is not None else None
         self._runner = runner
         self._settings = dict(settings or {})
+        self.client_scope = str(self._settings.get("omnivoice_client_scope") or "shared").strip() or "shared"
         self._client = None
         self._injected_client = _client
         self._last_batch_diagnostics: dict[str, Any] = {
@@ -121,6 +122,7 @@ class OmniVoiceTtsAdapter:
             language_id=self.language_id,
             audio_chunk_threshold=self.audio_chunk_threshold,
             audio_chunk_duration=self.audio_chunk_duration,
+            scope=self.client_scope,
         )
         self._client.register_with_runner(self._runner)
 

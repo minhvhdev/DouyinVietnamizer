@@ -42,8 +42,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "google_tts_voice": "vi-VN-Standard-A",
     "google_tts_api_key": "",
     "google_tts_speaking_rate": 1.0,
-    "gemini_tts_model": "gemini-2.5-flash-preview-tts",
-    "gemini_tts_voice": "Zephyr",
     "omnivoice_model": OMNIVOICE_DEFAULT_MODEL,
     "omnivoice_device": "cuda:0",
     "omnivoice_ref_audio": "",
@@ -100,16 +98,16 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "short_tts_lengthen_min_gap_sec": 1.5,
     "short_tts_lengthen_max_ratio": 1.6,
     "asr_alignment_mode": "accurate",
-    "sparse_asr_enabled": False,
+    "sparse_asr_enabled": True,
     "sparse_asr_min_silence_ratio": 0.35,
     "sparse_asr_chunk_sec": 25,
     "sparse_asr_padding_ms": 200,
     "sparse_asr_merge_gap_sec": 0.25,
     "vad_engine": "silero",
-    "silero_vad_threshold": 0.5,
+    "silero_vad_threshold": 0.25,
     "silero_vad_min_speech_duration_ms": 250,
-    "silero_vad_min_silence_duration_ms": 300,
-    "silero_vad_speech_pad_ms": 150,
+    "silero_vad_min_silence_duration_ms": 750,
+    "silero_vad_speech_pad_ms": 100,
     "silencedetect_noise_db": -30,
     "silencedetect_min_silence_sec": 0.5,
     "vad_false_positive_filter_enabled": True,
@@ -708,10 +706,16 @@ class SettingsService:
             values["cookies_file"] = cookies_file
 
         tts_backend = values.get("tts_backend")
-        if tts_backend is not None and tts_backend not in SUPPORTED_TTS_BACKENDS:
-            raise ValueError(
-                "tts_backend must be one of: " + ", ".join(SUPPORTED_TTS_BACKENDS)
-            )
+        if tts_backend is not None:
+            backend = str(tts_backend).strip().lower()
+            # Legacy Gemini TTS removed — migrate stored selection to OmniVoice.
+            if backend == "gemini_tts":
+                backend = "omnivoice"
+            if backend not in SUPPORTED_TTS_BACKENDS:
+                raise ValueError(
+                    "tts_backend must be one of: " + ", ".join(SUPPORTED_TTS_BACKENDS)
+                )
+            values["tts_backend"] = backend
 
         if values.get("omnivoice_num_steps") is not None:
             try:

@@ -342,3 +342,45 @@ def reset_voice_profile(data_dir: Path | None, profile_key_value: str) -> None:
     profiles = store.setdefault("profiles", {})
     profiles.pop(profile_key_value, None)
     save_profiles(data_dir, store)
+
+
+def save_manual_wps_profile(
+    data_dir: Path | None,
+    *,
+    identity: dict[str, Any],
+    words_per_second: float,
+    source: str = "manual",
+    measure_meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    language = str(identity.get("target_language") or "vi")
+    rate = max(2.0, min(5.0, float(words_per_second)))
+    syllables_per_second = max(2.5, min(6.0, round(rate * 1.15, 3)))
+    key = identity_profile_key(identity)
+    store = load_profiles(data_dir)
+    profiles = store.setdefault("profiles", {})
+    existing = profiles.get(key) if isinstance(profiles.get(key), dict) else {}
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload = {
+        **default_voice_profile(language),
+        **existing,
+        "profile_schema_version": PROFILE_SCHEMA_VERSION,
+        "profile_key": key,
+        "voice_identity": identity,
+        "voice_id": identity.get("voice_id"),
+        "tts_backend": identity.get("tts_backend"),
+        "language": language,
+        "model": identity.get("model") or "",
+        "words_per_second": round(rate, 2),
+        "syllables_per_second": syllables_per_second,
+        "status": "ready",
+        "quality": "manual" if source == "manual" else "measured",
+        "source": source,
+        "samples": int(existing.get("samples") or 0),
+        "created_at": existing.get("created_at") or now,
+        "updated_at": now,
+    }
+    if measure_meta:
+        payload["last_measure"] = measure_meta
+    profiles[key] = payload
+    save_profiles(data_dir, store)
+    return payload

@@ -11,7 +11,7 @@ from typing import Any
 import wave
 from uuid import uuid4
 
-from fastapi import FastAPI, Request, UploadFile, File, Form
+from fastapi import FastAPI, Request, Response, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -23,7 +23,26 @@ from .errors import AppError, app_error_handler
 from .jobs import JobService
 from .local_env import load_repo_dotenv
 from .models import ErrorInfo, Job, JobCreate, JobRerun
+from .segment_edit_ops import (
+    CorruptSegmentEditPlanError,
+    InvalidJobStateError,
+    SaveSegmentEditPlanRequest,
+    SegmentEditPlanService,
+    SegmentSourceUnavailableError,
+    UnknownSegmentIdError,
+)
+from .segment_edit_plan import PlanVersionConflictError
+from .segment_export_ops import (
+    SegmentExportInProgressError,
+    SegmentExportRequest,
+    SegmentExportService,
+)
 from .runtime import ReleaseVramResult, RuntimeReport, default_runtime_service, release_vram_resources
+from .preview_vram_release import (
+    abort_omnivoice_preview,
+    begin_omnivoice_preview,
+    complete_omnivoice_preview,
+)
 from .runner import JobRunner
 from .checkpoints import PIPELINE_STEPS, load_checkpoint, save_checkpoint
 from .settings import SettingsService
@@ -364,6 +383,8 @@ def _synthesize_voice_preview(
         preview_settings["tts_backend"] = backend
 
     resolved_backend = tts_backend_from_settings(preview_settings)
+    if resolved_backend == "omnivoice":
+        preview_settings["omnivoice_client_scope"] = "preview"
     tts = create_tts_adapter(preview_settings)
     output_wav = Path(tempfile.gettempdir()) / f"voice_preview_{output_suffix}_{uuid4().hex}.wav"
     preview_voice = (voice or "").strip() or resolve_tts_voice(preview_settings)
@@ -371,6 +392,8 @@ def _synthesize_voice_preview(
         instruct = str(preview_settings.get("omnivoice_instruct") or "").strip()
         if instruct and not (voice or "").strip().lower().endswith(".wav"):
             preview_voice = f"{TTS_VOICE_INSTRUCT_PREFIX}{instruct}"
+
+    preview_token = begin_omnivoice_preview() if resolved_backend == "omnivoice" else None
     try:
         synthesize_kwargs = {
             "text": cleaned_text,
@@ -405,20 +428,22 @@ def _synthesize_voice_preview(
                 synthesize_kwargs["anchor_text"] = resolved_anchor
         tts.synthesize(**synthesize_kwargs)
     except AppError:
+        if preview_token is not None:
+            abort_omnivoice_preview(preview_token)
         raise
     except Exception as exc:
+        if preview_token is not None:
+            abort_omnivoice_preview(preview_token)
         labels = {
             "omnivoice": "OmniVoice",
             "edge_tts": "Edge TTS",
             "google_tts": "Google TTS",
-            "gemini_tts": "Gemini TTS",
         }
         label = labels.get(resolved_backend, resolved_backend)
         actions = {
             "omnivoice": "Run 'python scripts/setup_omnivoice.py' for OmniVoice.",
             "edge_tts": "Check your internet connection and Edge TTS voice selection.",
             "google_tts": "Check your Google Cloud TTS API key and voice selection.",
-            "gemini_tts": "Verify Gemini API keys in Settings and retry.",
         }
         raise AppError(
             502,
@@ -431,6 +456,8 @@ def _synthesize_voice_preview(
         ) from exc
 
     if not output_wav.is_file() or output_wav.stat().st_size == 0:
+        if preview_token is not None:
+            abort_omnivoice_preview(preview_token)
         raise AppError(
             500,
             ErrorInfo(
@@ -439,6 +466,8 @@ def _synthesize_voice_preview(
                 action="Try another text sentence.",
             ),
         )
+    if preview_token is not None:
+        complete_omnivoice_preview(preview_token, output_wav)
     return output_wav
 
 
@@ -477,6 +506,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     jobs = JobService(database, config.data_dir)
     jobs.reconcile_interrupted()
+    segment_edits = SegmentEditPlanService(config.data_dir, jobs)
     try:
         from .gpu_lease import clear_gpu_lease_state
 
@@ -488,6 +518,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         runtime.run()
 
     runner = JobRunner(config, database)
+    segment_exports = SegmentExportService(
+        config.data_dir,
+        database,
+        jobs,
+        runner,
+        segment_edits,
+    )
+    runner.segment_exports = segment_exports
+    segment_exports.recover_interrupted()
     from .voice_calibration_runner import VoiceCalibrationRunner
 
     voice_calibration = VoiceCalibrationRunner(
@@ -643,6 +682,125 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.get("/api/jobs/{job_id}", response_model=Job)
     def get_job(job_id: str) -> Job:
         return jobs.get(job_id)
+
+    def _raise_segment_edit_error(exc: Exception) -> None:
+        if isinstance(exc, InvalidJobStateError):
+            raise AppError(
+                409,
+                ErrorInfo(
+                    code="SEGMENT_EDIT_JOB_NOT_COMPLETED",
+                    message="Segments can only be edited after the job is completed.",
+                    action="Wait for the job to complete, then reopen segment editing.",
+                    detail=f"job_id={getattr(exc, 'job_id', '')},status={getattr(exc, 'status', '')}",
+                ),
+            ) from exc
+        if isinstance(exc, PlanVersionConflictError):
+            raise AppError(
+                409,
+                ErrorInfo(
+                    code="SEGMENT_EDIT_VERSION_CONFLICT",
+                    message="The segment draft was changed by another request.",
+                    action="Reload the edit plan and re-apply your changes.",
+                    detail=f"expected={getattr(exc, 'expected', '')},current={getattr(exc, 'current', '')}",
+                ),
+            ) from exc
+        if isinstance(exc, UnknownSegmentIdError):
+            raise AppError(
+                422,
+                ErrorInfo(
+                    code="SEGMENT_EDIT_UNKNOWN_ID",
+                    message=f"Segment id {getattr(exc, 'segment_id', '')} is not in the current draft.",
+                    action="Reload the edit plan and submit only current segment ids.",
+                ),
+            ) from exc
+        if isinstance(exc, SegmentSourceUnavailableError):
+            raise AppError(
+                409,
+                ErrorInfo(
+                    code="SEGMENT_EDIT_SOURCE_UNAVAILABLE",
+                    message="No completed segment checkpoint can initialize editing.",
+                    action="Complete the dubbing pipeline successfully before editing segments.",
+                ),
+            ) from exc
+        if isinstance(exc, CorruptSegmentEditPlanError):
+            raise AppError(
+                500,
+                ErrorInfo(
+                    code="SEGMENT_EDIT_PLAN_CORRUPT",
+                    message="The saved segment edit plan is invalid or unreadable.",
+                    action="Restore the edit-plan checkpoint from backup before retrying.",
+                ),
+            ) from exc
+        if isinstance(exc, ValueError):
+            raise AppError(
+                422,
+                ErrorInfo(
+                    code="SEGMENT_EDIT_INVALID",
+                    message="The proposed segment draft is invalid.",
+                    action="Check segment ids, text, and start/end times.",
+                    detail=str(exc),
+                ),
+            ) from exc
+        raise exc
+
+    @app.get("/api/jobs/{job_id}/segments/edit-plan")
+    def get_segment_edit_plan(job_id: str) -> dict:
+        try:
+            plan = segment_edits.get_or_create(job_id)
+        except Exception as exc:
+            _raise_segment_edit_error(exc)
+            raise
+        return segment_edits.response_payload(plan)
+
+    @app.put("/api/jobs/{job_id}/segments/edit-plan")
+    def save_segment_edit_plan(job_id: str, payload: SaveSegmentEditPlanRequest) -> dict:
+        try:
+            plan = segment_edits.save_draft(
+                job_id,
+                expected_plan_version=payload.expected_plan_version,
+                segments=payload.segments,
+            )
+        except Exception as exc:
+            _raise_segment_edit_error(exc)
+            raise
+        return segment_edits.response_payload(plan)
+
+
+    @app.post("/api/jobs/{job_id}/segments/export")
+    def export_segment_draft(
+        job_id: str,
+        payload: SegmentExportRequest,
+        response: Response,
+    ) -> dict:
+        try:
+            result = segment_exports.request_export(
+                job_id,
+                expected_plan_version=payload.expected_plan_version,
+            )
+        except SegmentExportInProgressError as exc:
+            raise AppError(
+                409,
+                ErrorInfo(
+                    code="segment_export_in_progress",
+                    message="A segment export is already active for this job.",
+                    action="Wait for the active export to finish before retrying.",
+                ),
+            ) from exc
+        except PlanVersionConflictError as exc:
+            raise AppError(
+                409,
+                ErrorInfo(
+                    code="plan_version_conflict",
+                    message="The segment draft changed before export was accepted.",
+                    action="Reload the edit plan and export the latest version.",
+                    detail=f"expected={exc.expected},current={exc.current}",
+                ),
+            ) from exc
+        except Exception as exc:
+            _raise_segment_edit_error(exc)
+            raise
+        response.status_code = 200 if result["status"] == "unchanged" else 202
+        return result
 
     @app.post("/api/jobs/{job_id}/start")
     def start_job(job_id: str) -> dict:
@@ -936,33 +1094,6 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             
         return FileResponse(str(file_path), media_type=media_type, filename=filename)
 
-    @app.get("/api/outputs")
-    def list_outputs() -> list[dict]:
-        rows = database.connection.execute(
-            "SELECT id, title, title_vi, source_url, updated_at FROM jobs "
-            "WHERE status = 'completed' ORDER BY updated_at DESC"
-        ).fetchall()
-
-        outputs = []
-        for r in rows:
-            job_id = r["id"]
-            output_file = config.data_dir / "jobs" / job_id / "output" / "dubbed.mp4"
-            if output_file.is_file():
-                title_vi = r["title_vi"]
-                if not title_vi:
-                    translate_cp = load_checkpoint(config.data_dir, job_id, "translate")
-                    if translate_cp:
-                        title_vi = translate_cp.get("title_vi")
-                outputs.append({
-                    "job_id": job_id,
-                    "title": r["title"] or "Untitled Video",
-                    "title_vi": title_vi,
-                    "source_url": r["source_url"],
-                    "completed_at": r["updated_at"],
-                    "file_size": output_file.stat().st_size
-                })
-        return outputs
-
     @app.get("/api/settings")
     def get_settings() -> dict:
         return settings.get_all()
@@ -1038,7 +1169,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.get("/api/tts/voices")
     def list_tts_voices(backend: str = "edge_tts", locale: str | None = None) -> list[dict]:
-        from .adapters.tts import GEMINI_TTS_VOICES, SUPPORTED_TTS_BACKENDS
+        from .adapters.tts import SUPPORTED_TTS_BACKENDS
         from .dubbing_languages import dub_language_config, normalize_dub_language
 
         resolved = (backend or "").strip().lower()
@@ -1070,8 +1201,6 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 }
                 for voice in voices
             ]
-        if resolved == "gemini_tts":
-            return [{"id": voice["id"], "name": voice["name"], "kind": "gemini"} for voice in GEMINI_TTS_VOICES]
         if resolved == "omnivoice":
             return [
                 {"id": "auto", "name": "Auto voice", "kind": "preset"},
@@ -1407,11 +1536,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return FileResponse(str(output_wav), media_type="audio/wav", filename="test_output.wav")
 
     class VoiceCalibrationStartPayload(BaseModel):
-        mode: str = "standard"
+        mode: str = "full"
 
     @app.post("/api/cloned-voices/{voice_id}/calibration")
     def start_voice_calibration(voice_id: str, payload: VoiceCalibrationStartPayload) -> dict:
-        return voice_calibration.start_calibration(voice_id, payload.mode or "standard")
+        return voice_calibration.start_calibration(voice_id, payload.mode or "full")
 
     @app.get("/api/cloned-voices/{voice_id}/calibration")
     def get_voice_calibration(voice_id: str) -> dict:
@@ -1450,9 +1579,83 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     def reset_voice_duration_profile(voice_id: str) -> dict:
         return voice_calibration.delete_profile(voice_id)
 
+    class VoiceWpsUpdatePayload(BaseModel):
+        catalog_key: str
+        words_per_second: float
+        language: str | None = None
+
+    class VoiceWpsMeasurePayload(BaseModel):
+        catalog_key: str
+        language: str | None = None
+
+    @app.get("/api/voices/wps-catalog")
+    def get_voice_wps_catalog(language: str | None = None) -> list[dict]:
+        from .voice_wps_catalog import build_wps_catalog
+
+        return build_wps_catalog(
+            data_dir=config.data_dir,
+            database=database,
+            language=language,
+        )
+
+    @app.put("/api/voices/wps")
+    def update_voice_wps(payload: VoiceWpsUpdatePayload) -> dict:
+        from .voice_wps_catalog import set_voice_wps
+
+        try:
+            return set_voice_wps(
+                data_dir=config.data_dir,
+                catalog_key=payload.catalog_key,
+                words_per_second=payload.words_per_second,
+                language=payload.language,
+                database=database,
+            )
+        except ValueError as error:
+            raise AppError(
+                422,
+                ErrorInfo(
+                    code="INVALID_WPS_UPDATE",
+                    message=str(error),
+                    action="Verify catalog key and WPS value (2.0–5.0).",
+                ),
+            ) from error
+
+    @app.post("/api/voices/wps/measure")
+    def measure_voice_wps_endpoint(payload: VoiceWpsMeasurePayload) -> dict:
+        from .voice_wps_catalog import measure_voice_wps
+
+        try:
+            return measure_voice_wps(
+                data_dir=config.data_dir,
+                settings=settings.get_raw_all(),
+                catalog_key=payload.catalog_key,
+                language=payload.language,
+                database=database,
+            )
+        except ValueError as error:
+            raise AppError(
+                422,
+                ErrorInfo(
+                    code="WPS_MEASURE_FAILED",
+                    message=str(error),
+                    action="Check voice configuration and try again.",
+                ),
+            ) from error
+        except Exception as error:
+            raise AppError(
+                500,
+                ErrorInfo(
+                    code="WPS_MEASURE_FAILED",
+                    message=f"Auto-measure failed: {error}",
+                    action="Verify TTS backend credentials and voice availability.",
+                ),
+            ) from error
+
     app.state.config = config
     app.state.database = database
     app.state.jobs = jobs
+    app.state.segment_edits = segment_edits
+    app.state.segment_exports = segment_exports
     app.state.runtime = runtime
     app.state.runner = runner
     app.state.voice_calibration = voice_calibration
