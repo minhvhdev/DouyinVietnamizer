@@ -68,9 +68,8 @@ def compute_timing_qc_metrics(segments: list[dict[str, Any]], *, settings: dict[
         if any(item.get("source") == "rewrite" for item in attempts):
             rewrites += 1
 
-        user_speed = float(segment.get("user_requested_speed") or 1.0)
         auto_tempo = float(segment.get("automatic_tempo_factor") or segment.get("time_stretch_factor") or 1.0)
-        effective = float(segment.get("effective_speed") or user_speed * auto_tempo)
+        effective = float(segment.get("effective_speed") or auto_tempo)
         tempos.append(effective)
 
         if segment.get("duration_repair_risk") == "warning" or (auto_tempo > 1.12 or auto_tempo < 0.9):

@@ -3,14 +3,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from dv_backend.omnivoice_steps_eval import (
+from dv_backend.eval.omnivoice_steps_eval import (
     detect_missing_numbers,
     detect_truncated_ending,
     evaluate_quality_gate,
     recommend_steps,
     summarize_by_group,
 )
-from scripts.benchmark_omnivoice_steps import QUALITY_CORPUS, build_blind_manifest
+from scripts.eval.benchmark_omnivoice_steps import QUALITY_CORPUS, build_blind_manifest
 
 
 def test_quality_corpus_has_minimum_segments_and_groups() -> None:

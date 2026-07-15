@@ -27,13 +27,3 @@ def classify_utterance_length(segment: dict[str, Any]) -> str:
 
 def short_utterance_abs_tolerance(base_abs: float) -> float:
     return max(base_abs, 0.35)
-
-
-def should_skip_rewrite_for_short_utterance(segment: dict[str, Any], fit: str) -> bool:
-    if classify_utterance_length(segment) != "short":
-        return False
-    return fit in {"good", "slightly_short", "slightly_long"}
-
-
-def long_segment_review_required(segment: dict[str, Any]) -> bool:
-    return classify_utterance_length(segment) == "long"

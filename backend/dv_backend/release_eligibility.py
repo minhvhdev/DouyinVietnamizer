@@ -9,18 +9,7 @@ from .config import AppConfig
 from .errors import AppError
 from .models import ErrorInfo
 from .timing_placement import segments_with_voiced_overlap
-from .timing_review import flag_infeasible_segments, list_timing_review_segments
-
-
-def compute_release_eligible(
-    segments: list[dict[str, Any]],
-    *,
-    absolute_max_rate: float = 1.2,
-) -> bool:
-    flagged = flag_infeasible_segments(list(segments), absolute_max_rate=absolute_max_rate)
-    overlaps = segments_with_voiced_overlap(segments)
-    remaining = list_timing_review_segments(segments, absolute_max_rate=absolute_max_rate)
-    return not flagged and not overlaps and len(remaining) == 0
+from .timing_review import list_timing_review_segments
 
 
 def resolve_release_eligible(
@@ -37,8 +26,8 @@ def resolve_release_eligible(
     Empty-segment jobs may still trust an explicit checkpoint True (normalize drop-all).
     """
     cfg = settings or {}
-    absolute_max = float(cfg.get("edge_tts_overflow_speed_hard_max", 1.2) or 1.2)
-    absolute_max = max(1.0, min(1.2, absolute_max))
+    absolute_max = float(cfg.get("edge_tts_overflow_speed_hard_max", 1.25) or 1.25)
+    absolute_max = max(1.0, min(1.25, absolute_max))
     repair_cp = load_checkpoint(config.data_dir, job_id, "duration_repair") or {}
     segments = list(repair_cp.get("segments") or [])
     if not segments:

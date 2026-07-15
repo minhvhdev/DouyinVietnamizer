@@ -114,9 +114,6 @@ class E2ERepairOps:
         self.durations[str(output_path)] = round(target_duration, 3)
         return True
 
-    def apply_global_speed(self, *, input_path: Path) -> tuple[Path, float]:
-        return input_path, float(self.probe_wav_duration(input_path) or 0.0)
-
 
 def _run_repair(
     *,

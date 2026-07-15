@@ -17,8 +17,40 @@ Hướng dẫn chạy và phát triển DouyinVietnamizer trên **Mac M1/M2/M3/M
 git clone https://github.com/minhvhdev/DouyinVietnamizer.git
 cd DouyinVietnamizer
 pnpm run setup
+python3 backend/scripts/setup_omnivoice.py
 pnpm tauri:dev                     # hoặc: pnpm run dev
 ```
+
+## OmniVoice trên Apple Silicon (MPS)
+
+OmniVoice 0.2.x chạy model chính trên MPS bằng `float16` và giữ Higgs audio
+tokenizer trên CPU. Không bật `PYTORCH_ENABLE_MPS_FALLBACK=1`, vì biến này có
+thể âm thầm chuyển operator chưa hỗ trợ sang CPU.
+
+Kiểm tra môi trường:
+
+```bash
+backend/venvs/omnivoice/bin/python3 \
+  -m dv_backend.adapters.omnivoice_worker --health-check
+```
+
+Smoke test thực, bắt buộc trước khi xác nhận một máy Mac được hỗ trợ:
+
+```bash
+cd backend
+venvs/omnivoice/bin/python3 scripts/smoke_omnivoice_mps.py \
+  --ref-audio /path/to/reference.wav \
+  --ref-text "Toàn bộ lời nói khớp với reference.wav" \
+  --output-dir omnivoice_mps_smoke
+```
+
+Kết quả hợp lệ phải báo `device: "mps"`, `model_dtype: "float16"`,
+audio tokenizer CPU/float32, và tạo được cả `cold.wav` lẫn `warm.wav` ở 24 kHz
+với kiểm tra finite/non-silent/clipping đạt. Nghe thủ công cả hai WAV để xác
+nhận không muffled/noisy/clipped. App không tự fallback toàn bộ model sang CPU
+trên Apple Silicon; chỉ dùng CPU nếu người vận hành bật
+`DV_OMNIVOICE_ALLOW_CPU_FALLBACK=1` rõ ràng. Operator fallback là policy riêng
+và không được bật trong acceptance run.
 
 ## Layout dev
 

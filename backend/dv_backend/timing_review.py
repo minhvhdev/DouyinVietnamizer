@@ -186,7 +186,7 @@ def flag_infeasible_segments(
 def list_timing_review_segments(
     segments: list[dict[str, Any]],
     *,
-    absolute_max_rate: float = 1.2,
+    absolute_max_rate: float = 1.25,
     timing_stage: str | None = None,
 ) -> list[dict[str, Any]]:
     """Rows that still overflow the allocated window after max allowed speed.
@@ -194,7 +194,7 @@ def list_timing_review_segments(
     Source of truth is current repaired/tts duration vs timing_available_duration (and
     remaining headroom to absolute_max_rate). Stale timing_overflow_sec alone is ignored.
     """
-    abs_max = max(1.0, float(absolute_max_rate or 1.2))
+    abs_max = max(1.0, float(absolute_max_rate or 1.25))
     rows: list[dict[str, Any]] = []
     for segment in segments:
         if not str(segment.get("tts_spoken_text") or segment.get("translation") or "").strip():

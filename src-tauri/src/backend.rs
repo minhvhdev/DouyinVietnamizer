@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -343,15 +342,6 @@ pub fn buffered_stderr(child: &ManagedChild) -> String {
     child.stderr_tail()
 }
 
-pub fn spawn_uvicorn(
-    runtime: &AppRuntime,
-    _source_backend_dir: &Path,
-    dev_profile: bool,
-    clear_port: bool,
-) -> Result<ManagedChild, BackendStartError> {
-    spawn_backend(runtime, dev_profile, clear_port)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,7 +367,7 @@ mod tests {
             envs.get("DV_VENDOR_DIR").unwrap(),
             &root.join("vendor").as_os_str().to_os_string()
         );
-        assert_eq!(envs.get("DV_RELOAD").unwrap(), "1");
+        assert_eq!(envs.get("DV_RELOAD").unwrap(), "0");
     }
 
     #[test]

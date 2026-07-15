@@ -36,8 +36,8 @@ def main() -> int:
     jobs = JobService(database, config.data_dir)
     jobs.reconcile_interrupted()
     settings = SettingsService(database).get_all()
-    absolute_max_rate = float(settings.get("edge_tts_overflow_speed_hard_max", 1.2) or 1.2)
-    absolute_max_rate = max(1.0, min(1.2, absolute_max_rate))
+    absolute_max_rate = float(settings.get("edge_tts_overflow_speed_hard_max", 1.25) or 1.25)
+    absolute_max_rate = max(1.0, min(1.25, absolute_max_rate))
 
     tts_cp = load_checkpoint(config.data_dir, job_id, "tts")
     if not tts_cp:

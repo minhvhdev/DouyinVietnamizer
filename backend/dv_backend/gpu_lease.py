@@ -90,11 +90,6 @@ def gpu_lease(owner: str, *, device: str | None = None, lock_dir: Path | None = 
                     logger.debug("GPU lease released by %s on %s", owner, device_key)
 
 
-def gpu_lease_holder(device: str | None = None) -> str | None:
-    with _lease_lock:
-        return _lease_holders.get(_device_key(device))
-
-
 def clear_gpu_lease_state(*, reason: str = "manual") -> list[str]:
     """Drop in-process GPU lease holders (e.g. after cancel/interrupt without __exit__)."""
     with _lease_condition:
@@ -104,7 +99,3 @@ def clear_gpu_lease_state(*, reason: str = "manual") -> list[str]:
     if previous:
         logger.info("Cleared stale GPU lease holders (%s): %s", reason, ", ".join(previous))
     return previous
-
-
-def reset_gpu_lease_for_tests() -> None:
-    clear_gpu_lease_state(reason="test_reset")

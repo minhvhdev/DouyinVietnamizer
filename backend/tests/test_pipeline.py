@@ -521,7 +521,7 @@ def test_normalize_segments_splits_single_long_asr_segment_with_vad(test_env):
 
 
 @patch("dv_backend.translation_timing_rewrite.call_openai_chat")
-@patch("dv_backend.pipeline.GoogleFreeTranslator")
+@patch("dv_backend.pipeline.GeminiTranslator")
 def test_translate_step(translator_type, mock_chat, test_env):
     config, database, job_service, runner = test_env
 
@@ -530,6 +530,14 @@ def test_translate_step(translator_type, mock_chat, test_env):
             "INSERT INTO jobs (id, source_url, title, status, created_at, updated_at) "
             "VALUES (?, ?, ?, 'running', ?, ?)",
             ("job123", "https://www.bilibili.com/video/BV1", "中文标题", "now", "now"),
+        )
+        database.connection.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("translation_backend", json.dumps("gemini"), "now"),
+        )
+        database.connection.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("gemini_api_keys", json.dumps([{"id": "a", "key": "key-a"}]), "now"),
         )
     
     save_checkpoint(config.data_dir, "job123", "normalize_segments", {
@@ -551,7 +559,9 @@ def test_translate_step(translator_type, mock_chat, test_env):
     }
     
     content = mock_chat.return_value["choices"][0]["message"]["content"]
-    translator_type.return_value.translate.side_effect = [
+    translator = translator_type.return_value
+    translator.key_pool.cursor = 0
+    translator.translate.side_effect = [
         ["Tiêu đề tiếng Việt"],
         [json.loads(content)["translations"][0]["translation"]],
     ]
@@ -917,70 +927,6 @@ def test_duration_repair_lengthens_when_gap_exceeds_one_second(
     session.synthesize.assert_called_once()
     assert "_lengthen" in result["segments"][0]["repaired_method"]
     assert result["segments"][0]["translation"] == "Ngắn hơn một chút nhé."
-
-
-@patch("dv_backend.pipeline.TtsSession")
-@patch("dv_backend.pipeline.lengthen_translation_for_timing")
-@patch("dv_backend.pipeline.get_wav_duration")
-@patch("dv_backend.pipeline.run_subprocess_with_cancel")
-@patch("dv_backend.pipeline.resolve_tool_path")
-def test_duration_repair_applies_global_speed_after_lengthen(
-    mock_resolve,
-    mock_run,
-    mock_dur,
-    mock_lengthen,
-    mock_tts_session,
-    test_env,
-):
-    config, database, _job_service, runner = test_env
-    with database.connection:
-        database.connection.execute(
-            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
-            ("tts_global_speed", json.dumps(2.5), "now"),
-        )
-        database.connection.execute(
-            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
-            ("allow_spoken_text_mutation", json.dumps(True), "now"),
-        )
-    mock_resolve.return_value = Path("dummy-ffmpeg")
-    save_checkpoint(config.data_dir, "job-global-speed", "tts", {
-        "segments": [
-            {
-                "index": 0,
-                "start": 0.0,
-                "end": 4.0,
-                "translation": "Ngắn.",
-                "duration_budget": 4.0,
-                "tts_duration": 1.0,
-            }
-        ]
-    })
-    tts_dir = config.data_dir / "jobs" / "job-global-speed" / "artifacts" / "tts"
-    write_dummy_wav(tts_dir / "tts_0.wav", duration=1.0)
-    mock_lengthen.return_value = ("Ngắn hơn một chút nhé.", 4)
-    mock_dur.side_effect = [1.0, 3.5, 1.4, 1.4, 3.5, 3.5]
-    mock_run.side_effect = lambda cmd, *_args, **_kwargs: (
-        write_dummy_wav(Path(cmd[-1]), duration=1.4 if "tts_speed_0" in str(cmd[-1]) else 3.5)
-        or MagicMock(stdout="", stderr="", returncode=0)
-    )
-    session = MagicMock()
-    mock_tts_session.return_value.__enter__.return_value = session
-
-    result = pipeline.duration_repair_step("job-global-speed", config, database, runner)
-
-    assert "global_speed_2.5x" in result["segments"][0]["repaired_method"]
-    speed_calls = [
-        call for call in mock_run.call_args_list
-        if str(call.args[0][-1]).endswith("tts_speed_0.wav")
-    ]
-    assert speed_calls
-    filter_arg = next(
-        (part for part in speed_calls[0].args[0] if str(part).startswith("atempo=")),
-        "",
-    )
-    assert "atempo=2.0" in filter_arg
-    session.synthesize.assert_called_once()
-    assert mock_run.call_args_list.index(speed_calls[0]) > 0
 
 
 def test_tail_silence_pad_filter_only_appends_silence_at_end() -> None:
@@ -1468,7 +1414,7 @@ def test_render_step_burns_subtitles_when_enabled(
 @patch("dv_backend.pipeline.resolve_tool_path")
 @patch("dv_backend.pipeline.run_subprocess_with_cancel")
 @patch("dv_backend.pipeline.transcribe_audio")
-@patch("dv_backend.pipeline.GoogleFreeTranslator")
+@patch("dv_backend.pipeline.GeminiTranslator")
 @patch("dv_backend.pipeline.create_tts_adapter")
 @patch("dv_backend.pipeline.get_video_stream_duration", return_value=5.0)
 def test_full_runner_execution_and_resume(
@@ -1482,6 +1428,15 @@ def test_full_runner_execution_and_resume(
     tmp_path: Path,
 ):
     config, database, job_service, runner = test_env
+    with database.connection:
+        database.connection.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("translation_backend", json.dumps("gemini"), "now"),
+        )
+        database.connection.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("gemini_api_keys", json.dumps([{"id": "a", "key": "key-a"}]), "now"),
+        )
     mock_resolve.return_value = Path("dummy-tool")
     mock_transcribe.return_value = [
         {"start": 0.0, "end": 1.0, "text": "Hello"},
@@ -1544,7 +1499,9 @@ def test_full_runner_execution_and_resume(
         return MagicMock(stdout="", stderr="", returncode=0)
 
     mock_run.side_effect = side_effect
-    translator_type.return_value.translate.return_value = ["tr0", "tr1"]
+    translator = translator_type.return_value
+    translator.key_pool.cursor = 0
+    translator.translate.return_value = ["tr0", "tr1"]
 
     def tts_synthesize_side_effect(text, output_path, **kwargs):
         write_dummy_wav(output_path, duration=1.0, sample_rate=24000, channels=1)

@@ -110,23 +110,29 @@ class JobRunner:
             if job_id in self.cancelled_jobs:
                 self.cancelled_jobs.remove(job_id)
 
+            row = self.database.connection.execute(
+                "SELECT status FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            status = row["status"] if row else None
+
             existing_thread = self.threads.get(job_id)
             if existing_thread is not None and existing_thread.is_alive():
-                row = self.database.connection.execute(
-                    "SELECT status FROM jobs WHERE id = ?",
-                    (job_id,),
-                ).fetchone()
-                if row and row["status"] == "running":
+                # Duplicate Continue while this job is already running.
+                if status == "running":
                     return
+                # Cancel/fail/needs_review then Continue while old thread still winding down.
                 if job_id not in self.pending_job_ids:
                     self.pending_job_ids.append(job_id)
                 return
 
+            # Same job already waiting in the single-worker queue.
             if job_id in self.pending_job_ids:
                 return
 
             if self.active_job_id is not None:
-                self.pending_job_ids.append(job_id)
+                if status in ("queued", "interrupted", "failed", "needs_review") and job_id not in self.pending_job_ids:
+                    self.pending_job_ids.append(job_id)
                 return
 
             self._spawn_job_thread_locked(job_id)
@@ -195,7 +201,11 @@ class JobRunner:
                     (now_start, job_id, step_name)
                 )
                 self.database.connection.execute(
-                    "UPDATE jobs SET current_step = ?, updated_at = ? WHERE id = ?",
+                    """
+                    UPDATE jobs
+                    SET status = 'running', current_step = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
                     (step_name, now_start, job_id)
                 )
 

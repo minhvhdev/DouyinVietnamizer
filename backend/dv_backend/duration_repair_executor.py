@@ -58,8 +58,6 @@ class DurationRepairOps(Protocol):
         speech_duration: float,
     ) -> bool: ...
 
-    def apply_global_speed(self, *, input_path: Path) -> tuple[Path, float]: ...
-
 
 @dataclass
 class DurationRepairExecutionResult:
@@ -324,12 +322,6 @@ def execute_segment_duration_repair(
         unresolved_reason = f"unknown_action:{action}"
         duration_fit_status = "unresolved"
         break
-
-    global_speed = float(settings.get("tts_global_speed", 1.0) or 1.0)
-    if duration_fit_status != "unresolved" and abs(global_speed - 1.0) > 0.001:
-        working_path, _ = ops.apply_global_speed(input_path=working_path)
-        if f"global_speed_{round(global_speed, 2)}x" not in fit_methods:
-            fit_methods.append(f"global_speed_{round(global_speed, 2)}x")
 
     final_wav = ops.probe_wav_duration(working_path)
     final_speech = ops.probe_speech_duration(working_path)

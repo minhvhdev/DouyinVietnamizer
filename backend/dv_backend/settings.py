@@ -29,11 +29,12 @@ from .database import Database
 from .dubbing_languages import SUPPORTED_DUB_LANGUAGES, default_speaking_rate_wps, dub_language_config, dub_language_from_settings, normalize_dub_language, voice_defaults_for_language
 
 
-SUPPORTED_TRANSLATION_BACKENDS = {"google_free", "gemini", "openai"}
+SUPPORTED_TRANSLATION_BACKENDS = {"gemini", "openai"}
+LEGACY_TRANSLATION_BACKENDS = {"google_free": "gemini"}
 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "translation_backend": "google_free",
+    "translation_backend": "gemini",
     "translation_source_language": "zh-CN",
     "translation_target_language": "vi",
     "tts_backend": "omnivoice",
@@ -48,7 +49,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "omnivoice_ref_audio": "",
     "omnivoice_ref_text": "",
     "omnivoice_instruct": "",
-    "omnivoice_auto_voice": True,
     "omnivoice_num_steps": 32,
     "omnivoice_language_id": "",
     "omnivoice_audio_chunk_threshold": 30.0,
@@ -89,17 +89,16 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "qwen3_device": "cuda:0",
     "exact_timing_enabled": True,
     "exact_timing_tolerance_ms": 40,
-    "exact_timing_max_stretch": 1.2,
+    "exact_timing_max_stretch": 1.25,
     "exact_timing_max_safe_stretch": 1.25,
     "edge_tts_overflow_speed_max": 1.15,
-    "edge_tts_overflow_speed_hard_max": 1.2,
+    "edge_tts_overflow_speed_hard_max": 1.25,
     "allow_spoken_text_mutation": False,
     "pace_policy": "narration_uniform",
     "quality_preset": "accurate",
     "timing_placement_gate_enabled": True,
     "short_tts_lengthen_min_gap_sec": 1.5,
     "short_tts_lengthen_max_ratio": 1.6,
-    "tts_global_speed": 1.0,
     "asr_alignment_mode": "accurate",
     "sparse_asr_enabled": False,
     "sparse_asr_min_silence_ratio": 0.35,
@@ -197,6 +196,7 @@ class SettingsService:
                 )
             self._migrate_legacy_pending_gemini_key(now)
             self._migrate_legacy_omnivoice_chunk_defaults(now)
+            self._migrate_legacy_google_free_translation(now)
             self._migrate_omnivoice_chunk_flag_defaults(now)
 
     def _read_settings_defaults_version(self) -> int:
@@ -316,6 +316,29 @@ class SettingsService:
             "DELETE FROM settings WHERE key IN ('gemini_api_key_add', 'gemini_api_key_remove', 'gemini_api_key_update')"
         )
 
+    def _migrate_legacy_google_free_translation(self, now: str) -> None:
+        """Replace removed Google Translate Free backend with Gemini."""
+        row = self.database.connection.execute(
+            "SELECT value FROM settings WHERE key = ?",
+            ("translation_backend",),
+        ).fetchone()
+        if row is None:
+            return
+        try:
+            current = str(json.loads(row["value"]) or "").strip().lower()
+        except (TypeError, json.JSONDecodeError):
+            return
+        replacement = LEGACY_TRANSLATION_BACKENDS.get(current)
+        if not replacement:
+            return
+        self.database.connection.execute(
+            """
+            INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            ("translation_backend", json.dumps(replacement), now),
+        )
+
     def _migrate_legacy_omnivoice_chunk_defaults(self, now: str) -> None:
         """Reset pre-OmniVoice chunk tuning values to official demo defaults."""
         legacy_pairs = {
@@ -380,6 +403,7 @@ class SettingsService:
         translation_backend = values.get("translation_backend")
         if translation_backend is not None:
             backend = str(translation_backend).strip().lower()
+            backend = LEGACY_TRANSLATION_BACKENDS.get(backend, backend)
             if backend not in SUPPORTED_TRANSLATION_BACKENDS:
                 raise ValueError(
                     "translation_backend must be one of: "
@@ -504,7 +528,7 @@ class SettingsService:
                 max_stretch = float(values["exact_timing_max_stretch"])
             except (TypeError, ValueError) as error:
                 raise ValueError("exact_timing_max_stretch must be a number.") from error
-            values["exact_timing_max_stretch"] = max(1.0, min(1.2, max_stretch))
+            values["exact_timing_max_stretch"] = max(1.0, min(1.25, max_stretch))
 
         if values.get("exact_timing_max_safe_stretch") is not None:
             try:
@@ -526,13 +550,6 @@ class SettingsService:
             except (TypeError, ValueError) as error:
                 raise ValueError("short_tts_lengthen_max_ratio must be a number.") from error
             values["short_tts_lengthen_max_ratio"] = max(1.05, min(2.0, max_ratio))
-
-        if values.get("tts_global_speed") is not None:
-            try:
-                speed = float(values["tts_global_speed"])
-            except (TypeError, ValueError) as error:
-                raise ValueError("tts_global_speed must be a number.") from error
-            values["tts_global_speed"] = max(1.0, min(2.5, speed))
 
         if values.get("vietnamese_speaking_rate_wps") is not None:
             try:

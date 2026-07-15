@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import platform
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +13,19 @@ from pathlib import Path
 def _run(cmd: list[str], *, cwd: Path | None = None) -> None:
     print("+", " ".join(cmd), flush=True)
     subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
+
+
+def omnivoice_runtime_packages(platform_name: str, machine: str) -> list[str]:
+    if platform_name == "darwin":
+        if machine.lower() not in {"arm64", "aarch64"}:
+            raise ValueError("OmniVoice MPS setup supports only Apple Silicon.")
+        return [
+            "torch==2.8.0",
+            "torchaudio==2.8.0",
+            "soundfile",
+            "omnivoice==0.2.0",
+        ]
+    return ["torch", "torchaudio", "soundfile", "omnivoice==0.2.0"]
 
 
 def main() -> int:
@@ -44,17 +58,13 @@ def main() -> int:
         if not python.is_file():
             _run([sys.executable, "-m", "venv", str(venv_dir)])
         _run([str(python), "-m", "pip", "install", "--upgrade", "pip", "wheel"])
+        try:
+            runtime_packages = omnivoice_runtime_packages(sys.platform, platform.machine())
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
         _run(
-            [
-                str(python),
-                "-m",
-                "pip",
-                "install",
-                "torch",
-                "torchaudio",
-                "soundfile",
-                "omnivoice",
-            ]
+            [str(python), "-m", "pip", "install", *runtime_packages]
         )
 
     if not python.is_file():

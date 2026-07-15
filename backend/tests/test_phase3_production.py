@@ -12,13 +12,13 @@ import pytest
 from dv_backend.checkpoints import PIPELINE_STEPS, load_checkpoint, save_checkpoint
 from dv_backend.config import AppConfig
 from dv_backend.database import Database
-from dv_backend.dubbing_quality_score import score_segment_quality
-from dv_backend.experiment_comparability import validate_experiment_comparability
+from dv_backend.eval.dubbing_quality_score import score_segment_quality
+from dv_backend.eval.experiment_comparability import validate_experiment_comparability
 from dv_backend.jobs import JobService
 from dv_backend.release_quality_gate import evaluate_release_gate
-from dv_backend.timing_experiment import clone_job_prefix, validate_fixed_settings_match
+from dv_backend.eval.timing_experiment import clone_job_prefix, validate_fixed_settings_match
 from dv_backend.timing_qc_metrics import compute_timing_qc_metrics
-from dv_backend.utterance_policy import classify_utterance_length, should_skip_rewrite_for_short_utterance
+from dv_backend.utterance_policy import classify_utterance_length
 from dv_backend.voice_duration_profile import update_voice_profile_from_sample
 from dv_backend.voice_profile_policy import blend_profiles, effective_voice_profile
 
@@ -98,10 +98,9 @@ def test_release_gate_blocks_speech_trim() -> None:
     assert "speech_trim_count" in gate["blocking"]
 
 
-def test_short_utterance_skips_rewrite() -> None:
+def test_short_utterance_classification() -> None:
     segment = {"timing_profile": {"speech_target_duration": 0.6}, "translation": "Ừ."}
     assert classify_utterance_length(segment) == "short"
-    assert should_skip_rewrite_for_short_utterance(segment, "slightly_short") is True
 
 
 def test_voice_profile_rejects_repaired(env) -> None:

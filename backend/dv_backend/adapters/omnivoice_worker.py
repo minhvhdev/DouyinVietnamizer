@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import sys
 import threading
@@ -19,6 +20,14 @@ from typing import Any
 from dv_backend.adapters.omnivoice_infer import plan_official_omnivoice_call
 from dv_backend.audio_probe import diagnostics_enabled, probe_wav_path, probe_waveform
 from dv_backend.omnivoice_env import OMNIVOICE_DEFAULT_MODEL, OMNIVOICE_DEFAULT_SAMPLE_RATE
+from dv_backend.omnivoice_mps import (
+    OmniVoiceDeviceError,
+    inspect_module_placement,
+    omnivoice_runtime_capabilities,
+    omnivoice_runtime_versions,
+    omnivoice_torch_dtype,
+    validate_mps_operator_fallback_environment,
+)
 
 DEFAULT_DEVICE = "cuda:0"
 DEFAULT_NUM_STEP = 32
@@ -64,6 +73,7 @@ class OmniVoiceEngine:
         self._model_id: str | None = None
         self._device: str | None = None
         self._clone_prompt_cache: dict[tuple[str, str], object] = {}
+        self._placement_diagnostics: dict[str, Any] | None = None
 
     def get(self, *, model: str, device: str) -> "OmniVoiceEngine":
         model_id = (model or OMNIVOICE_DEFAULT_MODEL).strip() or OMNIVOICE_DEFAULT_MODEL
@@ -75,18 +85,53 @@ class OmniVoiceEngine:
         import torch
         from omnivoice import OmniVoice
 
-        dtype = torch.float16
-        if device_key in {"mps", "cpu"}:
-            dtype = torch.float32
+        dtype = omnivoice_torch_dtype(torch, device_key)
         _log(f"Loading OmniVoice model={model_id} device={device_key} dtype={dtype}")
-        self._model = OmniVoice.from_pretrained(
+        loaded_model = OmniVoice.from_pretrained(
             model_id,
             device_map=device_key,
             dtype=dtype,
+            load_asr=False,
         )
+        main_device = str(getattr(loaded_model, "device", "unknown"))
+        main_dtype = str(getattr(loaded_model, "dtype", dtype))
+        audio_tokenizer = getattr(loaded_model, "audio_tokenizer", None)
+        tokenizer_placement = (
+            inspect_module_placement(audio_tokenizer)
+            if audio_tokenizer is not None
+            else {
+                "devices": ["missing"],
+                "floating_dtypes": [],
+                "tensor_count": 0,
+                "violations": ["audio_tokenizer:missing"],
+            }
+        )
+        placement = {
+            "main_model_device": main_device,
+            "main_model_dtype": main_dtype,
+            "audio_tokenizer": tokenizer_placement,
+            "model_source": str(getattr(loaded_model, "name_or_path", model_id)),
+        }
+        if device_key == "mps":
+            violations = list(tokenizer_placement["violations"])
+            if not main_device.startswith("mps"):
+                violations.append(f"main_model:device={main_device}")
+            if main_dtype not in {"torch.float16", "float16"}:
+                violations.append(f"main_model:dtype={main_dtype}")
+            if violations:
+                raise RuntimeError(
+                    "OMNIVOICE_MPS_PLACEMENT_INVALID: " + ", ".join(violations)
+                )
+            _log(
+                "OmniVoice MPS placement verified: "
+                + json.dumps(placement, sort_keys=True)
+            )
+
+        self._model = loaded_model
         self._model_id = model_id
         self._device = device_key
         self._clone_prompt_cache = {}
+        self._placement_diagnostics = placement
         _log("OmniVoice model ready")
         return self
 
@@ -293,6 +338,7 @@ class OmniVoiceEngine:
         self._model_id = None
         self._device = None
         self._clone_prompt_cache = {}
+        self._placement_diagnostics = None
         try:
             import gc
 
@@ -301,6 +347,9 @@ class OmniVoiceEngine:
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            mps = getattr(torch, "mps", None)
+            if mps is not None and hasattr(mps, "empty_cache"):
+                mps.empty_cache()
         except Exception:
             pass
 
@@ -483,8 +532,23 @@ def serve(*, max_batch: int = DEFAULT_MAX_BATCH, flush_ms: int = DEFAULT_FLUSH_M
     # Import CUDA/torch before starting stdin reader threads. On Windows,
     # initializing torch while another thread is active can deadlock.
     _log("Preloading torch and omnivoice runtime")
-    import torch  # noqa: F401
+    import torch
     from omnivoice import OmniVoice  # noqa: F401
+
+    capabilities = omnivoice_runtime_capabilities(torch)
+    capabilities["versions"] = omnivoice_runtime_versions()
+    startup_error: OmniVoiceDeviceError | None = None
+    try:
+        operator_fallback_enabled = validate_mps_operator_fallback_environment()
+    except OmniVoiceDeviceError as exc:
+        startup_error = exc
+        operator_fallback_enabled = True
+    if operator_fallback_enabled and startup_error is None:
+        _log(
+            "WARNING: explicit diagnostic MPS operator fallback is enabled; "
+            "this run cannot be used as Apple Silicon acceptance evidence."
+        )
+    _log(f"OmniVoice runtime capabilities: {json.dumps(capabilities, sort_keys=True)}")
 
     engine = OmniVoiceEngine()
     messages: queue.Queue[dict[str, Any] | None] = queue.Queue()
@@ -519,7 +583,30 @@ def serve(*, max_batch: int = DEFAULT_MAX_BATCH, flush_ms: int = DEFAULT_FLUSH_M
                 _log("Worker shutdown requested")
                 return 0
             if op == "ping":
-                _emit({"id": request.get("id"), "ok": True, "pong": True})
+                if startup_error is not None:
+                    _emit(
+                        {
+                            "id": request.get("id"),
+                            "ok": False,
+                            "code": startup_error.code,
+                            "message": str(startup_error),
+                            "retryable": False,
+                        }
+                    )
+                    return 1
+                _emit(
+                    {
+                        "id": request.get("id"),
+                        "ok": True,
+                        "pong": True,
+                        "runtime": capabilities,
+                        "model_placement": engine._placement_diagnostics,
+                        "mps_fallback_enabled": os.environ.get(
+                            "PYTORCH_ENABLE_MPS_FALLBACK", ""
+                        ).strip()
+                        == "1",
+                    }
+                )
                 continue
             if op != "synthesize":
                 _emit_unknown(request, op)
@@ -544,7 +631,19 @@ def serve(*, max_batch: int = DEFAULT_MAX_BATCH, flush_ms: int = DEFAULT_FLUSH_M
                     _log("Worker shutdown requested")
                     return 0
                 if deferred.get("op") == "ping":
-                    _emit({"id": deferred.get("id"), "ok": True, "pong": True})
+                    _emit(
+                        {
+                            "id": deferred.get("id"),
+                            "ok": True,
+                            "pong": True,
+                            "runtime": capabilities,
+                            "model_placement": engine._placement_diagnostics,
+                            "mps_fallback_enabled": os.environ.get(
+                                "PYTORCH_ENABLE_MPS_FALLBACK", ""
+                            ).strip()
+                            == "1",
+                        }
+                    )
                     request = messages.get()
                     if request is None:
                         _log("Worker stdin closed")
@@ -577,6 +676,7 @@ def main() -> int:
     if args.health_check:
         try:
             import omnivoice  # noqa: F401
+            import torch
         except ImportError as exc:
             _emit(
                 {
@@ -586,7 +686,22 @@ def main() -> int:
                 }
             )
             return 1
-        _emit({"ok": True, "code": "READY"})
+        try:
+            operator_fallback_enabled = validate_mps_operator_fallback_environment()
+        except OmniVoiceDeviceError as exc:
+            _emit(
+                {
+                    "ok": False,
+                    "code": exc.code,
+                    "message": str(exc),
+                    "retryable": False,
+                }
+            )
+            return 1
+        runtime = omnivoice_runtime_capabilities(torch)
+        runtime["versions"] = omnivoice_runtime_versions()
+        runtime["mps_operator_fallback_enabled"] = operator_fallback_enabled
+        _emit({"ok": True, "code": "READY", "runtime": runtime})
         return 0
 
     return serve(max_batch=args.max_batch, flush_ms=args.flush_ms, idle_timeout_sec=args.idle_timeout_sec)

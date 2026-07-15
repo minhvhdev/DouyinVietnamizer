@@ -252,7 +252,7 @@ def schedule_soft_placements(
         if overflow > 0.15:
             needs_speed = True
             required_rate = duration / allocated
-            if required_rate > 1.2:
+            if required_rate > 1.25:
                 needs_compact = True
 
         segment["placement_start"] = round(start, 3)

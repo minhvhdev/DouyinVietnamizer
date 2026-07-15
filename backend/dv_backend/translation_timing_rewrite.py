@@ -37,7 +37,8 @@ def _save_setting(database: Database, key: str, value) -> None:
 
 
 def translation_backend(settings: dict) -> str:
-    return str(settings.get("translation_backend", "google_free") or "google_free")
+    backend = str(settings.get("translation_backend", "gemini") or "gemini")
+    return "gemini" if backend == "google_free" else backend
 
 
 def llm_timing_rewrite_available(settings: dict) -> bool:

@@ -121,7 +121,9 @@ def test_start_endpoint_allows_manual_restart_for_queued_job(tmp_path: Path) -> 
         response = client.post(f"/api/jobs/{job.id}/start")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "started"}
+    payload = response.json()
+    assert payload["status"] == "started"
+    assert payload["job"]["id"] == job.id
     mock_start_job.assert_called_once_with(job.id)
     assert app.state.jobs.get(job.id).status == "queued"
 

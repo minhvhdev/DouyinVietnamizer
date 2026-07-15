@@ -1,7 +1,7 @@
 """Unit tests for omnivoice steps evaluation helpers."""
 from __future__ import annotations
 
-from dv_backend.omnivoice_steps_eval import extract_segment_row
+from dv_backend.eval.omnivoice_steps_eval import extract_segment_row
 
 
 def test_extract_segment_row_skips_missing_number_when_not_checked(tmp_path) -> None:

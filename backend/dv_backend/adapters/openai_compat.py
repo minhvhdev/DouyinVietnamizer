@@ -340,13 +340,12 @@ class OpenAiCompatTranslator:
                 }
                 for index, text in enumerate(texts)
             ]
+            from ..translation_duration import timing_translate_prompt_rules
+
             prompt = (
                 f"Translate these items from {source} to {target} for natural {target} dubbing. "
                 "Return only a JSON array of translated strings in the same order. "
-                "Treat duration_budget_sec as the timing budget when present. "
-                "Treat source_speech_units as source-side speech context only, not as a literal word-by-word translation target. "
-                "When target_vi_syllables and target_vi_syllable_range are present, aim for that target spoken length before TTS while keeping the sentence natural. "
-                "Prefer staying within target_vi_syllable_range without dropping names, numbers, core meaning, or causal relationships.\n"
+                f"{timing_translate_prompt_rules()}\n"
                 f"{json.dumps(items, ensure_ascii=False)}"
             )
         else:
@@ -451,6 +450,55 @@ class OpenAiCompatTranslator:
             if not any(batch for batch in batches):
                 raise ValueError("OpenAPI returned empty candidate batches.")
             return batches
+        except AppError:
+            raise
+        except Exception as cause:
+            code, message, action = classify_openai_failure(cause)
+            raise AppError(
+                502,
+                ErrorInfo(
+                    code=code,
+                    message=message,
+                    action=action,
+                    detail=str(cause),
+                    retryable=True,
+                ),
+            ) from cause
+
+    def repair_fragment_translations(
+        self,
+        cluster_payloads: list[dict[str, Any]],
+        *,
+        source: str,
+        target: str,
+    ) -> Any:
+        from ..translation_candidate_llm import (
+            build_fragment_repair_prompt,
+            parse_fragment_repair_response,
+        )
+
+        if not self.api_key or not self.model:
+            raise AppError(
+                400,
+                ErrorInfo(
+                    code="MISSING_OPENAI_TRANSLATION_MODEL",
+                    message="OpenAPI translation is not configured.",
+                    action="Add API key and model in Settings.",
+                ),
+            )
+        if not cluster_payloads:
+            return {"clusters": []}
+
+        prompt = build_fragment_repair_prompt(cluster_payloads, source=source, target=target)
+        try:
+            response = self.request(
+                self.api_base,
+                self.api_key,
+                self.model,
+                [{"role": "user", "content": prompt}],
+                json_mode=True,
+            )
+            return parse_fragment_repair_response(response_text(response))
         except AppError:
             raise
         except Exception as cause:

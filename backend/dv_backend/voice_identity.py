@@ -118,7 +118,6 @@ def identity_from_settings(
         reference_audio_path=ref_path,
         reference_text=str(ref_text or ""),
         generation_config={
-            "speed": float(settings.get("tts_global_speed") or 1.0),
             "clone_mode": str(settings.get("omnivoice_clone_mode") or "reference"),
         },
     )
@@ -154,6 +153,5 @@ def settings_for_cloned_voice(
     merged["tts_backend"] = "omnivoice"
     merged["omnivoice_ref_audio"] = str(wav_path)
     merged["omnivoice_ref_text"] = transcript
-    merged["tts_global_speed"] = 1.0
     merged["cloned_voice_id"] = voice_id
     return merged

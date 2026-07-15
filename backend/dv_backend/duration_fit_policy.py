@@ -108,13 +108,10 @@ def clamp_automatic_tempo(
     factor: float,
     *,
     policy: DurationFitPolicy | None = None,
-    user_global_speed: float = 1.0,
 ) -> tuple[float, str]:
-    """Return (automatic_tempo, risk_label). User global speed is applied separately."""
+    """Return (automatic_tempo, risk_label)."""
     policy = policy or DurationFitPolicy()
     automatic = float(factor)
-    if user_global_speed > 0 and abs(user_global_speed - 1.0) > 0.001:
-        automatic = automatic / user_global_speed
 
     if policy.preferred_tempo_min <= automatic <= policy.preferred_tempo_max:
         return round(automatic, 3), "preferred"
@@ -275,10 +272,9 @@ def decide_duration_repair(
             automatic_tempo, tempo_risk = clamp_automatic_tempo(
                 raw_factor,
                 policy=policy,
-                user_global_speed=float(settings.get("tts_global_speed", 1.0) or 1.0),
             )
-            max_stretch = float(settings.get("exact_timing_max_stretch", 1.2) or 1.2)
-            max_stretch = max(1.0, min(1.2, max_stretch))
+            max_stretch = float(settings.get("exact_timing_max_stretch", 1.25) or 1.25)
+            max_stretch = max(1.0, min(1.25, max_stretch))
             factor = min(max_stretch, max(1.0, automatic_tempo))
             return {
                 **base,

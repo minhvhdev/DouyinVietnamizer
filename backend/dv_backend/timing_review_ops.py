@@ -68,8 +68,8 @@ def get_timing_review_payload(
     step, cp = _checkpoint_for_review(config, job_id)
     segments = list(cp.get("segments") or [])
     cfg = settings if settings is not None else {}
-    absolute_max = float(cfg.get("edge_tts_overflow_speed_hard_max", 1.2) or 1.2)
-    absolute_max = max(1.0, min(1.2, absolute_max))
+    absolute_max = float(cfg.get("edge_tts_overflow_speed_hard_max", 1.25) or 1.25)
+    absolute_max = max(1.0, min(1.25, absolute_max))
     compute_placement_starts(segments)
     schedule_soft_placements(segments)
     flag_infeasible_segments(segments, absolute_max_rate=absolute_max)
@@ -106,8 +106,8 @@ def submit_timing_review_edits(
         )
 
     settings = _load_settings(database)
-    absolute_max = float(settings.get("edge_tts_overflow_speed_hard_max", 1.2) or 1.2)
-    absolute_max = max(1.0, min(1.2, absolute_max))
+    absolute_max = float(settings.get("edge_tts_overflow_speed_hard_max", 1.25) or 1.25)
+    absolute_max = max(1.0, min(1.25, absolute_max))
     step, cp = _checkpoint_for_review(config, job_id)
     segments = list(cp.get("segments") or [])
     by_index = {int(s.get("index", -1)): s for s in segments}

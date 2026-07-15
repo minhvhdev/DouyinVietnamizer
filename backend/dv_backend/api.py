@@ -646,9 +646,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.post("/api/jobs/{job_id}/start")
     def start_job(job_id: str) -> dict:
+        job = jobs.get(job_id)
+        if job.status == "running":
+            return {"status": "started", "job": job}
         jobs.prepare_job_for_resume(job_id)
         runner.start_job(job_id)
-        return {"status": "started"}
+        return {"status": "started", "job": jobs.get(job_id)}
 
     @app.post("/api/jobs/{job_id}/cancel")
     def cancel_job(job_id: str) -> dict:

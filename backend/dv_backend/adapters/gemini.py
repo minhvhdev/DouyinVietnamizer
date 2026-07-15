@@ -161,13 +161,12 @@ class GeminiTranslator:
                 }
                 for index, text in enumerate(texts)
             ]
+            from ..translation_duration import timing_translate_prompt_rules
+
             prompt = (
                 f"Translate these items from {source} to {target} for natural {target} dubbing. "
                 "Return only a JSON array of translated strings in the same order. "
-                "Treat duration_budget_sec as the timing budget when present. "
-                "Treat source_speech_units as source-side speech context only, not as a literal word-by-word translation target. "
-                "When target_vi_syllables and target_vi_syllable_range are present, aim for that target spoken length before TTS while keeping the sentence natural. "
-                "Prefer staying within target_vi_syllable_range without dropping names, numbers, core meaning, or causal relationships.\n"
+                f"{timing_translate_prompt_rules()}\n"
                 f"{json.dumps(items, ensure_ascii=False)}"
             )
         else:
@@ -281,6 +280,57 @@ class GeminiTranslator:
                     raise ValueError("Gemini returned empty candidate batches.")
                 self.key_pool.mark_success(index)
                 return batches
+            except Exception as cause:
+                last_error = cause
+
+        code, message, action = classify_gemini_failure(last_error or RuntimeError("Gemini request failed"))
+        raise AppError(
+            502,
+            ErrorInfo(
+                code=code,
+                message=message,
+                action=action,
+                detail=str(last_error),
+                retryable=True,
+            ),
+        )
+
+    def repair_fragment_translations(
+        self,
+        cluster_payloads: list[dict[str, Any]],
+        *,
+        source: str,
+        target: str,
+    ) -> Any:
+        from ..translation_candidate_llm import (
+            build_fragment_repair_prompt,
+            parse_fragment_repair_response,
+        )
+
+        if not self.key_pool.keys:
+            raise AppError(
+                400,
+                ErrorInfo(
+                    code="MISSING_GEMINI_API_KEYS",
+                    message="No Gemini API keys are configured.",
+                    action="Add at least one Google AI Studio API key in Settings.",
+                ),
+            )
+        if not cluster_payloads:
+            return {"clusters": []}
+
+        prompt = build_fragment_repair_prompt(cluster_payloads, source=source, target=target)
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"responseMimeType": "application/json", "temperature": 0.2},
+        }
+        last_error: Exception | None = None
+        for index, api_key in self.key_pool.ordered_keys():
+            try:
+                raw = response_text(self.request(api_key, self.model, payload))
+                parsed = parse_fragment_repair_response(raw)
+                self.key_pool.mark_success(index)
+                return parsed
             except Exception as cause:
                 last_error = cause
 

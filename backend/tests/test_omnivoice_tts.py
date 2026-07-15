@@ -32,6 +32,7 @@ from dv_backend.adapters.tts import (
 )
 
 from dv_backend import omnivoice_env
+from dv_backend.omnivoice_mps import OmniVoiceDeviceError, plan_omnivoice_device
 
 
 
@@ -152,6 +153,110 @@ def test_resolve_omnivoice_device_falls_back_to_cpu_without_cuda(monkeypatch: py
     monkeypatch.setitem(sys.modules, "torch", _Torch())
 
     assert resolve_omnivoice_device("cuda:0") == "cpu"
+
+
+def _fake_torch_for_mps(*, built: bool, available: bool):
+    class _Mps:
+        @staticmethod
+        def is_built() -> bool:
+            return built
+
+        @staticmethod
+        def is_available() -> bool:
+            return available
+
+    class _Backends:
+        mps = _Mps()
+
+    class _Cuda:
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+    class _Torch:
+        backends = _Backends()
+        cuda = _Cuda()
+
+    return _Torch()
+
+
+def test_plan_omnivoice_device_uses_mps_on_apple_silicon() -> None:
+    plan = plan_omnivoice_device(
+        "cuda:0",
+        platform_name="darwin",
+        machine="arm64",
+        torch_module=_fake_torch_for_mps(built=True, available=True),
+    )
+
+    assert plan.resolved_device == "mps"
+    assert plan.model_dtype == "float16"
+    assert plan.audio_tokenizer_device == "cpu"
+    assert plan.reason == "apple_silicon_mps"
+
+
+def test_plan_omnivoice_device_rejects_unavailable_mps_by_default() -> None:
+    with pytest.raises(OmniVoiceDeviceError) as exc_info:
+        plan_omnivoice_device(
+            "auto",
+            platform_name="darwin",
+            machine="arm64",
+            torch_module=_fake_torch_for_mps(built=True, available=False),
+        )
+
+    assert exc_info.value.code == "OMNIVOICE_MPS_UNAVAILABLE"
+
+
+def test_plan_omnivoice_device_allows_explicit_cpu_fallback() -> None:
+    plan = plan_omnivoice_device(
+        "mps",
+        platform_name="darwin",
+        machine="arm64",
+        torch_module=_fake_torch_for_mps(built=True, available=False),
+        allow_cpu_fallback=True,
+    )
+
+    assert plan.resolved_device == "cpu"
+    assert plan.model_dtype == "float32"
+    assert plan.reason == "explicit_cpu_fallback"
+
+
+def test_plan_omnivoice_device_rejects_intel_macos() -> None:
+    with pytest.raises(OmniVoiceDeviceError) as exc_info:
+        plan_omnivoice_device(
+            "auto",
+            platform_name="darwin",
+            machine="x86_64",
+            torch_module=_fake_torch_for_mps(built=False, available=False),
+        )
+
+    assert exc_info.value.code == "OMNIVOICE_MPS_UNSUPPORTED_ARCH"
+
+
+def test_plan_omnivoice_device_keeps_audio_tokenizer_on_cpu_for_mps() -> None:
+    plan = plan_omnivoice_device(
+        "mps",
+        platform_name="darwin",
+        machine="arm64",
+        torch_module=_fake_torch_for_mps(built=True, available=True),
+    )
+
+    assert plan.audio_tokenizer_device == "cpu"
+
+
+def test_resolve_omnivoice_device_maps_legacy_cuda_setting_to_mps_on_apple_silicon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dv_backend import omnivoice_mps
+
+    monkeypatch.setattr(omnivoice_mps.sys, "platform", "darwin")
+    monkeypatch.setattr(omnivoice_mps.platform, "machine", lambda: "arm64")
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        _fake_torch_for_mps(built=True, available=True),
+    )
+
+    assert resolve_omnivoice_device("cuda:0") == "mps"
 
 
 

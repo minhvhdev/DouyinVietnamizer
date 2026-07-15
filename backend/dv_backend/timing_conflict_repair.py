@@ -190,7 +190,7 @@ def repair_conflict_clusters(
         """Record needed speed only; uniform apply happens later in duration_repair."""
         proposed = 1.0
         if duration > alloc + 0.15:
-            proposed = min(1.2, duration / max(alloc, 0.2))
+            proposed = min(1.25, duration / max(alloc, 0.2))
         prev = float(seg.get("proposed_speed_factor") or 1.0)
         seg["proposed_speed_factor"] = round(max(prev, proposed), 4)
         return duration

@@ -51,6 +51,7 @@ def duration_prompt_suffix(duration_budget: float, *, language_label: str = "Vie
         return ""
     return (
         f" Keep the {language_label} line natural and concise enough for about {duration_budget:.2f} seconds of speech."
+        " Stay within the syllable/word range implied by that timing."
         " Preserve names, numbers, core meaning, and causal relationships."
     )
 
@@ -90,6 +91,25 @@ def target_vietnamese_syllable_count(
 
     source_cap = max(source_speech_units + 2, round(source_speech_units * 1.35))
     return max(1, min(budget_target, source_cap))
+
+
+def timing_translate_prompt_rules() -> str:
+    """Shared LLM rules: priority order + syllable range as soft fit target."""
+    return (
+        "Priority order (highest first): "
+        "(1) preserve meaning and causal links; "
+        "(2) keep exact segment/slot count and never invent or change timing; "
+        "(3) produce complete speakable thoughts — no hanging fragments across adjacent slots; "
+        "(4) lock entity/terminology consistency across the whole batch; "
+        "(5) prefer target_vi_syllable_range [min, max] when present "
+        "(translate with no fewer than min and no more than max Vietnamese syllables/words when feasible); "
+        "(6) style/concision. "
+        "Syllable range is a soft fit target: shorten or expand naturally, but do not cut mid-thought "
+        "or spill leftover words into the next timing slot just to hit the count. "
+        "duration_budget_sec is the speaking time used to derive that range. "
+        "Treat source_speech_units as source-side context only, not a literal word-by-word target. "
+        "Preserve names, numbers, core meaning, and causal relationships."
+    )
 
 
 def build_translation_timing_guidance(

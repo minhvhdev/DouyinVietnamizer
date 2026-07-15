@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
 from dv_backend.checkpoints import load_checkpoint, save_checkpoint
 from dv_backend.config import AppConfig
 from dv_backend.database import Database
-from dv_backend.evaluation_audio import export_evaluation_audio
+from dv_backend.eval.evaluation_audio import export_evaluation_audio
 from dv_backend.jobs import JobService, utc_now
 from dv_backend.runner import JobRunner
 from dv_backend.settings import SettingsService

@@ -7,7 +7,6 @@ name = "douyin-vietnamizer-backend"
 version = "0.1.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-  "deep-translator>=1.11,<2",
   "fastapi>=0.115,<1",
   "uvicorn>=0.34,<1",
   "qwen-asr>=0.0.6",

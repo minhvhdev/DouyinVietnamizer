@@ -74,7 +74,7 @@ function evaluateSettingsTabHealth(
     case "download":
       return "neutral";
     case "translation": {
-      const backend = settings.translation_backend ?? "google_free";
+      const backend = settings.translation_backend ?? "gemini";
       if (backend === "gemini" && (settings.gemini_api_keys ?? []).length === 0) {
         return "attention";
       }
@@ -599,6 +599,8 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   const [rerunModalOpen, setRerunModalOpen] = useState(false);
   const [rerunKeepSteps, setRerunKeepSteps] = useState<string[]>([]);
   const [rerunSubmitting, setRerunSubmitting] = useState(false);
+  const [jobStartBusyId, setJobStartBusyId] = useState<string | null>(null);
+  const jobStartInFlightRef = useRef<string | null>(null);
 
   // Outputs gallery state
   const [outputs, setOutputs] = useState<OutputItem[]>([]);
@@ -606,7 +608,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
 
   // Settings form state
   const [settings, setSettings] = useState<Record<string, any>>({
-    translation_backend: "google_free",
+    translation_backend: "gemini",
     translation_source_language: "zh-CN",
     translation_target_language: "vi",
     subtitles_enabled: true,
@@ -631,16 +633,10 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     tts_backend: "omnivoice",
     edge_tts_voice: "vi-VN-HoaiMyNeural",
     google_tts_voice: "vi-VN-Standard-A",
-    google_tts_speaking_rate: 1,
     omnivoice_num_steps: 32,
     omnivoice_language_id: "",
     omnivoice_ref_text: "",
     omnivoice_instruct: "",
-    omnivoice_auto_voice: true,
-    omnivoice_external_chunking_enabled: true,
-    omnivoice_chunk_max_chars: 220,
-    omnivoice_chunk_target_chars: 180,
-    omnivoice_chunk_retry_on_fidelity_failure: true,
   });
   const [newGeminiKey, setNewGeminiKey] = useState("");
   const [newGoogleTtsKey, setNewGoogleTtsKey] = useState("");
@@ -1562,11 +1558,33 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   }
 
   async function startJob(jobId: string) {
+    // Sync lock first — setState alone is too late for rapid double-clicks.
+    if (jobStartInFlightRef.current === jobId) {
+      return;
+    }
+    jobStartInFlightRef.current = jobId;
+    setJobStartBusyId(jobId);
+    setError(null);
+    // Optimistic UI: hide Continue immediately so status doesn't stay "queued".
+    setSelectedJob((current) =>
+      current && current.id === jobId && current.status !== "running"
+        ? { ...current, status: "running" }
+        : current,
+    );
+    setJobs((current) =>
+      current.map((job) => (job.id === jobId && job.status !== "running" ? { ...job, status: "running" } : job)),
+    );
     try {
       await api.startJob(jobId);
       refreshJobs();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Không thể bắt đầu tiến trình");
+      refreshJobs();
+    } finally {
+      if (jobStartInFlightRef.current === jobId) {
+        jobStartInFlightRef.current = null;
+      }
+      setJobStartBusyId((current) => (current === jobId ? null : current));
     }
   }
 
@@ -1787,20 +1805,14 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
           tts_backend: backend,
           edge_tts_voice: settings.edge_tts_voice,
           google_tts_voice: settings.google_tts_voice,
-          google_tts_speaking_rate: settings.google_tts_speaking_rate,
           google_tts_api_key: newGoogleTtsKey.trim() || undefined,
           gemini_tts_model: settings.gemini_tts_model,
           gemini_tts_voice: settings.gemini_tts_voice,
           omnivoice_ref_audio: settings.omnivoice_ref_audio,
           omnivoice_ref_text: settings.omnivoice_ref_text,
           omnivoice_instruct: settings.omnivoice_instruct,
-          omnivoice_auto_voice: settings.omnivoice_auto_voice,
           omnivoice_num_steps: settings.omnivoice_num_steps,
           omnivoice_language_id: settings.omnivoice_language_id,
-          omnivoice_external_chunking_enabled: settings.omnivoice_external_chunking_enabled,
-          omnivoice_chunk_max_chars: settings.omnivoice_chunk_max_chars,
-          omnivoice_chunk_target_chars: settings.omnivoice_chunk_target_chars,
-          omnivoice_chunk_retry_on_fidelity_failure: settings.omnivoice_chunk_retry_on_fidelity_failure,
         },
       });
       if (ttsPreviewUrlRef.current) {
@@ -2659,10 +2671,9 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                         <span>Bộ dịch thuật</span>
                         <select
                           className="settings-input"
-                          value={settings.translation_backend ?? "google_free"}
+                          value={settings.translation_backend ?? "gemini"}
                           onChange={(e) => setSettings({ ...settings, translation_backend: e.target.value })}
                         >
-                          <option value="google_free">Google Dịch Miễn Phí</option>
                           <option value="gemini">Gemini</option>
                           <option value="openai">OpenAPI (tương thích OpenAI)</option>
                         </select>
@@ -3184,77 +3195,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                               }
                             />
                           </label>
-                          <label className="settings-label settings-label--inline settings-field-grid__span-2">
-                            <input
-                              type="checkbox"
-                              checked={Boolean(settings.omnivoice_auto_voice ?? true)}
-                              onChange={(e) => setSettings({ ...settings, omnivoice_auto_voice: e.target.checked })}
-                            />
-                            <span>Auto voice khi không có audio tham chiếu</span>
-                          </label>
-                          <div className="settings-field-grid__span-2" style={{ display: "grid", gap: "10px" }}>
-                            <SettingsCheckboxField
-                              label="Chia nhỏ text dài trước khi TTS (chunking)"
-                              hint="Khi bật, đoạn dịch dài hơn max chars sẽ được chia rồi ghép lại để giảm mất chữ. Tắt = gửi cả đoạn một lần (giống nghe thử Settings hơn). Đổi xong cần chạy lại từ bước TTS vì cache TTS theo policy."
-                              checked={Boolean(settings.omnivoice_external_chunking_enabled ?? true)}
-                              onChange={(checked) =>
-                                setSettings({ ...settings, omnivoice_external_chunking_enabled: checked })
-                              }
-                            />
-                            <label className="settings-label">
-                              <SettingsFieldLabel
-                                label={`Max chars mỗi chunk (${settings.omnivoice_chunk_max_chars ?? 220})`}
-                                hint="Chỉ có tác dụng khi chunking bật. Vượt ngưỡng này thì đoạn được chia nhỏ. Mặc định 220."
-                              />
-                              <input
-                                className="settings-input"
-                                type="range"
-                                min={80}
-                                max={400}
-                                step={10}
-                                value={settings.omnivoice_chunk_max_chars ?? 220}
-                                disabled={!(settings.omnivoice_external_chunking_enabled ?? true)}
-                                onChange={(e) =>
-                                  setSettings({
-                                    ...settings,
-                                    omnivoice_chunk_max_chars: Number(e.target.value),
-                                  })
-                                }
-                              />
-                            </label>
-                            <label className="settings-label">
-                              <SettingsFieldLabel
-                                label={`Target chars mỗi chunk (${settings.omnivoice_chunk_target_chars ?? 180})`}
-                                hint="Mục tiêu độ dài chunk khi chia (thường nhỏ hơn max). Chỉ dùng khi chunking bật."
-                              />
-                              <input
-                                className="settings-input"
-                                type="range"
-                                min={60}
-                                max={360}
-                                step={10}
-                                value={settings.omnivoice_chunk_target_chars ?? 180}
-                                disabled={!(settings.omnivoice_external_chunking_enabled ?? true)}
-                                onChange={(e) =>
-                                  setSettings({
-                                    ...settings,
-                                    omnivoice_chunk_target_chars: Number(e.target.value),
-                                  })
-                                }
-                              />
-                            </label>
-                            <SettingsCheckboxField
-                              label="Retry chia nhỏ hơn khi Fidelity thấp"
-                              hint="Khi chunk/đoạn bị mất chữ (Fidelity poor/failed), thử chia nhỏ hơn (220→140→90). Chỉ hữu ích khi chunking bật."
-                              checked={Boolean(settings.omnivoice_chunk_retry_on_fidelity_failure ?? true)}
-                              onChange={(checked) =>
-                                setSettings({
-                                  ...settings,
-                                  omnivoice_chunk_retry_on_fidelity_failure: checked,
-                                })
-                              }
-                            />
-                          </div>
                         </div>
                         {settings.omnivoice_ref_audio && !(settings.omnivoice_ref_text ?? "").trim() && (
                           <div className="alert-info-box warning">
@@ -3338,18 +3278,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                                 </option>
                               ))}
                             </select>
-                          </label>
-                          <label className="settings-label settings-field-grid__span-2">
-                            <span>Tốc độ đọc ({settings.google_tts_speaking_rate ?? 1}x)</span>
-                            <input
-                              className="settings-input"
-                              type="range"
-                              min={0.75}
-                              max={1.25}
-                              step={0.05}
-                              value={settings.google_tts_speaking_rate ?? 1}
-                              onChange={(e) => setSettings({ ...settings, google_tts_speaking_rate: Number(e.target.value) })}
-                            />
                           </label>
                         </div>
                         {!settings.google_tts_api_key_configured && !newGoogleTtsKey.trim() && (
@@ -3441,86 +3369,6 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                           )}
                         </div>
                       </aside>
-                      <section className="settings-duration-advanced settings-tts-advanced">
-                        <SettingsSectionHead
-                          title="Khớp thời lượng nâng cao"
-                          description="Chỉ chỉnh khi lồng tiếng lệch timeline — mặc định đã bật khớp chính xác."
-                        />
-                        <p className="card-description card-description--compact">
-                          Áp dụng ở bước <strong>duration_repair</strong>. Chạy lại job từ bước đó hoặc TTS để cập nhật.
-                        </p>
-                        <SettingsCheckboxField
-                          label="Bật khớp thời lượng chính xác"
-                          hint="Khi bật, pipeline cố căn thời lượng từng đoạn TTS với slot gốc (kéo dài, rút ngắn hoặc thêm im lặng)."
-                          checked={settings.exact_timing_enabled ?? true}
-                          onChange={(checked) => setSettings({ ...settings, exact_timing_enabled: checked })}
-                        />
-                        <div className="settings-field-grid settings-field-grid--2">
-                          <label className="settings-label settings-field-grid__span-2">
-                            <SettingsFieldLabel
-                              label={`Tốc độ TTS toàn cục (${(settings.tts_global_speed ?? 1).toFixed(2)}×)`}
-                              hint="Nhân tốc độ đọc audio TTS sau khi chỉnh nội dung (kéo dài/rút gọn). Cần chạy lại job từ bước Sửa độ dài TTS để có hiệu lực. Tăng (vd. 1.5–2.5×) nếu lồng tiếng vẫn chậm hơn giọng gốc."
-                            />
-                            <input
-                              className="settings-input"
-                              type="range"
-                              min={1}
-                              max={2.5}
-                              step={0.01}
-                              value={settings.tts_global_speed ?? 1}
-                              onChange={(e) => setSettings({ ...settings, tts_global_speed: Number(e.target.value) })}
-                              disabled={!settings.exact_timing_enabled}
-                            />
-                          </label>
-                          <label className="settings-label settings-field-grid__span-2">
-                            <SettingsFieldLabel
-                              label={`Tốc độ nói ${activeDubLanguage.label} ước lượng (${(settings.vietnamese_speaking_rate_wps ?? activeDubLanguage.speakingRate).toFixed(2)} từ/giây)`}
-                              hint="Dùng khi dịch để ước lượng độ dài câu. Tự hiệu chỉnh sau mỗi job TTS; chỉnh tay nếu giọng đọc nhanh/chậm hơn mặc định."
-                            />
-                            <input
-                              className="settings-input"
-                              type="range"
-                              min={2}
-                              max={5}
-                              step={0.05}
-                              value={settings.vietnamese_speaking_rate_wps ?? activeDubLanguage.speakingRate}
-                              onChange={(e) => setSettings({ ...settings, vietnamese_speaking_rate_wps: Number(e.target.value) })}
-                            />
-                          </label>
-                          <label className="settings-label">
-                            <SettingsFieldLabel
-                              label="Ngưỡng kéo dài TTS ngắn (giây)"
-                              hint="Chênh lệch tối thiểu giữa slot gốc và TTS hiện tại mới kích hoạt kéo dài/thêm từ. Tăng nếu repair làm audio dài hơn thực tế."
-                            />
-                            <input
-                              className="settings-input"
-                              type="number"
-                              min={0.2}
-                              max={5}
-                              step={0.1}
-                              value={settings.short_tts_lengthen_min_gap_sec ?? 1.5}
-                              onChange={(e) => setSettings({ ...settings, short_tts_lengthen_min_gap_sec: Number(e.target.value) })}
-                              disabled={!settings.exact_timing_enabled}
-                            />
-                          </label>
-                          <label className="settings-label">
-                            <SettingsFieldLabel
-                              label={`Tỷ lệ kéo dài tối đa (${settings.short_tts_lengthen_max_ratio ?? 1.6}×)`}
-                              hint="Giới hạn độ dài sau khi kéo dài TTS ngắn (vd. 1.6 = tối đa 160% độ dài hiện tại). Giảm nếu repair vẫn kéo dài quá mức."
-                            />
-                            <input
-                              className="settings-input"
-                              type="number"
-                              min={1.05}
-                              max={2}
-                              step={0.05}
-                              value={settings.short_tts_lengthen_max_ratio ?? 1.6}
-                              onChange={(e) => setSettings({ ...settings, short_tts_lengthen_max_ratio: Number(e.target.value) })}
-                              disabled={!settings.exact_timing_enabled}
-                            />
-                          </label>
-                        </div>
-                      </section>
                     </div>
                   </div>
                 )}
@@ -3754,8 +3602,20 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                 <FolderOpen size={16} /> Mở thư mục
               </button>
               {(selectedJob.status === "queued" || selectedJob.status === "failed" || selectedJob.status === "interrupted" || selectedJob.status === "needs_review") && (
-                <button className="smoke-button" style={{ minWidth: 0, whiteSpace: "nowrap" }} onClick={() => startJob(selectedJob.id)}>
-                  <RefreshCw size={16} /> {selectedJob.status === "queued" ? "Bắt đầu lồng tiếng" : selectedJob.status === "needs_review" ? "Thử tiếp tục pipeline" : "Tiếp tục lồng tiếng"}
+                <button
+                  className="smoke-button"
+                  style={{ minWidth: 0, whiteSpace: "nowrap" }}
+                  disabled={jobStartBusyId === selectedJob.id}
+                  onClick={() => startJob(selectedJob.id)}
+                >
+                  <RefreshCw size={16} />{" "}
+                  {jobStartBusyId === selectedJob.id
+                    ? "Đang bắt đầu..."
+                    : selectedJob.status === "queued"
+                      ? "Bắt đầu lồng tiếng"
+                      : selectedJob.status === "needs_review"
+                        ? "Thử tiếp tục pipeline"
+                        : "Tiếp tục lồng tiếng"}
                 </button>
               )}
               {(selectedJob.status === "completed" || selectedJob.status === "failed" || selectedJob.status === "interrupted") && (
@@ -3915,7 +3775,7 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                 <div>
                   <h3 style={{ margin: 0, fontSize: "15px", color: "#ffb347" }}>Cần chỉnh TTS — đoạn quá dài</h3>
                   <p style={{ margin: "6px 0 0", fontSize: "13px", color: "#c4b39a", lineHeight: 1.45 }}>
-                    Hệ thống đã đạt tốc độ tối đa {timingReview?.max_speed?.toFixed(2) ?? "1.20"}×. Hãy rút gọn text các đoạn bên dưới,
+                    Hệ thống đã đạt tốc độ tối đa {timingReview?.max_speed?.toFixed(2) ?? "1.25"}×. Hãy rút gọn text các đoạn bên dưới,
                     rồi gửi — chỉ re-TTS các đoạn bạn sửa.
                   </p>
                   {timingReviewMessage && (

@@ -101,6 +101,10 @@ def test_gemini_translator_includes_timing_guidance_in_prompt() -> None:
     assert "target_vi_syllables" in prompt
     assert "target_vi_syllable_range" in prompt
     assert "duration_budget_sec" in prompt
+    assert "no fewer than" in prompt
+    assert "no more than" in prompt
+    assert "Priority order" in prompt
+    assert "complete speakable thoughts" in prompt
 
 
 def test_gemini_tts_writes_wave_from_inline_pcm(tmp_path: Path) -> None:

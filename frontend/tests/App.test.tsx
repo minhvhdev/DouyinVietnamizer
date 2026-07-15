@@ -338,7 +338,7 @@ test("shows translation and OmniVoice settings", async () => {
   const api: JobsApi = {
     ...baseApi,
     getSettings: vi.fn().mockResolvedValue({
-      translation_backend: "google_free",
+      translation_backend: "gemini",
       tts_backend: "omnivoice",
     })
   };
@@ -469,7 +469,7 @@ test("auto-saves settings when an input loses focus", async () => {
     ...baseApi,
     updateSettings,
     getSettings: vi.fn().mockResolvedValue({
-      translation_backend: "google_free",
+      translation_backend: "gemini",
       tts_backend: "omnivoice",
     })
   };

@@ -23,7 +23,6 @@ from .errors import AppError
 from .models import ErrorInfo
 from .checkpoints import load_checkpoint, save_checkpoint
 from .vendor import VendorManifest, VendorResolver, prefer_macos_ffmpeg_full
-from .adapters.translation import GoogleFreeTranslator
 from .adapters.tts import TTS_VOICE_INSTRUCT_PREFIX, TtsSession, create_tts_adapter, prepare_spoken_text_for_tts
 from .adapters.asr import configure_gpu_manager, reset_model_cache, transcribe_audio
 from .adapters.vad_feedback import filter_asr_false_positives
@@ -111,7 +110,7 @@ from .segment_mix import (
 )
 from .telemetry import TelemetrySink
 from .dubbing_languages import default_speaking_rate_wps, dub_language_from_settings, dub_language_label
-from .translation_duration import annotate_translation_duration, build_translation_timing_guidance, duration_prompt_suffix
+from .translation_duration import annotate_translation_duration, build_translation_timing_guidance
 from .adapters.subtitles import (
     ffmpeg_subtitles_filter,
     probe_video_dimensions,
@@ -159,7 +158,7 @@ logger = logging.getLogger(__name__)
 ASR_ALIGNMENT_SCHEMA_VERSION = 2
 DEFAULT_EXACT_TIMING_TOLERANCE_MS = 40
 DEFAULT_EXACT_TIMING_ENABLED = True
-DEFAULT_EXACT_TIMING_MAX_STRETCH = 1.2
+DEFAULT_EXACT_TIMING_MAX_STRETCH = 1.25
 SHORT_TTS_TAIL_PAD_MAX_GAP_SEC = 1.5
 
 
@@ -1451,7 +1450,7 @@ def _translate_candidates_batch(
     speaking_rate: float,
 ) -> list[list[dict]]:
     candidate_count = int(settings.get("timing_translation_candidate_count", 3) or 3)
-    backend = settings.get("translation_backend", "google_free")
+    backend = settings.get("translation_backend", "gemini")
     if backend == "gemini":
         key_pool = GeminiKeyPool(
             settings.get("gemini_api_keys", []),
@@ -1488,6 +1487,45 @@ def _translate_candidates_batch(
             candidate_count=candidate_count,
         )
     return []
+
+
+def _repair_fragment_batch(
+    settings: dict,
+    database: Database,
+    cluster_payloads: list[dict],
+    *,
+    source_lang: str,
+    target_lang: str,
+) -> Any:
+    backend = settings.get("translation_backend", "gemini")
+    if backend == "gemini":
+        key_pool = GeminiKeyPool(
+            settings.get("gemini_api_keys", []),
+            cursor=int(settings.get("gemini_key_cursor", 0)),
+        )
+        translator = GeminiTranslator(
+            key_pool,
+            model=settings.get("gemini_translation_model", "gemini-2.5-flash"),
+        )
+        result = translator.repair_fragment_translations(
+            cluster_payloads,
+            source=source_lang,
+            target=target_lang,
+        )
+        save_setting(database, "gemini_key_cursor", translator.key_pool.cursor)
+        return result
+    if backend == "openai":
+        translator = OpenAiCompatTranslator(
+            api_base=str(settings.get("openai_api_base") or ""),
+            api_key=str(settings.get("openai_api_key") or ""),
+            model=str(settings.get("openai_translation_model") or ""),
+        )
+        return translator.repair_fragment_translations(
+            cluster_payloads,
+            source=source_lang,
+            target=target_lang,
+        )
+    return {"clusters": []}
 
 
 def _tts_text_fingerprint(text: str) -> str:
@@ -1532,7 +1570,9 @@ def _translate_texts(
     if not texts:
         return []
 
-    translation_backend = settings.get("translation_backend", "google_free")
+    translation_backend = settings.get("translation_backend", "gemini")
+    if translation_backend == "google_free":
+        translation_backend = "gemini"
     if translation_backend == "gemini":
         key_pool = GeminiKeyPool(
             settings.get("gemini_api_keys", []),
@@ -1566,10 +1606,13 @@ def _translate_texts(
             timing_guidance=timing_guidance,
         )
 
-    return GoogleFreeTranslator().translate(
-        texts,
-        source=source_lang,
-        target=target_lang,
+    raise AppError(
+        400,
+        ErrorInfo(
+            code="UNSUPPORTED_TRANSLATION_BACKEND",
+            message="The selected translation backend is not available.",
+            action="Choose Gemini or OpenAPI in Settings → Dịch thuật.",
+        ),
     )
 
 
@@ -1641,14 +1684,17 @@ def translate_step(job_id: str, config: AppConfig, database: Database, runner) -
     rows = database.connection.execute("SELECT key, value FROM settings").fetchall()
     settings = {r["key"]: json.loads(r["value"]) for r in rows}
 
-    translation_backend = settings.get("translation_backend", "google_free")
-    if translation_backend not in {"google_free", "gemini", "openai"}:
+    translation_backend = settings.get("translation_backend", "gemini")
+    if translation_backend == "google_free":
+        translation_backend = "gemini"
+        settings = {**settings, "translation_backend": "gemini"}
+    if translation_backend not in {"gemini", "openai"}:
         raise AppError(
             400,
             ErrorInfo(
                 code="UNSUPPORTED_TRANSLATION_BACKEND",
                 message="The selected translation backend is not available.",
-                action="Choose Google Translate Free, Gemini, or OpenAPI in Settings."
+                action="Choose Gemini or OpenAPI in Settings → Dịch thuật.",
             )
         )
 
@@ -1737,6 +1783,15 @@ def translate_step(job_id: str, config: AppConfig, database: Database, runner) -
             speaking_rate=speaking_rate_wps,
         )
 
+    def _repair_fragment_fn(cluster_payloads, *, source: str, target: str):
+        return _repair_fragment_batch(
+            settings,
+            database,
+            cluster_payloads,
+            source_lang=source,
+            target_lang=target,
+        )
+
     translate_segments_with_candidates(
         settings,
         database,
@@ -1745,6 +1800,7 @@ def translate_step(job_id: str, config: AppConfig, database: Database, runner) -
         target_lang=target_lang,
         translate_fn=_translate_fn,
         translate_candidates_fn=_translate_candidates_fn,
+        repair_fragment_fn=_repair_fragment_fn,
         data_dir=config.data_dir,
     )
 
@@ -1916,31 +1972,6 @@ def _build_atempo_chain(speed_factor: float) -> str:
     return ",".join(filters)
 
 
-def _apply_global_speed_if_needed(
-    *,
-    ffmpeg_path: Path,
-    input_path: Path,
-    output_dir: Path,
-    index: int,
-    global_speed: float,
-    job_id: str,
-    runner,
-) -> tuple[Path, float]:
-    if abs(global_speed - 1.0) <= 0.001:
-        return input_path, get_wav_duration(input_path)
-    speed_file = output_dir / f"tts_speed_{index}.wav"
-    speed_file.unlink(missing_ok=True)
-    _run_ffmpeg_audio_filter(
-        ffmpeg_path,
-        input_path,
-        speed_file,
-        filter_expr=_build_atempo_chain(global_speed),
-        job_id=job_id,
-        runner=runner,
-    )
-    return speed_file, get_wav_duration(speed_file)
-
-
 def _run_ffmpeg_audio_filter(
     ffmpeg_path: Path,
     input_path: Path,
@@ -2051,7 +2082,6 @@ def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
     dub_lang = dub_language_from_settings(settings)
     dub_lang_label = dub_language_label(dub_lang, english=True)
     voice_profile = effective_voice_profile(settings, language=dub_lang, data_dir=config.data_dir)
-    global_speed = float(settings.get("tts_global_speed") or 1.0)
 
     with TtsSession(settings, data_dir=config.data_dir, runner=runner, adapter_factory=create_tts_adapter) as session:
         session_create_ms = round((time.perf_counter() - session_started) * 1000)
@@ -2166,7 +2196,6 @@ def tts_step(job_id: str, config: AppConfig, database: Database, runner) -> dict
                     speech_duration_sec=speech_duration,
                     data_dir=config.data_dir,
                     language=dub_lang,
-                    user_speed_not_unity=abs(global_speed - 1.0) > 0.01,
                     measurement_confidence=float(s.get("tts_speech_measurement_confidence") or 1.0),
                 )
 
@@ -2589,8 +2618,8 @@ def _apply_soft_placement_speed_and_compact(
     session: "TtsSession | None",
 ) -> None:
     """Soft place → propose ≤max → uniform apply → optional cluster → flag infeasible."""
-    absolute_max_rate = float(settings.get("edge_tts_overflow_speed_hard_max", 1.2) or 1.2)
-    absolute_max_rate = max(1.0, min(1.2, absolute_max_rate))
+    absolute_max_rate = float(settings.get("edge_tts_overflow_speed_hard_max", 1.25) or 1.25)
+    absolute_max_rate = max(1.0, min(1.25, absolute_max_rate))
     allow_mutation = bool(settings.get("allow_spoken_text_mutation", False))
     dub_lang_label = dub_language_label(dub_language_from_settings(settings), english=True)
 
@@ -2712,7 +2741,6 @@ class _SegmentDurationRepairOps:
     repair_target: float
     tolerance_sec: float
     max_stretch: float
-    global_speed: float
     orig_file: Path
     tts_dir: Path
     ffmpeg_path: Path
@@ -2852,9 +2880,7 @@ class _SegmentDurationRepairOps:
             return False
         if output_path.is_file():
             self.segment["automatic_tempo_factor"] = round(factor, 3)
-            self.segment["effective_speed"] = round(
-                self.global_speed * round(factor, 3), 3
-            )
+            self.segment["effective_speed"] = round(factor, 3)
             return True
         return False
 
@@ -2916,19 +2942,6 @@ class _SegmentDurationRepairOps:
             return True
         return False
 
-    def apply_global_speed(self, *, input_path: Path) -> tuple[Path, float]:
-        path, duration = _apply_global_speed_if_needed(
-            ffmpeg_path=self.ffmpeg_path,
-            input_path=input_path,
-            output_dir=self.tts_dir,
-            index=self.index,
-            global_speed=self.global_speed,
-            job_id=self.job_id,
-            runner=self.runner,
-        )
-        self.segment["effective_speed"] = round(self.global_speed * float(self.segment.get("automatic_tempo_factor") or 1.0), 3)
-        return path, duration
-
 
 def duration_repair_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
     tts_cp = load_checkpoint(config.data_dir, job_id, "tts")
@@ -2951,7 +2964,6 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
     settings = {r["key"]: json.loads(r["value"]) for r in rows}
     exact_enabled, tolerance_sec, max_stretch = _normalize_exact_timing_settings(settings)
     max_safe_stretch = float(settings.get("exact_timing_max_safe_stretch", 1.25) or 1.25)
-    global_speed = max(1.0, min(2.5, float(settings.get("tts_global_speed", 1.0) or 1.0)))
     rewrite_prefix = _timing_rewrite_method_prefix(settings)
     dub_lang_label = dub_language_label(dub_language_from_settings(settings), english=True)
     fit_policy = policy_from_settings(settings)
@@ -2977,7 +2989,6 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
             tts_dur = float(s.get("tts_duration") or 0.0)
             orig_file = Path(s.get("tts_path") or s.get("tts_raw_path") or (tts_dir / f"tts_{idx}.wav"))
             speech_dur = _segment_speech_duration(s, orig_file if orig_file.is_file() else None)
-            s["user_requested_speed"] = round(global_speed, 3)
             repaired_file = tts_dir / f"tts_repaired_{idx}.wav"
             repaired_file.unlink(missing_ok=True)
 
@@ -3002,7 +3013,6 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                 repair_target=repair_target,
                 tolerance_sec=tolerance_sec,
                 max_stretch=max_stretch,
-                global_speed=global_speed,
                 orig_file=orig_file,
                 tts_dir=tts_dir,
                 ffmpeg_path=ffmpeg_path,
@@ -3073,7 +3083,7 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
     })
     overlap_count = len(segments_with_voiced_overlap(segments))
     review_abs_max = max(
-        1.0, min(1.2, float(settings.get("edge_tts_overflow_speed_hard_max", 1.2) or 1.2))
+        1.0, min(1.25, float(settings.get("edge_tts_overflow_speed_hard_max", 1.25) or 1.25))
     )
     review_rows = list_timing_review_segments(segments, absolute_max_rate=review_abs_max)
     checkpoint_data = {
@@ -3100,7 +3110,7 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
                 code="TIMING_REVIEW_REQUIRED",
                 message=(
                     f"{len(review_rows)} segment(s) still overflow after max speed "
-                    f"{float(settings.get('edge_tts_overflow_speed_hard_max', 1.2) or 1.2):.2f}x. "
+                    f"{float(settings.get('edge_tts_overflow_speed_hard_max', 1.25) or 1.25):.2f}x. "
                     "Shorten the flagged TTS text, then submit for targeted re-TTS."
                 ),
                 action="Open timing review, edit the listed segments, and submit.",

@@ -51,9 +51,9 @@ def test_shorten_translation_uses_openai_when_configured(monkeypatch: pytest.Mon
     assert "Target word count: approximately 8" in captured["prompt"]
 
 
-def test_shorten_translation_skips_google_free_backend() -> None:
+def test_shorten_translation_skips_without_llm_keys() -> None:
     shortened, target_words = shorten_translation_for_timing(
-        {"translation_backend": "google_free"},
+        {"translation_backend": "gemini", "gemini_api_keys": []},
         database=None,  # type: ignore[arg-type]
         text="một hai ba bốn năm sáu bảy tám chín mười",
         budget=7.5,
@@ -142,10 +142,10 @@ def test_lengthen_translation_uses_openai_when_configured(monkeypatch: pytest.Mo
     assert target_words >= 2
 
 
-def test_invoke_timing_rewrite_rejects_google_free() -> None:
+def test_invoke_timing_rewrite_rejects_unknown_backend() -> None:
     with pytest.raises(AppError) as error:
         invoke_timing_rewrite(
-            {"translation_backend": "google_free"},
+            {"translation_backend": "unknown"},
             database=None,  # type: ignore[arg-type]
             prompt="test",
         )

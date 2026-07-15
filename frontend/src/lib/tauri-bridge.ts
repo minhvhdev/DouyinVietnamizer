@@ -108,12 +108,3 @@ export async function invokeOpenFolder(path: string): Promise<void> {
   }
   await invoke("open_folder", { path });
 }
-
-export type SetupProgress = { stage: string; pct: number };
-
-export async function subscribeSetupProgress(
-  onProgress: (p: SetupProgress) => void,
-): Promise<UnlistenFn> {
-  if (!isTauri()) return () => {};
-  return await listen<SetupProgress>("setup://progress", (e) => onProgress(e.payload));
-}

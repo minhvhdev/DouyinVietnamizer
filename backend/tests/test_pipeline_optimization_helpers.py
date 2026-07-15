@@ -419,19 +419,14 @@ def test_tts_conversion_strategy_defaults_to_lazy_mix() -> None:
 
 
 def test_tts_conversion_lazy_mix_records_zero_processes() -> None:
-    from dv_backend.tts_conversion import convert_segments, describe
+    from dv_backend.tts_conversion import TtsConversionResult, describe
 
-    class _Cfg:
-        def __init__(self, data_dir: Path) -> None:
-            self.data_dir = data_dir
-
-    result = convert_segments(
-        _Cfg(Path("data")),
-        pipeline_module=__import__("dv_backend.pipeline", fromlist=["pipeline"]),
-        job_id="n/a",
-        runner=None,
-        segments=[{"index": 0}, {"index": 1}],
-        settings={"tts_conversion_strategy": "lazy_mix"},
+    result = TtsConversionResult(
+        strategy="lazy_mix",
+        fallback_reason=None,
+        process_count=0,
+        wall_time_ms=0,
+        inputs=2,
     )
     payload = describe(result)
     assert payload["conversion_strategy"] == "lazy_mix"

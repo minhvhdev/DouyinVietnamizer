@@ -13,10 +13,24 @@ def service(tmp_path: Path) -> SettingsService:
     return SettingsService(database)
 
 
+def test_legacy_google_free_backend_migrates_to_gemini(tmp_path: Path) -> None:
+    database = Database(tmp_path / "app.db")
+    database.migrate()
+    with database.connection:
+        database.connection.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("translation_backend", json.dumps("google_free"), "now"),
+        )
+
+    settings = SettingsService(database)
+    assert settings.get_raw_all()["translation_backend"] == "gemini"
+    assert settings.update({"translation_backend": "google_free"})["translation_backend"] == "gemini"
+
+
 def test_defaults_use_free_pipeline(tmp_path: Path) -> None:
     settings = service(tmp_path)
 
-    assert settings.get_all()["translation_backend"] == "google_free"
+    assert settings.get_all()["translation_backend"] == "gemini"
     assert settings.get_all()["tts_backend"] == "omnivoice"
     assert settings.get_all()["omnivoice_model"]
     assert settings.get_all()["omnivoice_device"] == "cuda:0"
@@ -24,7 +38,7 @@ def test_defaults_use_free_pipeline(tmp_path: Path) -> None:
     assert settings.get_all()["mix_mode"] == "background_only"
     assert settings.get_all()["exact_timing_enabled"] is True
     assert settings.get_all()["exact_timing_tolerance_ms"] == 40
-    assert settings.get_all()["exact_timing_max_stretch"] == 1.2
+    assert settings.get_all()["exact_timing_max_stretch"] == 1.25
     assert settings.get_all()["subtitles_enabled"] is True
     assert settings.get_all()["subtitle_font_size"] == 48
     assert settings.get_all()["subtitle_position"] == "bottom"
@@ -48,7 +62,6 @@ def test_defaults_use_free_pipeline(tmp_path: Path) -> None:
     assert settings.get_all()["exact_timing_max_safe_stretch"] == 1.25
     assert settings.get_all()["short_tts_lengthen_min_gap_sec"] == 1.5
     assert settings.get_all()["short_tts_lengthen_max_ratio"] == 1.6
-    assert settings.get_all()["tts_global_speed"] == 1.0
     assert settings.get_all()["vad_adaptive_enabled"] is False
     assert settings.get_all()["vad_neural_fallback_enabled"] is False
     assert settings.get_all()["gpu_model_idle_timeout_sec"] == 60
@@ -93,7 +106,6 @@ def test_pipeline_optimization_settings_are_validated(tmp_path: Path) -> None:
         "sparse_asr_merge_gap_sec": 0.4,
         "short_tts_lengthen_min_gap_sec": 2.0,
         "short_tts_lengthen_max_ratio": 1.4,
-        "tts_global_speed": 1.05,
     })
 
     assert updated["asr_alignment_mode"] == "balanced"
@@ -111,22 +123,12 @@ def test_pipeline_optimization_settings_are_validated(tmp_path: Path) -> None:
     assert updated["sparse_asr_merge_gap_sec"] == 0.4
     assert updated["short_tts_lengthen_min_gap_sec"] == 2.0
     assert updated["short_tts_lengthen_max_ratio"] == 1.4
-    assert updated["tts_global_speed"] == 1.05
 
     with pytest.raises(ValueError, match="vad_engine"):
         settings.update({"vad_engine": "webrtc"})
 
     with pytest.raises(ValueError, match="asr_alignment_mode"):
         settings.update({"asr_alignment_mode": "maximum"})
-
-
-def test_tts_global_speed_is_clamped_to_one_through_two(tmp_path: Path) -> None:
-    settings = service(tmp_path)
-
-    assert settings.update({"tts_global_speed": 0.85})["tts_global_speed"] == 1.0
-    assert settings.update({"tts_global_speed": 2.5})["tts_global_speed"] == 2.5
-    assert settings.update({"tts_global_speed": 3.0})["tts_global_speed"] == 2.5
-    assert settings.update({"tts_global_speed": 1.75})["tts_global_speed"] == 1.75
 
 
 def test_gpu_settings_are_normalized(tmp_path: Path) -> None:
@@ -165,7 +167,7 @@ def test_exact_timing_settings_are_normalized(tmp_path: Path) -> None:
         "exact_timing_max_stretch": 4.2,
     })
     assert updated["exact_timing_tolerance_ms"] == 120.5
-    assert updated["exact_timing_max_stretch"] == 1.2
+    assert updated["exact_timing_max_stretch"] == 1.25
 
     with pytest.raises(ValueError, match="exact_timing_tolerance_ms"):
         settings.update({"exact_timing_tolerance_ms": "abc"})
@@ -202,7 +204,7 @@ def test_update_does_not_replace_unrelated_settings(tmp_path: Path) -> None:
 
     assert values == {
         "omnivoice_ref_audio": "C:/voice.wav",
-        "translation_backend": "google_free",
+        "translation_backend": "gemini",
     }
 
 

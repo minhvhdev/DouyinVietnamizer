@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rerun a job from duration_repair with updated global TTS speed."""
+"""Rerun a job from duration_repair."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from pathlib import Path
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("job_id")
-    parser.add_argument("--speed", type=float, default=2.5)
     parser.add_argument(
         "--from-step",
         default="duration_repair",
@@ -33,14 +32,10 @@ def main() -> int:
     from dv_backend.database import Database
     from dv_backend.jobs import JobService
     from dv_backend.runner import JobRunner
-    from dv_backend.settings import SettingsService
 
     config = AppConfig.from_env()
     database = Database(config.database_path)
     database.migrate()
-    settings = SettingsService(database)
-    settings.update({"tts_global_speed": args.speed})
-    print(f"Set tts_global_speed={args.speed}")
 
     jobs = JobService(database, config.data_dir)
     job_id = args.job_id.strip()

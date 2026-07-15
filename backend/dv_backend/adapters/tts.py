@@ -7,6 +7,7 @@ from typing import Any
 
 from ..errors import AppError
 from ..models import ErrorInfo
+from ..omnivoice_mps import plan_omnivoice_device
 
 SUPPORTED_TTS_BACKENDS = ("omnivoice", "edge_tts", "google_tts", "gemini_tts")
 CLOUD_TTS_BACKENDS = frozenset({"edge_tts", "google_tts", "gemini_tts"})
@@ -218,19 +219,16 @@ def resolve_tts_voice(settings: dict) -> str:
 
 
 def resolve_omnivoice_device(device: str | None) -> str:
-    configured = (device or "cuda:0").strip().lower() or "cuda:0"
-    if configured in {"auto", "default"}:
-        configured = "cuda:0"
-    if configured.startswith("cuda"):
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                return configured
-        except Exception:
-            pass
-        return "cpu"
-    return configured
+    allow_cpu_fallback = os.environ.get("DV_OMNIVOICE_ALLOW_CPU_FALLBACK", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    return plan_omnivoice_device(
+        device,
+        allow_cpu_fallback=allow_cpu_fallback,
+    ).resolved_device
 
 
 def _wav_format_key(params: wave._wave_params) -> tuple:

@@ -1,6 +1,6 @@
 # Phase 2 Production Validation Protocol
 
-See also Phase 3 tooling: `run_timing_experiment.py`, `preflight_release.py`, production dashboard via `evaluate_dubbing_timing.py --compare --include-audio`.
+See also Phase 3 tooling: `run_timing_experiment.py`, `preflight_release.py`, production dashboard via `evaluate_dubbing_timing.py --compare --include-audio` (all under `scripts/eval/`).
 
 This document defines how to run controlled A/B validation for timing-aware translation and natural TTS duration control in DouyinVietnamizer.
 
@@ -55,8 +55,8 @@ Run each video twice (baseline job + Phase 2 job). Do not overwrite artifacts be
 
 ```bash
 cd backend
-uv run python scripts/evaluate_dubbing_timing.py <baseline_job_id> --json
-uv run python scripts/evaluate_dubbing_timing.py <phase2_job_id> --compare <baseline_job_id> --export-html
+uv run python scripts/eval/evaluate_dubbing_timing.py <baseline_job_id> --json
+uv run python scripts/eval/evaluate_dubbing_timing.py <phase2_job_id> --compare <baseline_job_id> --export-html
 ```
 
 ## Initial acceptance thresholds (targets, not guarantees)

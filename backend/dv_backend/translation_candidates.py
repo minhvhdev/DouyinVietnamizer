@@ -5,7 +5,9 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
+from .translation_candidate_llm import assert_timing_immutable
 from .translation_candidate_ranking import rank_translation_candidates
+from .translation_rebalance import rebalance_fragment_spills
 from .voice_duration_profile import resolve_voice_profile
 
 
@@ -17,10 +19,6 @@ def _single_candidate(text: str, *, style: str = "natural", source: str = "legac
     if not cleaned:
         return []
     return [{"text": cleaned, "style": style, "meaning_notes": [], "candidate_source": source}]
-
-
-def google_free_candidates(translated_text: str) -> tuple[list[dict[str, Any]], str]:
-    return _single_candidate(translated_text, source="google_free_single"), "google_free_single"
 
 
 def apply_candidate_selection(
@@ -85,15 +83,22 @@ def translate_segments_with_candidates(
     target_lang: str,
     translate_fn: Callable[..., list[str]],
     translate_candidates_fn: Callable[..., CandidateBatchResult] | None,
+    repair_fragment_fn: Callable[..., Any] | None = None,
     save_setting_fn: Callable[[Any, str, Any], None] | None = None,
     data_dir=None,
 ) -> None:
     texts = [segment["text"] for segment in segments]
     timing_profiles = [segment.get("timing_profile") or {} for segment in segments]
     speaking_rate = float(settings.get("vietnamese_speaking_rate_wps") or 3.2)
+    timing_snapshot = [
+        {"index": segment.get("index", index), "start": segment.get("start"), "end": segment.get("end")}
+        for index, segment in enumerate(segments)
+    ]
 
     enabled = bool(settings.get("timing_candidate_translation_enabled", False))
-    backend = str(settings.get("translation_backend") or "google_free")
+    backend = str(settings.get("translation_backend") or "gemini")
+    if backend == "google_free":
+        backend = "gemini"
     use_candidates = enabled and backend in {"gemini", "openai"} and translate_candidates_fn is not None
 
     gen_started = time.perf_counter()
@@ -140,6 +145,7 @@ def translate_segments_with_candidates(
                         settings=settings,
                         data_dir=data_dir,
                     )
+            assert_timing_immutable(timing_snapshot, segments)
             return
 
         gen_ms = round((time.perf_counter() - gen_started) * 1000)
@@ -157,6 +163,21 @@ def translate_segments_with_candidates(
                 data_dir=data_dir,
                 ranking_started=time.perf_counter(),
             )
+        assert_timing_immutable(timing_snapshot, segments)
+        if repair_fragment_fn is not None:
+            try:
+                diagnostics = rebalance_fragment_spills(
+                    segments,
+                    repair_fn=repair_fragment_fn,
+                    source_lang=source_lang,
+                    target_lang=target_lang,
+                )
+                for segment in segments:
+                    segment["fragment_rebalance"] = diagnostics
+            except Exception as error:
+                for segment in segments:
+                    segment["fragment_rebalance_warning"] = f"rebalance_failed:{type(error).__name__}"
+            assert_timing_immutable(timing_snapshot, segments)
         return
 
     duration_budgets = [
@@ -177,7 +198,7 @@ def translate_segments_with_candidates(
         timing_guidance=timing_guidance,
     )
     gen_ms = round((time.perf_counter() - gen_started) * 1000)
-    source_tag = "google_free_single" if backend == "google_free" else f"{backend}_single"
+    source_tag = f"{backend}_single"
     for segment, text in zip(segments, translated, strict=True):
         segment["candidate_generation_wall_time_ms"] = gen_ms
         candidates = _single_candidate(text, source=source_tag)
@@ -194,3 +215,4 @@ def translate_segments_with_candidates(
                 settings=settings,
                 data_dir=data_dir,
             )
+    assert_timing_immutable(timing_snapshot, segments)

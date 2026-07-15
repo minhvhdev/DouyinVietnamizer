@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from dv_backend.errors import AppError
-from dv_backend.release_eligibility import assert_formal_release_allowed, compute_release_eligible
+from dv_backend.release_eligibility import assert_formal_release_allowed
 from dv_backend.subtitle_timing import (
     assert_cues_conserve_spoken,
     normalize_spoken_for_conservation,
@@ -123,23 +123,6 @@ def test_release_eligible_false_blocks_formal(tmp_path: Path, monkeypatch: pytes
     with pytest.raises(AppError) as raised:
         assert_formal_release_allowed(_Cfg(), "job-x", stage="mix")  # type: ignore[arg-type]
     assert raised.value.info.code == "RELEASE_ELIGIBLE_BLOCKED"
-
-
-def test_compute_release_eligible_true_when_clean() -> None:
-    segments = [
-        {
-            "index": 1,
-            "tts_spoken_text": "ok",
-            "timing_overflow_sec": 0.0,
-            "timing_available_duration": 2.0,
-            "repaired_duration": 1.5,
-            "start": 0.0,
-            "end": 2.0,
-            "placement_start": 0.0,
-            "no_speech": False,
-        }
-    ]
-    assert compute_release_eligible(segments, absolute_max_rate=1.2) is True
 
 
 def test_resolve_ignores_stale_false_when_remaining_and_overlaps_zero(

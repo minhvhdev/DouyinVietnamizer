@@ -7,6 +7,17 @@ from typing import Any
 
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)?%?")
 _PERCENT = re.compile(r"\d+(?:[.,]\d+)?%")
+_TECH_IDENTIFIER = re.compile(
+    r"\b(?:seg|cluster|slot|id|test|case)[_-]?\d+\b|\b[A-Za-z]\d{1,3}\b",
+    re.IGNORECASE,
+)
+_STANDALONE_NUMBER = re.compile(
+    r"(?<![A-Za-z_])\d+(?:[.,]\d+)?%?(?![A-Za-z_])"
+)
+_CHINESE_NUMERAL = re.compile(
+    r"[二三四五六七八九][十百千万亿个位次名岁天月日人倍元％%]|[十百千万亿][一二三四五六七八九]?|"
+    r"一[十百千万亿个位次名岁天月日人倍元％%]|[两〇零][十百千万亿个位次名岁天月日人倍]?"
+)
 _MODEL_ID = re.compile(r"\b(?:RTX|GTX|RX|USB|AI|Wi-?Fi)\s*[-\w]*\d+[\w-]*\b", re.IGNORECASE)
 _ALNUM_MODEL = re.compile(r"\b[A-Z]{2,}\d{2,}[A-Z0-9-]*\b")
 _PROPER_NOUN = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b")
@@ -22,6 +33,17 @@ _QUESTION = re.compile(r"[?？]|^(?:ai|gì|sao|tại sao|bao nhiêu|ở đâu)\b
 
 def _count(pattern: re.Pattern[str], text: str) -> int:
     return len(pattern.findall(text or ""))
+
+
+def extract_semantic_numbers(text: str) -> list[str]:
+    """Extract numeric invariants worth preserving (not technical identifiers like S0)."""
+    cleaned = text or ""
+    # Strip technical identifiers first so embedded digits are not counted.
+    scrubbed = _TECH_IDENTIFIER.sub(" ", cleaned)
+    scrubbed = _MODEL_ID.sub(" ", scrubbed)
+    found = _STANDALONE_NUMBER.findall(scrubbed)
+    found.extend(_CHINESE_NUMERAL.findall(scrubbed))
+    return found
 
 
 def evaluate_semantic_safeguards(
@@ -45,8 +67,8 @@ def evaluate_semantic_safeguards(
             "rejection_reasons": ["rejected_empty"],
         }
 
-    cand_nums = _count(_NUMBER, candidate)
-    ref_nums = max(_count(_NUMBER, reference), _count(_NUMBER, source))
+    cand_nums = len(extract_semantic_numbers(candidate))
+    ref_nums = max(len(extract_semantic_numbers(reference)), len(extract_semantic_numbers(source)))
     if ref_nums > 0 and cand_nums < ref_nums:
         penalties.append("rejected_missing_number")
         critical = True

@@ -8,6 +8,5 @@ vi.mock("../src/lib/tauri-bridge", () => ({
   invokeOpenFolder: vi.fn().mockResolvedValue(undefined),
   invokeSetup: vi.fn().mockResolvedValue(undefined),
   invokeRestart: vi.fn().mockResolvedValue(undefined),
-  subscribeSetupProgress: vi.fn().mockResolvedValue(() => {}),
 }));
 
