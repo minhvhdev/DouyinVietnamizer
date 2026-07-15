@@ -9,6 +9,7 @@ from typing import Any
 from ..errors import AppError
 from ..models import ErrorInfo
 from ..omnivoice_env import OMNIVOICE_DEFAULT_MODEL, build_omnivoice_subprocess_env, resolve_omnivoice_python
+from ..omnivoice_content_fidelity import normalize_target_text_for_synthesis
 from .tts import resolve_omnivoice_device
 
 OMNIVOICE_DEFAULT_CHUNK_THRESHOLD_SEC = 30.0
@@ -85,7 +86,7 @@ def plan_official_omnivoice_call(
     audio_chunk_duration: float,
 ) -> dict[str, Any]:
     """Plan a generate() call aligned with omnivoice/omnivoice/cli/demo.py."""
-    text_clean = _strip_surrogates(text).strip()
+    text_clean = normalize_target_text_for_synthesis(_strip_surrogates(text))
     if not text_clean:
         raise ValueError("Cannot synthesize empty narration text.")
 

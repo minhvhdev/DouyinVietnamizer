@@ -186,6 +186,25 @@ def test_build_ass_content_uses_box_background_with_padding() -> None:
     assert "{\\bord14\\xbord14\\ybord14\\shad0" in content
 
 
+def test_build_ass_content_uses_prebuilt_cues() -> None:
+    cues = [{"start": 1.5, "end": 2.5, "text": "Prebuilt cue"}]
+    content = build_ass_content(
+        [{"translation": "ignored"}],
+        font_size=48,
+        font_color="#FFFFFF",
+        background_color="#000000",
+        background_opacity=70,
+        background_padding=12,
+        position="bottom",
+        edge_margin=80,
+        play_res_x=1080,
+        play_res_y=1920,
+        cues=cues,
+    )
+    assert "Prebuilt cue" in content
+    assert "0:00:01.50" in content
+
+
 def test_write_ass_file(tmp_path: Path) -> None:
     path = tmp_path / "subtitles.ass"
     write_ass_file(

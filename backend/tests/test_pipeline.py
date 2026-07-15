@@ -1594,6 +1594,7 @@ def test_align_final_dub_integration(mock_transcribe, test_env, tmp_path: Path) 
             "placement_start": 1.0,
             "repaired_duration": 1.0,
             "translation": "Hôm nay thử món này.",
+            "tts_path": str(wav0),
         },
         {
             "index": 1,
@@ -1601,6 +1602,7 @@ def test_align_final_dub_integration(mock_transcribe, test_env, tmp_path: Path) 
             "placement_start": 5.0,
             "repaired_duration": 1.0,
             "translation": "Rất ngon.",
+            "tts_path": str(wav1),
         },
     ]
     save_checkpoint(config.data_dir, job_id, "duration_repair", {"segments": segments})

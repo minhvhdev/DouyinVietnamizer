@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from dv_backend.api import create_app
-from dv_backend.checkpoints import PIPELINE_STEPS, save_checkpoint
+from dv_backend.checkpoints import PIPELINE_STEPS, load_checkpoint, save_checkpoint
 from dv_backend.config import AppConfig
 from dv_backend.database import Database
 from dv_backend.jobs import JobService
@@ -298,11 +298,23 @@ def test_preview_preset_voice_rejects_unknown(tmp_path: Path) -> None:
 
 def test_segment_wav_serves_lazy_mix_raw_file(tmp_path: Path) -> None:
     client = make_client(tmp_path)
-    app = client.app
     job_id = _create_imported_job_id(client, tmp_path)
     raw = tmp_path / "jobs" / job_id / "artifacts" / "tts" / "tts_raw_0.wav"
     raw.parent.mkdir(parents=True, exist_ok=True)
     raw.write_bytes(b"RIFFraw")
+    save_checkpoint(
+        tmp_path,
+        job_id,
+        "tts",
+        {
+            "segments": [
+                {
+                    "index": 0,
+                    "tts_raw_path": str(raw),
+                }
+            ]
+        },
+    )
 
     response = client.get(f"/api/jobs/{job_id}/segments/0/wav")
 
@@ -405,4 +417,40 @@ def test_update_segment_speaker_updates_checkpoints(tmp_path: Path) -> None:
     updated = client.get(f"/api/jobs/{job_id}/checkpoint/normalize_segments").json()
     assert updated["segments"][0]["speaker_id"] == "3"
     assert updated["segments"][0]["speaker_confidence"] == 1.0
+
+
+def test_get_checkpoint_enriches_timing_diagnostics_without_mutating_disk(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    job_id = _create_imported_job_id(client, tmp_path)
+    checkpoint = {
+        "schema_version": 2,
+        "job_id": job_id,
+        "step_name": "duration_repair",
+        "completed_at": "2026-07-15T00:00:00Z",
+        "segments": [
+            {
+                "index": 0,
+                "start": 3.0,
+                "end": 5.0,
+                "placement_start": 4.2,
+                "placement_end": 6.0,
+                "repaired_duration": 1.8,
+                "translation": "xin chào",
+            }
+        ],
+    }
+    save_checkpoint(tmp_path, job_id, "duration_repair", checkpoint)
+
+    response = client.get(f"/api/jobs/{job_id}/checkpoint/duration_repair")
+    assert response.status_code == 200
+    payload = response.json()
+    segment = payload["segments"][0]
+    assert payload["timing_stage"] == "duration_repair"
+    assert segment["source_start"] == 3.0
+    assert segment["effective_start"] == 4.2
+    assert segment["effective_end"] == 6.0
+
+    stored = load_checkpoint(tmp_path, job_id, "duration_repair")
+    assert stored is not None
+    assert "effective_start" not in stored["segments"][0]
 

@@ -20,10 +20,12 @@ from dv_backend.final_dub_alignment import (
     build_alignment_cache_identity,
     classify_qwen_asr_backend,
     compute_audio_content_hash,
+    filter_valid_dub_words,
     interpolate_token_timestamps,
     normalize_alignment_token,
     refresh_segment_dub_word_timestamps,
     resolve_final_alignment_method,
+    segment_has_usable_dub_words,
     strip_absolute_from_dub_words,
     text_similarity,
     tokenize_asr_units,
@@ -123,6 +125,7 @@ def test_placement_change_recomputes_absolute_without_model(tmp_path: Path) -> N
         "translation": "Hôm nay thử món này.",
         "placement_start": 5.0,
         "repaired_duration": 0.5,
+        "tts_path": str(wav),
     }
 
     def fake_details(*_args, **_kwargs):
@@ -287,8 +290,8 @@ def test_align_job_skips_model_when_all_cache_hits(tmp_path: Path) -> None:
     _write_wav(wav1)
     cache_dir = job_dir / "artifacts" / "subtitle_asr"
     segments = [
-        {"index": 0, "translation": "A", "placement_start": 0.0, "repaired_duration": 0.5},
-        {"index": 1, "translation": "B", "placement_start": 1.0, "repaired_duration": 0.5},
+        {"index": 0, "translation": "A", "placement_start": 0.0, "repaired_duration": 0.5, "tts_path": str(wav0)},
+        {"index": 1, "translation": "B", "placement_start": 1.0, "repaired_duration": 0.5, "tts_path": str(wav1)},
     ]
 
     transcribe = MagicMock()
@@ -351,3 +354,29 @@ def test_build_subtitle_cues_fallback_without_dub_words() -> None:
         [{"start": 2.0, "placement_start": 1.5, "repaired_duration": 2.0, "translation": "Xin chào."}]
     )
     assert cues[0]["start"] == 1.5
+
+
+def test_filter_valid_dub_words_rejects_invalid_and_out_of_bounds() -> None:
+    segment = {
+        "placement_start": 2.0,
+        "repaired_duration": 2.0,
+        "dub_words": [
+            {"text": "ok", "start": 0.0, "end": 0.5, "absolute_start": 2.0, "absolute_end": 2.5},
+            {"text": "", "start": 0.5, "end": 0.8, "absolute_start": 2.5, "absolute_end": 2.8},
+            {"text": "bad", "start": float("nan"), "end": 1.0},
+            {"text": "far", "start": 5.0, "end": 5.5, "absolute_start": 20.0, "absolute_end": 20.5},
+        ],
+    }
+    valid = filter_valid_dub_words(segment["dub_words"], segment)
+    assert len(valid) == 1
+    assert valid[0]["text"] == "ok"
+    assert segment_has_usable_dub_words(segment) is True
+
+
+def test_segment_with_only_invalid_dub_words_is_not_usable() -> None:
+    segment = {
+        "placement_start": 0.0,
+        "repaired_duration": 2.0,
+        "dub_words": [{"text": "x", "start": float("nan"), "end": 1.0}],
+    }
+    assert segment_has_usable_dub_words(segment) is False

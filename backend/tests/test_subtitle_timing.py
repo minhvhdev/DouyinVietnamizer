@@ -1,14 +1,21 @@
+import json
 from pathlib import Path
 
 from dv_backend.subtitle_timing import (
     allocate_proportional_cues,
     build_subtitle_cues,
+    filter_subtitle_segments,
+    hash_subtitle_cues,
+    hash_subtitle_track_body,
+    load_canonical_subtitle_track,
     map_chunks_to_asr_timeline,
     resolve_overlapping_cues,
+    resolve_subtitle_track,
     segment_subtitle_end,
     segment_subtitle_start,
     split_for_subtitle_display,
     split_translation_sentences,
+    write_canonical_subtitle_track,
 )
 
 
@@ -203,6 +210,7 @@ def test_dub_words_short_sentence_single_cue() -> None:
     segment = {
         "index": 0,
         "placement_start": 0.0,
+        "repaired_duration": 1.4,
         "dub_words": [
             _dub_word("Xin", 0.0, 0.4),
             _dub_word("chào", 0.4, 0.9),
@@ -218,7 +226,7 @@ def test_dub_words_long_line_splits_into_multiple_cues() -> None:
     from dv_backend.subtitle_timing import build_cues_from_dub_words
 
     words = [_dub_word(f"word{i:02d}", i * 0.4, i * 0.4 + 0.35) for i in range(12)]
-    segment = {"index": 0, "placement_start": 0.0, "dub_words": words}
+    segment = {"index": 0, "placement_start": 0.0, "repaired_duration": 5.2, "dub_words": words}
     # Tight per-line limit forces multiple cues even inside one uninterrupted phrase.
     settings = {"subtitle_max_chars_per_line": 20, "subtitle_max_lines_per_cue": 1}
     cues = build_cues_from_dub_words(segment, settings=settings, language="vi")
@@ -267,6 +275,7 @@ def test_thai_dub_words_join_without_spaces() -> None:
     segment = {
         "index": 0,
         "placement_start": 0.0,
+        "repaired_duration": 1.0,
         "dub_words": [
             _dub_word("สวัสดี", 0.0, 0.5),
             _dub_word("ครับ", 0.5, 1.0),
@@ -285,3 +294,159 @@ def test_thai_display_split_uses_character_limit() -> None:
     assert len(chunks) >= 2
     assert all(len(chunk) <= 15 for chunk in chunks)
     assert all(" " not in chunk for chunk in chunks)
+
+
+def test_mixed_alignment_each_segment_gets_cues() -> None:
+    segments = [
+        {
+            "index": 0,
+            "placement_start": 0.0,
+            "repaired_duration": 2.0,
+            "tts_spoken_text": "Segment A có dub words",
+            "dub_words": [_dub_word("Một", 0.0, 0.5), _dub_word("hai.", 0.5, 1.0)],
+        },
+        {
+            "index": 1,
+            "start": 2.0,
+            "placement_start": 2.5,
+            "repaired_duration": 1.5,
+            "tts_spoken_text": "Segment B thiếu words",
+            "dub_words": [],
+        },
+        {
+            "index": 2,
+            "start": 4.0,
+            "placement_start": 4.0,
+            "repaired_duration": 1.8,
+            "tts_spoken_text": "Segment C không có field dub",
+        },
+    ]
+    cues = build_subtitle_cues(segments, tts_asr_align=False)
+    assert len(cues) >= 3
+    assert any(float(cue["start"]) < 1.0 for cue in cues)
+    assert any(2.4 <= float(cue["start"]) <= 2.6 for cue in cues)
+
+
+def test_invalid_dub_words_fallback_to_proportional() -> None:
+    from dv_backend.final_dub_alignment import segment_has_usable_dub_words
+
+    segment = {
+        "index": 0,
+        "placement_start": 1.0,
+        "repaired_duration": 2.0,
+        "tts_spoken_text": "fallback khi words invalid",
+        "dub_words": [{"text": "bad", "start": float("nan"), "end": 1.0}],
+    }
+    assert segment_has_usable_dub_words(segment) is False
+    cues = build_subtitle_cues([segment], tts_asr_align=False)
+    assert len(cues) >= 1
+    assert float(cues[0]["start"]) >= 1.0
+
+
+def test_zero_placement_start_uses_playback_not_source() -> None:
+    segment = {
+        "index": 0,
+        "start": 3.0,
+        "placement_start": 0.0,
+        "repaired_duration": 2.0,
+        "tts_spoken_text": "zero placement",
+    }
+    cues = build_subtitle_cues([segment], tts_asr_align=False)
+    assert float(cues[0]["start"]) == 0.0
+
+
+def test_tts_spoken_text_only_segment_still_builds_cues() -> None:
+    from dv_backend.subtitle_timing import resolve_spoken_subtitle_text
+
+    segment = {
+        "index": 0,
+        "placement_start": 0.0,
+        "repaired_duration": 2.0,
+        "tts_spoken_text": "Chỉ có spoken text",
+    }
+    assert resolve_spoken_subtitle_text(segment) == "Chỉ có spoken text"
+    cues = build_subtitle_cues([segment], tts_asr_align=False)
+    assert len(cues) >= 1
+
+
+def test_filter_subtitle_segments_includes_tts_spoken_text_only() -> None:
+    segments = [
+        {"index": 0, "tts_spoken_text": "Chỉ spoken", "placement_start": 0.0, "repaired_duration": 2.0},
+        {"index": 1, "translation": "Có translation", "placement_start": 2.0, "repaired_duration": 2.0},
+    ]
+    assert len(filter_subtitle_segments(segments)) == 2
+
+
+def test_resolve_subtitle_track_is_deterministic_for_render_and_qc() -> None:
+    segments = [
+        {
+            "index": 0,
+            "translation": "A valid dub.",
+            "placement_start": 0.0,
+            "repaired_duration": 2.0,
+            "dub_words": [
+                {
+                    "text": "A",
+                    "start": 0.0,
+                    "end": 0.4,
+                    "absolute_start": 0.0,
+                    "absolute_end": 0.4,
+                    "alignment": "exact",
+                },
+                {
+                    "text": "valid",
+                    "start": 0.4,
+                    "end": 1.0,
+                    "absolute_start": 0.4,
+                    "absolute_end": 1.0,
+                    "alignment": "exact",
+                },
+            ],
+            "dub_alignment_status": "aligned",
+        },
+        {
+            "index": 1,
+            "translation": "Fallback segment.",
+            "placement_start": 2.0,
+            "repaired_duration": 2.0,
+            "dub_words": [],
+        },
+        {
+            "index": 2,
+            "tts_spoken_text": "Chỉ có spoken text.",
+            "placement_start": 4.0,
+            "repaired_duration": 2.0,
+        },
+    ]
+    render_track = resolve_subtitle_track(segments, tts_asr_align=False)
+    qc_track = resolve_subtitle_track(segments, tts_asr_align=False)
+    assert render_track["segments"] == qc_track["segments"]
+    assert render_track["cues"] == qc_track["cues"]
+    assert len(render_track["segments"]) == 3
+    assert len(render_track["cues"]) >= 3
+
+
+def test_canonical_subtitle_track_roundtrip(tmp_path: Path) -> None:
+    cues = [
+        {"start": 0.0, "end": 1.0, "text": "A"},
+        {"start": 1.0, "end": 2.0, "text": "B"},
+    ]
+    path = write_canonical_subtitle_track(tmp_path, cues=cues, segment_indices=[0, 1])
+    assert path.is_file()
+    loaded = load_canonical_subtitle_track(tmp_path)
+    assert loaded is not None
+    assert loaded["cues"] == cues
+    assert loaded["content_hash"] == hash_subtitle_track_body(
+        cues=cues,
+        segment_indices=[0, 1],
+    )
+    assert loaded["cue_count"] == 2
+
+
+def test_canonical_subtitle_track_rejects_tampered_hash(tmp_path: Path) -> None:
+    write_canonical_subtitle_track(tmp_path, cues=[{"start": 0.0, "end": 1.0, "text": "A"}])
+    path = tmp_path / "artifacts" / "subtitle_track.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["cues"][0]["text"] = "Tampered"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert load_canonical_subtitle_track(tmp_path) is None

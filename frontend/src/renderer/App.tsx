@@ -637,6 +637,10 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
     omnivoice_ref_text: "",
     omnivoice_instruct: "",
     omnivoice_auto_voice: true,
+    omnivoice_external_chunking_enabled: true,
+    omnivoice_chunk_max_chars: 220,
+    omnivoice_chunk_target_chars: 180,
+    omnivoice_chunk_retry_on_fidelity_failure: true,
   });
   const [newGeminiKey, setNewGeminiKey] = useState("");
   const [newGoogleTtsKey, setNewGoogleTtsKey] = useState("");
@@ -1202,17 +1206,22 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
   async function fetchJobCheckpoints(jobId: string, options?: { resetDrafts?: boolean }) {
     const resetDrafts = options?.resetDrafts === true;
     try {
-      const cp = await api.getCheckpoint(jobId, "duration_repair");
+      const cp = await api.getCheckpoint(jobId, "align_final_dub");
       setDurationRepairCp(cp);
     } catch {
       try {
-        const cp = await api.getCheckpoint(jobId, "translate");
+        const cp = await api.getCheckpoint(jobId, "duration_repair");
         setDurationRepairCp(cp);
       } catch {
-        setDurationRepairCp(null);
-        setTimingReview(null);
-        setTimingReviewDrafts({});
-        setTimingReviewMessage(null);
+        try {
+          const cp = await api.getCheckpoint(jobId, "translate");
+          setDurationRepairCp(cp);
+        } catch {
+          setDurationRepairCp(null);
+          setTimingReview(null);
+          setTimingReviewDrafts({});
+          setTimingReviewMessage(null);
+        }
       }
     }
     try {
@@ -1788,6 +1797,10 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
           omnivoice_auto_voice: settings.omnivoice_auto_voice,
           omnivoice_num_steps: settings.omnivoice_num_steps,
           omnivoice_language_id: settings.omnivoice_language_id,
+          omnivoice_external_chunking_enabled: settings.omnivoice_external_chunking_enabled,
+          omnivoice_chunk_max_chars: settings.omnivoice_chunk_max_chars,
+          omnivoice_chunk_target_chars: settings.omnivoice_chunk_target_chars,
+          omnivoice_chunk_retry_on_fidelity_failure: settings.omnivoice_chunk_retry_on_fidelity_failure,
         },
       });
       if (ttsPreviewUrlRef.current) {
@@ -3179,6 +3192,69 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                             />
                             <span>Auto voice khi không có audio tham chiếu</span>
                           </label>
+                          <div className="settings-field-grid__span-2" style={{ display: "grid", gap: "10px" }}>
+                            <SettingsCheckboxField
+                              label="Chia nhỏ text dài trước khi TTS (chunking)"
+                              hint="Khi bật, đoạn dịch dài hơn max chars sẽ được chia rồi ghép lại để giảm mất chữ. Tắt = gửi cả đoạn một lần (giống nghe thử Settings hơn). Đổi xong cần chạy lại từ bước TTS vì cache TTS theo policy."
+                              checked={Boolean(settings.omnivoice_external_chunking_enabled ?? true)}
+                              onChange={(checked) =>
+                                setSettings({ ...settings, omnivoice_external_chunking_enabled: checked })
+                              }
+                            />
+                            <label className="settings-label">
+                              <SettingsFieldLabel
+                                label={`Max chars mỗi chunk (${settings.omnivoice_chunk_max_chars ?? 220})`}
+                                hint="Chỉ có tác dụng khi chunking bật. Vượt ngưỡng này thì đoạn được chia nhỏ. Mặc định 220."
+                              />
+                              <input
+                                className="settings-input"
+                                type="range"
+                                min={80}
+                                max={400}
+                                step={10}
+                                value={settings.omnivoice_chunk_max_chars ?? 220}
+                                disabled={!(settings.omnivoice_external_chunking_enabled ?? true)}
+                                onChange={(e) =>
+                                  setSettings({
+                                    ...settings,
+                                    omnivoice_chunk_max_chars: Number(e.target.value),
+                                  })
+                                }
+                              />
+                            </label>
+                            <label className="settings-label">
+                              <SettingsFieldLabel
+                                label={`Target chars mỗi chunk (${settings.omnivoice_chunk_target_chars ?? 180})`}
+                                hint="Mục tiêu độ dài chunk khi chia (thường nhỏ hơn max). Chỉ dùng khi chunking bật."
+                              />
+                              <input
+                                className="settings-input"
+                                type="range"
+                                min={60}
+                                max={360}
+                                step={10}
+                                value={settings.omnivoice_chunk_target_chars ?? 180}
+                                disabled={!(settings.omnivoice_external_chunking_enabled ?? true)}
+                                onChange={(e) =>
+                                  setSettings({
+                                    ...settings,
+                                    omnivoice_chunk_target_chars: Number(e.target.value),
+                                  })
+                                }
+                              />
+                            </label>
+                            <SettingsCheckboxField
+                              label="Retry chia nhỏ hơn khi Fidelity thấp"
+                              hint="Khi chunk/đoạn bị mất chữ (Fidelity poor/failed), thử chia nhỏ hơn (220→140→90). Chỉ hữu ích khi chunking bật."
+                              checked={Boolean(settings.omnivoice_chunk_retry_on_fidelity_failure ?? true)}
+                              onChange={(checked) =>
+                                setSettings({
+                                  ...settings,
+                                  omnivoice_chunk_retry_on_fidelity_failure: checked,
+                                })
+                              }
+                            />
+                          </div>
                         </div>
                         {settings.omnivoice_ref_audio && !(settings.omnivoice_ref_text ?? "").trim() && (
                           <div className="alert-info-box warning">
@@ -3874,6 +3950,9 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                           <strong style={{ fontSize: "13px", color: "#fff" }}>Phân đoạn #{row.index + 1}</strong>
                           <small style={{ color: "#d0a56a" }}>
                             Thừa ~{overflowSec.toFixed(2)}s
+                            {row.effective_start != null && row.effective_end != null
+                              ? ` · playback ${Number(row.effective_start).toFixed(2)}–${Number(row.effective_end).toFixed(2)}s`
+                              : ""}
                             {row.repaired_duration != null && row.timing_available_duration != null
                               ? ` · dài ${durationSec.toFixed(2)}s / khung ${availableSec.toFixed(2)}s`
                               : ""}
@@ -4033,7 +4112,16 @@ export function App({ api = defaultApi }: { api?: JobsApi }) {
                        <span style={{ fontSize: "12px", color: "#8170ff", fontWeight: 600 }}>
                          Phân đoạn #{seg.index + 1}
                        </span>
-                       <small style={{ color: "#747d90" }}>Bắt đầu: {seg.start.toFixed(2)}s | Thời lượng: {seg.repaired_duration ? seg.repaired_duration.toFixed(2) : (seg.duration_budget ? seg.duration_budget.toFixed(2) : "--")}s</small>
+                       <small style={{ color: "#747d90" }}>
+                         Playback: {(seg.effective_start ?? seg.placement_start ?? seg.start ?? 0).toFixed(2)}s
+                         {" – "}
+                         {(seg.effective_end ?? ((seg.effective_start ?? seg.placement_start ?? seg.start ?? 0) + (seg.repaired_duration ?? seg.duration_budget ?? 0))).toFixed(2)}s
+                         {seg.source_start != null && seg.effective_start != null && Math.abs(Number(seg.source_start) - Number(seg.effective_start)) > 0.02
+                           ? ` · nguồn ${Number(seg.source_start).toFixed(2)}s`
+                           : ""}
+                         {" | Thời lượng: "}
+                         {seg.repaired_duration ? seg.repaired_duration.toFixed(2) : (seg.duration_budget ? seg.duration_budget.toFixed(2) : "--")}s
+                       </small>
                      </div>
                      {seg.text && (
                        <div style={{ fontSize: "12px", color: "#626b7d", fontStyle: "italic", background: "rgba(255,255,255,0.015)", padding: "6px 10px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.03)" }}>

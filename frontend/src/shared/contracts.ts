@@ -66,10 +66,22 @@ export type OutputItem = {
   file_size: number;
 };
 
+export type JobFolder = {
+  path: string;
+  exists: boolean;
+};
+
 export type TimingReviewSegment = {
   index: number;
   start?: number;
   end?: number;
+  source_start?: number | null;
+  source_end?: number | null;
+  placement_start?: number | null;
+  placement_end?: number | null;
+  effective_start?: number;
+  effective_end?: number;
+  timing_stage?: string;
   source_text?: string;
   spoken_text: string;
   plan_version?: number;
@@ -89,6 +101,7 @@ export type TimingReviewSegment = {
 export type TimingReviewPayload = {
   job_id: string;
   source_step: string;
+  timing_stage?: string;
   segments: TimingReviewSegment[];
   remaining_count: number;
   release_eligible: boolean;

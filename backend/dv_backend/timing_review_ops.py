@@ -23,9 +23,11 @@ from .pipeline import (
     resolve_tool_path,
 )
 from .timing_placement import (
+    annotate_segments_timing_diagnostics,
     compute_placement_starts,
     enforce_zero_overlap_placements,
     schedule_soft_placements,
+    segment_timing_diagnostics,
     segments_with_voiced_overlap,
 )
 from .timing_review import flag_infeasible_segments, list_timing_review_segments
@@ -38,10 +40,14 @@ def _load_settings(database: Database) -> dict[str, Any]:
     return {r["key"]: json.loads(r["value"]) for r in rows}
 
 
+def _valid_segment_checkpoint(cp: dict[str, Any] | None) -> bool:
+    return bool(cp and isinstance(cp.get("segments"), list) and cp["segments"])
+
+
 def _checkpoint_for_review(config: AppConfig, job_id: str) -> tuple[str, dict[str, Any]]:
-    for step in ("duration_repair", "align_final_dub", "tts"):
+    for step in ("align_final_dub", "duration_repair", "tts"):
         cp = load_checkpoint(config.data_dir, job_id, step)
-        if cp and cp.get("segments"):
+        if _valid_segment_checkpoint(cp):
             return step, cp
     raise AppError(
         404,
@@ -67,10 +73,11 @@ def get_timing_review_payload(
     compute_placement_starts(segments)
     schedule_soft_placements(segments)
     flag_infeasible_segments(segments, absolute_max_rate=absolute_max)
-    rows = list_timing_review_segments(segments, absolute_max_rate=absolute_max)
+    rows = list_timing_review_segments(segments, absolute_max_rate=absolute_max, timing_stage=step)
     return {
         "job_id": job_id,
         "source_step": step,
+        "timing_stage": step,
         "segments": rows,
         "remaining_count": len(rows),
         "release_eligible": len(rows) == 0 and len(segments_with_voiced_overlap(segments)) == 0,
@@ -299,7 +306,11 @@ def submit_timing_review_edits(
     overlaps = segments_with_voiced_overlap(segments)
 
     cp["segments"] = segments
-    remaining = list_timing_review_segments(segments, absolute_max_rate=absolute_max)
+    remaining = list_timing_review_segments(
+        segments,
+        absolute_max_rate=absolute_max,
+        timing_stage=step,
+    )
     release_eligible = len(remaining) == 0 and len(overlaps) == 0
     cp["timing_review_segments"] = remaining
     cp["release_eligible"] = release_eligible

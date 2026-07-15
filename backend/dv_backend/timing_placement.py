@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 PREFERRED_DRIFT_SEC = 0.35
@@ -9,6 +10,124 @@ SOFT_MAX_DRIFT_SEC = 0.80
 HARD_MAX_DRIFT_SEC = 1.20
 BOUNDARY_MARGIN_SEC = 0.025
 HARD_ANCHOR_SILENCE_SEC = 1.5
+
+
+def _finite_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _duration_field(segment: dict[str, Any], key: str) -> float | None:
+    raw = segment.get(key)
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def segment_repaired_audio_duration(segment: dict[str, Any]) -> float | None:
+    """Audible clip length for playback interval math (no placement minimum)."""
+    if bool(segment.get("no_speech")):
+        return 0.0
+    repaired = _duration_field(segment, "repaired_duration")
+    if repaired is not None:
+        return max(0.0, repaired)
+    tts = _duration_field(segment, "tts_duration")
+    if tts is not None and tts > 0:
+        return tts
+    return None
+
+
+def segment_effective_start(segment: dict[str, Any]) -> float:
+    placement = _finite_float(segment.get("placement_start"))
+    if placement is not None and placement >= 0:
+        return placement
+    start = _finite_float(segment.get("start"))
+    if start is not None and start >= 0:
+        return start
+    return 0.0
+
+
+def segment_effective_end(segment: dict[str, Any]) -> float:
+    effective_start = segment_effective_start(segment)
+    placement_end = _finite_float(segment.get("placement_end"))
+    if placement_end is not None and placement_end >= effective_start:
+        return placement_end
+
+    repaired = segment_repaired_audio_duration(segment)
+    if repaired is not None:
+        return effective_start + repaired
+
+    start = _finite_float(segment.get("start"))
+    end = _finite_float(segment.get("end"))
+    if start is not None and end is not None and end >= start:
+        return effective_start + max(0.0, end - start)
+
+    original = _duration_field(segment, "original_duration")
+    if original is not None and original > 0:
+        return effective_start + original
+
+    budget = _finite_float(segment.get("duration_budget"))
+    if budget is not None and budget > 0:
+        return effective_start + budget
+    return effective_start + 0.05
+
+
+def segment_playback_interval(segment: dict[str, Any]) -> tuple[float, float]:
+    start = segment_effective_start(segment)
+    end = max(start, segment_effective_end(segment))
+    return start, end
+
+
+def segment_timing_diagnostics(
+    segment: dict[str, Any],
+    *,
+    timing_stage: str | None = None,
+) -> dict[str, Any]:
+    source_start = _finite_float(segment.get("start"))
+    source_end = _finite_float(segment.get("end"))
+    placement_start = _finite_float(segment.get("placement_start"))
+    placement_end = _finite_float(segment.get("placement_end"))
+    effective_start, effective_end = segment_playback_interval(segment)
+    payload: dict[str, Any] = {
+        "source_start": source_start,
+        "source_end": source_end,
+        "placement_start": placement_start,
+        "placement_end": placement_end,
+        "effective_start": round(effective_start, 3),
+        "effective_end": round(effective_end, 3),
+    }
+    if timing_stage:
+        payload["timing_stage"] = timing_stage
+    return payload
+
+
+def annotate_segment_timing_diagnostics(
+    segment: dict[str, Any],
+    *,
+    timing_stage: str | None = None,
+) -> dict[str, Any]:
+    segment.update(segment_timing_diagnostics(segment, timing_stage=timing_stage))
+    return segment
+
+
+def annotate_segments_timing_diagnostics(
+    segments: list[dict[str, Any]],
+    *,
+    timing_stage: str | None = None,
+) -> list[dict[str, Any]]:
+    for segment in segments:
+        annotate_segment_timing_diagnostics(segment, timing_stage=timing_stage)
+    return segments
 
 
 def compute_placement_starts(
@@ -40,16 +159,6 @@ def compute_placement_starts(
         segment_end = float(segment.get("end", original_start) or original_start)
         previous_end = max(previous_end, segment_end, placement + repaired_duration)
     return ordered
-
-
-def _duration_field(segment: dict[str, Any], key: str) -> float | None:
-    raw = segment.get(key)
-    if raw is None or raw == "":
-        return None
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return None
 
 
 def _clip_duration(segment: dict[str, Any]) -> float:
@@ -93,9 +202,12 @@ def schedule_soft_placements(
     prefs = [
         float(
             segment.get("preferred_placement_start")
-            or segment.get("placement_start")
-            or segment.get("start")
-            or 0.0
+            if segment.get("preferred_placement_start") is not None
+            else (
+                segment.get("placement_start")
+                if segment.get("placement_start") is not None
+                else (segment.get("start") if segment.get("start") is not None else 0.0)
+            )
         )
         for segment in ordered
     ]
@@ -161,11 +273,6 @@ def schedule_soft_placements(
         else:
             segment["timing_status"] = "OK"
 
-        # Advance cursor only by the allocated (fit) horizon when overflowing, so drift
-        # cannot accumulate forever while speed/compact still pending.
-        # Zero-overlap invariant: next start is always after previous audible end.
-        # Duration fitting (speed/compact/cluster) must happen before mix; do not
-        # fabricate overlap by advancing only the allocation window.
         cursor = start + duration + boundary_margin_sec
 
         previous_original_end = max(
@@ -190,8 +297,8 @@ def enforce_zero_overlap_placements(
     for segment in ordered:
         preferred = float(
             segment.get("preferred_placement_start")
-            or segment.get("start")
-            or 0.0
+            if segment.get("preferred_placement_start") is not None
+            else (segment.get("start") if segment.get("start") is not None else 0.0)
         )
         start = max(preferred, cursor)
         drift = start - preferred
@@ -217,11 +324,11 @@ def segments_with_voiced_overlap(
     fragments cannot create false positives via stale tts_duration.
     """
     voiced = [item for item in segments if _clip_duration(item) > 0.02]
-    ordered = sorted(voiced, key=lambda item: float(item.get("placement_start") or 0.0))
+    ordered = sorted(voiced, key=lambda item: segment_effective_start(item))
     overlaps: list[tuple[int, int, float]] = []
     for left, right in zip(ordered, ordered[1:], strict=False):
-        left_end = float(left.get("placement_start") or 0.0) + _clip_duration(left)
-        right_start = float(right.get("placement_start") or 0.0)
+        left_end = segment_effective_start(left) + _clip_duration(left)
+        right_start = segment_effective_start(right)
         overlap = left_end + margin_sec - right_start
         if overlap > 0.02:
             overlaps.append(

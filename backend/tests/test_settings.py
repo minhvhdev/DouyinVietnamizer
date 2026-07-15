@@ -297,6 +297,31 @@ def test_fresh_settings_enable_omnivoice_chunk_flags(tmp_path: Path) -> None:
     assert raw[SETTINGS_DEFAULTS_VERSION_KEY] == SETTINGS_DEFAULTS_VERSION
 
 
+def test_omnivoice_chunk_ui_settings_clamp_and_target_leq_max(tmp_path: Path) -> None:
+    settings = service(tmp_path)
+    updated = settings.update(
+        {
+            "omnivoice_external_chunking_enabled": False,
+            "omnivoice_chunk_max_chars": 999,
+            "omnivoice_chunk_target_chars": 500,
+            "omnivoice_chunk_retry_on_fidelity_failure": False,
+        }
+    )
+    assert updated["omnivoice_external_chunking_enabled"] is False
+    assert updated["omnivoice_chunk_retry_on_fidelity_failure"] is False
+    assert updated["omnivoice_chunk_max_chars"] == 400
+    assert updated["omnivoice_chunk_target_chars"] == 360
+
+    updated2 = settings.update(
+        {
+            "omnivoice_chunk_max_chars": 160,
+            "omnivoice_chunk_target_chars": 200,
+        }
+    )
+    assert updated2["omnivoice_chunk_max_chars"] == 160
+    assert updated2["omnivoice_chunk_target_chars"] == 160
+
+
 def test_legacy_untouched_false_omnivoice_flags_migrate_to_true(tmp_path: Path) -> None:
     from dv_backend.settings import SETTINGS_DEFAULTS_VERSION, SETTINGS_DEFAULTS_VERSION_KEY
 

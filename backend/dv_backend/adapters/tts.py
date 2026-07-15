@@ -395,29 +395,50 @@ class TtsSession:
         return not bool(self.settings.get("tts_session_reuse_enabled", True))
 
     def _anchor_transcript(self) -> str | None:
+        anchor, source = self._anchor_transcript_meta()
+        if anchor is not None:
+            try:
+                from ..omnivoice_diagnostics import diagnostics_enabled, file_content_hash, log_event, short_hash
+
+                if diagnostics_enabled():
+                    ref_audio = str(self.settings.get("omnivoice_ref_audio") or "").strip()
+                    log_event(
+                        "tts_session_anchor_resolve",
+                        {
+                            "ref_audio_hash": file_content_hash(ref_audio),
+                            "anchor_text_hash": short_hash(anchor),
+                            "anchor_text_length": len(anchor),
+                            "anchor_source": source,
+                        },
+                    )
+            except Exception:
+                pass
+        return anchor
+
+    def _anchor_transcript_meta(self) -> tuple[str | None, str]:
         ref_audio = str(self.settings.get("omnivoice_ref_audio") or "").strip()
         if not ref_audio:
-            return None
+            return None, "none"
         if self.backend == "omnivoice":
             manual = str(self.settings.get("omnivoice_ref_text") or "").strip()
             if manual:
                 if len(manual) > 400:
-                    return manual[:400].rstrip()
-                return manual
+                    return manual[:400].rstrip(), "explicit_omnivoice_ref_text_truncated"
+                return manual, "explicit_omnivoice_ref_text"
         sidecar = Path(ref_audio).with_suffix(".txt")
         if not sidecar.is_file():
-            return None
+            return None, "missing_sidecar"
         try:
             transcript = sidecar.read_text(encoding="utf-8").strip()
         except OSError:
-            return None
+            return None, "sidecar_read_error"
         if not transcript:
-            return None
+            return None, "empty_sidecar"
         # Long anchor transcripts crash or stall GGUF ultimate mode; keep a
         # short prefix that still conditions timbre without blowing the graph.
         if len(transcript) > 400:
-            return transcript[:400].rstrip()
-        return transcript
+            return transcript[:400].rstrip(), "sidecar_truncated"
+        return transcript, "sidecar"
 
     def synthesize(self, text: str, output_path: Path, *, segment: dict | None = None) -> None:
         segment = segment or {}

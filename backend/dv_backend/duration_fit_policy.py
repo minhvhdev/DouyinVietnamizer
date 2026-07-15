@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from .duration_safety import StretchDecision, classify_stretch
 from .timing_profile import timing_profile_from_segment
 from .utterance_policy import classify_utterance_length, short_utterance_abs_tolerance
+
+DurationRepairAction = Literal[
+    "accept",
+    "rewrite_shorten",
+    "rewrite_lengthen",
+    "tempo",
+    "pad",
+    "trim_silence",
+    "unresolved",
+]
 
 
 @dataclass(frozen=True)
@@ -183,4 +193,136 @@ def duration_fit_decision_trace(
         "hard_max": round(hard_max, 3),
         "tolerance_ms": tolerance_ms,
         "action": action,
+    }
+
+
+def _placement_shift_sec(segment: dict[str, Any] | None) -> float:
+    if not segment:
+        return 0.0
+    try:
+        drift = float(segment.get("placement_drift_sec") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return abs(drift)
+
+
+def decide_duration_repair(
+    *,
+    speech_duration: float,
+    timing_profile: dict[str, float],
+    segment: dict[str, Any] | None = None,
+    policy: DurationFitPolicy | None = None,
+    settings: dict[str, Any] | None = None,
+    rewrite_attempts: int = 0,
+    max_rewrite_attempts: int = 1,
+    exact_timing_enabled: bool = False,
+    allow_spoken_text_mutation: bool = False,
+    tolerance_sec: float = 0.05,
+) -> dict[str, Any]:
+    """Pure repair decision ladder — does not mutate segment or touch files."""
+    policy = policy or policy_from_settings(settings or {})
+    settings = settings or {}
+    profile = timing_profile
+    if segment is not None and not profile.get("speech_target_duration"):
+        profile = timing_profile_from_segment(segment)
+
+    fit = classify_duration_fit(speech_duration, profile, policy=policy, segment=segment)
+    target = float(profile.get("speech_target_duration") or 0.0)
+    hard_max = float(profile.get("hard_max_duration") or target)
+    soft_min = float(profile.get("soft_min_duration") or 0.0)
+    fit_max = max(target, hard_max)
+    placement_shift_sec = _placement_shift_sec(segment)
+    placement_shifted = placement_shift_sec > 0.02
+    duration_miss = not acceptable_duration_fit(fit)
+
+    base = {
+        "classification": fit,
+        "speech_duration": round(float(speech_duration), 3),
+        "speech_target_duration": round(target, 3),
+        "hard_max_duration": round(hard_max, 3),
+        "fit_max_duration": round(fit_max, 3),
+        "duration_miss": duration_miss,
+        "placement_shift_sec": round(placement_shift_sec, 3) if placement_shifted else 0.0,
+        "placement_shift_only": placement_shifted and not duration_miss,
+        "rewrite_attempts": rewrite_attempts,
+        "max_rewrite_attempts": max_rewrite_attempts,
+    }
+
+    if acceptable_duration_fit(fit):
+        return {
+            **base,
+            "action": "accept",
+            "reason": "placement_shift_only" if placement_shifted else "within_acceptable_window",
+            "tempo_factor": None,
+        }
+
+    can_rewrite = (
+        allow_spoken_text_mutation
+        and rewrite_attempts < max_rewrite_attempts
+        and bool(settings.get("timing_max_llm_rewrite_attempts", 1))
+    )
+
+    if fit == "too_long":
+        if can_rewrite and should_shorten_for_timing(speech_duration, segment or {}, policy=policy):
+            return {
+                **base,
+                "action": "rewrite_shorten",
+                "reason": "speech_over_hard_max",
+                "tempo_factor": None,
+            }
+        if exact_timing_enabled and fit_max > 0 and speech_duration > fit_max + tolerance_sec:
+            raw_factor = tempo_factor_for_duration(speech_duration, fit_max)
+            automatic_tempo, tempo_risk = clamp_automatic_tempo(
+                raw_factor,
+                policy=policy,
+                user_global_speed=float(settings.get("tts_global_speed", 1.0) or 1.0),
+            )
+            max_stretch = float(settings.get("exact_timing_max_stretch", 1.2) or 1.2)
+            max_stretch = max(1.0, min(1.2, max_stretch))
+            factor = min(max_stretch, max(1.0, automatic_tempo))
+            return {
+                **base,
+                "action": "tempo",
+                "reason": "too_long_after_max_tempo" if tempo_risk == "danger" else "tempo_within_policy",
+                "tempo_factor": round(factor, 3),
+            }
+        return {
+            **base,
+            "action": "unresolved",
+            "reason": "too_long_after_max_tempo" if not can_rewrite else "rewrite_exhausted",
+            "tempo_factor": None,
+        }
+
+    if fit == "too_short":
+        lengthen_gap = float(settings.get("short_tts_lengthen_min_gap_sec", 1.5) or 1.5)
+        gap = target - speech_duration if target > 0 else 0.0
+        if can_rewrite and gap > lengthen_gap and should_lengthen_for_timing(
+            speech_duration, segment or {}, policy=policy
+        ):
+            return {
+                **base,
+                "action": "rewrite_lengthen",
+                "reason": "speech_below_soft_min",
+                "tempo_factor": None,
+            }
+        if exact_timing_enabled and target > 0 and speech_duration < target - tolerance_sec:
+            return {
+                **base,
+                "action": "pad",
+                "reason": "tail_silence_pad",
+                "tempo_factor": None,
+                "pad_target_duration": round(max(0.05, target), 3),
+            }
+        return {
+            **base,
+            "action": "unresolved",
+            "reason": "too_short_unresolved",
+            "tempo_factor": None,
+        }
+
+    return {
+        **base,
+        "action": "unresolved",
+        "reason": f"unknown_fit:{fit}",
+        "tempo_factor": None,
     }

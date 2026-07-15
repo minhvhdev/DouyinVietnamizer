@@ -77,6 +77,20 @@ const baseApi: JobsApi = {
   redubJob: vi.fn().mockResolvedValue({ status: "queued", job }),
   getJobFiles: vi.fn().mockResolvedValue([]),
   getJobFolder: vi.fn().mockResolvedValue({ path: "C:/data/jobs/job-1", exists: true }),
+  getTimingReview: vi.fn().mockResolvedValue({
+    job_id: "job-1",
+    source_step: "align_final_dub",
+    segments: [],
+    remaining_count: 0,
+    release_eligible: true,
+    max_speed: 1.25,
+  }),
+  submitTimingReview: vi.fn().mockResolvedValue({
+    status: "saved",
+    edited_indices: [],
+    remaining_count: 0,
+    overlap_count: 0,
+  }),
   detectHardware: vi.fn().mockResolvedValue({ cuda_supported: true, vulkan_supported: true, avx2_supported: true, espeak_installed: true, recommendation: "gpu_cuda" }),
   bootstrapVendor: vi.fn().mockResolvedValue({ status: "started" }),
   bootstrapProgress: vi.fn().mockResolvedValue({ status: "idle", current_task: "", download_percent: 0, download_speed_kb: 0, downloaded_bytes: 0, total_bytes: 0, error_message: "", logs: [] })

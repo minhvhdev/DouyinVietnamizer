@@ -13,7 +13,9 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import wave
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .config import AppConfig
 from .database import Database
@@ -37,11 +39,18 @@ from .gpu_manager import global_gpu_manager
 from .hardware import resolve_inference_device
 from .audio_probe import get_audio_duration, get_video_stream_duration
 from .duration_safety import classify_stretch, tail_has_speech
+from .duration_repair_executor import (
+    DurationRepairExecutionResult,
+    RewriteOutcome,
+    attach_repair_execution_to_segment,
+    execute_segment_duration_repair,
+)
 from .duration_fit_policy import (
     acceptable_duration_fit,
     classify_duration_fit,
     classify_stretch_with_policy,
     clamp_automatic_tempo,
+    decide_duration_repair,
     policy_from_settings,
     should_lengthen_for_timing,
     should_shorten_for_timing,
@@ -104,7 +113,6 @@ from .telemetry import TelemetrySink
 from .dubbing_languages import default_speaking_rate_wps, dub_language_from_settings, dub_language_label
 from .translation_duration import annotate_translation_duration, build_translation_timing_guidance, duration_prompt_suffix
 from .adapters.subtitles import (
-    build_subtitle_cues,
     ffmpeg_subtitles_filter,
     probe_video_dimensions,
     subtitles_filter_available,
@@ -113,9 +121,13 @@ from .adapters.subtitles import (
 from .final_dub_alignment import (
     align_job_segments_final_dub,
     compute_subtitle_qc_metrics,
-    refresh_all_segment_dub_word_timestamps,
     segment_has_usable_dub_words,
     summarize_alignment_results,
+)
+from .subtitle_timing import (
+    load_canonical_subtitle_track,
+    resolve_subtitle_track,
+    write_canonical_subtitle_track,
 )
 from .adapters.gemini import (
     GeminiKeyPool,
@@ -1786,20 +1798,44 @@ def _default_tts_voice(settings: dict) -> str:
 
 
 def _anchor_transcript_for(settings: dict) -> str | None:
+    anchor, source = _anchor_transcript_meta(settings)
+    if anchor is not None:
+        try:
+            from .omnivoice_diagnostics import diagnostics_enabled, file_content_hash, log_event, short_hash
+
+            if diagnostics_enabled():
+                ref_audio = str(settings.get("omnivoice_ref_audio") or "").strip()
+                log_event(
+                    "dubbing_anchor_resolve",
+                    {
+                        "ref_audio_hash": file_content_hash(ref_audio),
+                        "anchor_text_hash": short_hash(anchor),
+                        "anchor_text_length": len(anchor),
+                        "anchor_source": source,
+                    },
+                )
+        except Exception:
+            pass
+    return anchor
+
+
+def _anchor_transcript_meta(settings: dict) -> tuple[str | None, str]:
     manual = str(settings.get("omnivoice_ref_text") or "").strip()
     if manual:
-        return manual
+        return manual, "explicit_omnivoice_ref_text"
     ref_audio = str(settings.get("omnivoice_ref_audio") or "").strip()
     if not ref_audio:
-        return None
+        return None, "none"
     sidecar = Path(ref_audio).with_suffix(".txt")
     if not sidecar.is_file():
-        return None
+        return None, "missing_sidecar"
     try:
         transcript = sidecar.read_text(encoding="utf-8").strip()
     except OSError:
-        return None
-    return transcript or None
+        return None, "sidecar_read_error"
+    if transcript:
+        return transcript, "sidecar"
+    return None, "empty_sidecar"
 
 
 def _synthesize_segment_tts(
@@ -2664,6 +2700,236 @@ def _apply_soft_placement_speed_and_compact(
 
 
 
+@dataclass
+class _SegmentDurationRepairOps:
+    segment: dict
+    index: int
+    segment_budget: Any
+    settings: dict
+    profile: dict
+    fit_policy: Any
+    fit_max: float
+    repair_target: float
+    tolerance_sec: float
+    max_stretch: float
+    global_speed: float
+    orig_file: Path
+    tts_dir: Path
+    ffmpeg_path: Path
+    job_id: str
+    runner: Any
+    session: Any
+    database: Any
+    dub_lang_label: str
+    rewrite_prefix: str
+
+    def probe_wav_duration(self, path: Path) -> float | None:
+        if not path.is_file():
+            return None
+        try:
+            return float(get_wav_duration(path))
+        except Exception:
+            return None
+
+    def probe_speech_duration(self, path: Path) -> float:
+        return _segment_speech_duration(self.segment, path if path.is_file() else None)
+
+    def apply_rewrite_shorten(self, *, input_path: Path) -> RewriteOutcome:
+        if not self.segment_budget.can_rewrite() or not self.segment_budget.can_synthesize():
+            return RewriteOutcome(success=False, reason="rewrite_budget_exhausted")
+        current_speech = self.probe_speech_duration(input_path)
+        try:
+            new_translation, target_words = shorten_translation_for_timing(
+                self.settings,
+                self.database,
+                text=str(self.segment.get("translation") or ""),
+                budget=self.fit_max,
+                current_duration=current_speech,
+                estimate_word_count=_estimate_word_count,
+                language_label=self.dub_lang_label,
+            )
+        except Exception:
+            return RewriteOutcome(success=False, reason=f"{self.rewrite_prefix}_shorten_failed")
+        if not new_translation or new_translation == self.segment.get("translation"):
+            return RewriteOutcome(success=False, no_improvement=True, reason="rewrite_same_text")
+        raw_temp = self.tts_dir / f"tts_temp_raw_{self.index}.wav"
+        temp_wav = self.tts_dir / f"tts_temp_{self.index}.wav"
+        raw_temp.unlink(missing_ok=True)
+        temp_wav.unlink(missing_ok=True)
+        try:
+            self.session.synthesize(new_translation, raw_temp, segment=self.segment)
+            self.segment_budget.record_repair_resynth()
+            _convert_tts_to_final_wav(self.ffmpeg_path, raw_temp, temp_wav, self.job_id, self.runner)
+        except Exception:
+            return RewriteOutcome(success=False, reason=f"{self.rewrite_prefix}_shorten_failed")
+        finally:
+            raw_temp.unlink(missing_ok=True)
+        new_speech = self.probe_speech_duration(temp_wav)
+        method = (
+            f"{self.rewrite_prefix}_shorten_to_{target_words}_words"
+            if target_words > 0
+            else f"{self.rewrite_prefix}_shorten"
+        )
+        if new_speech >= current_speech:
+            temp_wav.unlink(missing_ok=True)
+            return RewriteOutcome(success=False, no_improvement=True, reason="rewrite_no_improvement")
+        return RewriteOutcome(
+            success=True,
+            output_path=temp_wav,
+            new_speech_duration=new_speech,
+            new_wav_duration=self.probe_wav_duration(temp_wav),
+            new_translation=new_translation,
+            method_label=method,
+        )
+
+    def apply_rewrite_lengthen(self, *, input_path: Path) -> RewriteOutcome:
+        if not self.segment_budget.can_rewrite() or not self.segment_budget.can_synthesize():
+            return RewriteOutcome(success=False, reason="rewrite_budget_exhausted")
+        current_speech = self.probe_speech_duration(input_path)
+        lengthen_target = float(self.profile.get("speech_target_duration") or self.repair_target)
+        lengthen_gap_threshold = _lengthen_min_gap_sec(self.settings)
+        gap = lengthen_target - current_speech
+        if gap <= lengthen_gap_threshold:
+            return RewriteOutcome(success=False, reason="lengthen_gap_below_threshold")
+        try:
+            new_translation, target_words = lengthen_translation_for_timing(
+                self.settings,
+                self.database,
+                text=str(self.segment.get("translation") or ""),
+                budget=lengthen_target,
+                current_duration=current_speech,
+                min_gap_sec=lengthen_gap_threshold,
+                max_ratio=_lengthen_max_ratio(self.settings),
+                estimate_word_count=_estimate_word_count,
+                language_label=self.dub_lang_label,
+            )
+        except Exception:
+            return RewriteOutcome(success=False, reason=f"{self.rewrite_prefix}_lengthen_failed")
+        if not new_translation or new_translation == self.segment.get("translation"):
+            return RewriteOutcome(success=False, no_improvement=True, reason="rewrite_same_text")
+        raw_temp = self.tts_dir / f"tts_temp_raw_{self.index}.wav"
+        temp_wav = self.tts_dir / f"tts_temp_{self.index}.wav"
+        raw_temp.unlink(missing_ok=True)
+        temp_wav.unlink(missing_ok=True)
+        try:
+            self.session.synthesize(new_translation, raw_temp, segment=self.segment)
+            self.segment_budget.record_repair_resynth()
+            _convert_tts_to_final_wav(self.ffmpeg_path, raw_temp, temp_wav, self.job_id, self.runner)
+        except Exception:
+            return RewriteOutcome(success=False, reason=f"{self.rewrite_prefix}_lengthen_failed")
+        finally:
+            raw_temp.unlink(missing_ok=True)
+        new_speech = self.probe_speech_duration(temp_wav)
+        method = (
+            f"{self.rewrite_prefix}_lengthen_to_{target_words}_words"
+            if target_words > 0
+            else f"{self.rewrite_prefix}_lengthen"
+        )
+        if new_speech <= current_speech:
+            temp_wav.unlink(missing_ok=True)
+            return RewriteOutcome(success=False, no_improvement=True, reason="rewrite_no_improvement")
+        return RewriteOutcome(
+            success=True,
+            output_path=temp_wav,
+            new_speech_duration=new_speech,
+            new_wav_duration=self.probe_wav_duration(temp_wav),
+            new_translation=new_translation,
+            method_label=method,
+        )
+
+    def apply_tempo(self, *, input_path: Path, factor: float, output_path: Path) -> bool:
+        output_path.unlink(missing_ok=True)
+        try:
+            _run_ffmpeg_audio_filter(
+                self.ffmpeg_path,
+                input_path,
+                output_path,
+                filter_expr=_build_atempo_chain(factor),
+                job_id=self.job_id,
+                runner=self.runner,
+            )
+        except Exception:
+            return False
+        if output_path.is_file():
+            self.segment["automatic_tempo_factor"] = round(factor, 3)
+            self.segment["effective_speed"] = round(
+                self.global_speed * round(factor, 3), 3
+            )
+            return True
+        return False
+
+    def apply_pad(
+        self, *, input_path: Path, target_duration: float, output_path: Path, current_duration: float
+    ) -> bool:
+        if current_duration >= target_duration - self.tolerance_sec:
+            return False
+        output_path.unlink(missing_ok=True)
+        try:
+            _run_ffmpeg_audio_filter(
+                self.ffmpeg_path,
+                input_path,
+                output_path,
+                filter_expr=_tail_silence_pad_filter(current_duration, target_duration),
+                job_id=self.job_id,
+                runner=self.runner,
+            )
+        except Exception:
+            return False
+        return output_path.is_file()
+
+    def apply_outer_silence_trim(
+        self,
+        *,
+        input_path: Path,
+        target_duration: float,
+        output_path: Path,
+        current_duration: float,
+        speech_duration: float,
+    ) -> bool:
+        speech = speech_duration
+        current = current_duration
+        target_dur = max(0.05, float(target_duration))
+        trim_ratio, trim_cap_ms = _duration_trim_caps(self.settings)
+        trim_amount_ms = round(max(0.0, current - target_dur) * 1000)
+        speech_headroom_ms = round(max(0.0, target_dur - speech) * 1000)
+        trailing = max(0.0, current - speech)
+        if speech_headroom_ms < 0 or trim_amount_ms > trim_cap_ms + round(trailing * 1000):
+            return False
+        output_path.unlink(missing_ok=True)
+        exact_filter = (
+            f"atrim=0:{speech + 0.05:.3f},"
+            f"apad=pad_dur={target_dur + 0.2:.3f},atrim=0:{target_dur:.3f}"
+        )
+        try:
+            _run_ffmpeg_audio_filter(
+                self.ffmpeg_path,
+                input_path,
+                output_path,
+                filter_expr=exact_filter,
+                job_id=self.job_id,
+                runner=self.runner,
+            )
+        except Exception:
+            return False
+        if output_path.is_file():
+            self.segment["outer_silence_trimmed_ms"] = round(trailing * 1000)
+            return True
+        return False
+
+    def apply_global_speed(self, *, input_path: Path) -> tuple[Path, float]:
+        path, duration = _apply_global_speed_if_needed(
+            ffmpeg_path=self.ffmpeg_path,
+            input_path=input_path,
+            output_dir=self.tts_dir,
+            index=self.index,
+            global_speed=self.global_speed,
+            job_id=self.job_id,
+            runner=self.runner,
+        )
+        self.segment["effective_speed"] = round(self.global_speed * float(self.segment.get("automatic_tempo_factor") or 1.0), 3)
+        return path, duration
+
+
 def duration_repair_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
     tts_cp = load_checkpoint(config.data_dir, job_id, "tts")
     if not tts_cp:
@@ -2715,360 +2981,77 @@ def duration_repair_step(job_id: str, config: AppConfig, database: Database, run
             repaired_file = tts_dir / f"tts_repaired_{idx}.wav"
             repaired_file.unlink(missing_ok=True)
 
-            repair_attempts = 0
-            re_synthesis_count = 0
-            llm_shorten_ms = 0
-            llm_lengthen_ms = 0
-            re_synthesis_ms = 0
-            atempo_ms = 0
-            trim_ms = 0
-            fit_methods: list[str] = []
-            quality_warning: str | None = None
-            duration_repair_risk = "none"
-            time_stretch_factor = 1.0
-            tail_speech_detected = False
-
-            speech_fit = classify_duration_fit(speech_dur, profile, policy=fit_policy)
-            if not exact_enabled and acceptable_duration_fit(speech_fit):
-                input_for_fit = orig_file
-                if abs(global_speed - 1.0) > 0.001:
-                    speed_started = time.perf_counter()
-                    input_for_fit, repaired_duration_value = _apply_global_speed_if_needed(
-                        ffmpeg_path=ffmpeg_path,
-                        input_path=input_for_fit,
-                        output_dir=tts_dir,
-                        index=idx,
-                        global_speed=global_speed,
-                        job_id=job_id,
-                        runner=runner,
-                    )
-                    atempo_ms += round((time.perf_counter() - speed_started) * 1000)
-                    fit_methods.append(f"global_speed_{round(global_speed, 2)}x")
-                else:
-                    repaired_duration_value = tts_dur
-                shutil.copy(input_for_fit, repaired_file)
-                s["repaired_method"] = "+".join(fit_methods) if fit_methods else "none"
-                s["repaired_duration"] = round(repaired_duration_value, 2)
-                s["duration_repair_risk"] = duration_repair_risk
-                s["repair_severity"] = "none"
-                s["needs_review"] = False
-                s["final_timing_error_ms"] = round((repaired_duration_value - budget) * 1000) if budget > 0 else 0
-                s["repair_attempts"] = repair_attempts
-                s["tail_speech_detected"] = False
-                s["time_stretch_factor"] = 1.0
-                s["final_timing_error_ms"] = round((speech_dur - profile.get("speech_target_duration", budget)) * 1000)
-                s["accepted_without_repair"] = True
-                continue
-
-            input_for_fit = orig_file
-            current_wav_duration = get_wav_duration(input_for_fit) if input_for_fit.is_file() else tts_dur
-            current_speech_duration = speech_dur or current_wav_duration
-            current_duration = current_wav_duration
             repair_target = float(profile.get("speech_target_duration") or _repair_target_duration(s, budget, tolerance_sec))
             hard_max = float(profile.get("hard_max_duration") or repair_target)
-            # Gap-based fit (VẤN ĐỀ 1): the dub only needs to fit inside the free window up to
-            # the next segment (fit_max = hard_max). Compress toward fit_max, never toward the
-            # shorter original speech duration, so full translated content is preserved whenever
-            # there is real free space before the next segment.
             fit_max = max(repair_target, hard_max)
             s["repair_target_duration"] = round(repair_target, 2) if repair_target > 0 else 0.0
             s["fit_max_duration"] = round(fit_max, 2) if fit_max > 0 else 0.0
-            needs_review = False
-            if fit_max > 0 and current_speech_duration > fit_max + tolerance_sec:
-                _scale_attempt_budget_for_overflow(segment_budget, current_speech_duration / fit_max)
-            if (
-                bool(settings.get("allow_spoken_text_mutation", False))
-                and fit_max > 0
-                and should_shorten_for_timing(current_speech_duration, s, policy=fit_policy)
-            ):
-                try:
-                    llm_started = time.perf_counter()
-                    new_translation, target_words = shorten_translation_for_timing(
-                        settings,
-                        database,
-                        text=str(s.get("translation") or ""),
-                        budget=fit_max,
-                        current_duration=current_speech_duration,
-                        estimate_word_count=_estimate_word_count,
-                        language_label=dub_lang_label,
-                    )
-                    llm_shorten_ms = round((time.perf_counter() - llm_started) * 1000)
-                    if new_translation and new_translation != s.get("translation") and segment_budget.can_synthesize():
-                        raw_temp = tts_dir / f"tts_temp_raw_{idx}.wav"
-                        temp_wav = tts_dir / f"tts_temp_{idx}.wav"
-                        raw_temp.unlink(missing_ok=True)
-                        temp_wav.unlink(missing_ok=True)
-                        synth_started = time.perf_counter()
-                        session.synthesize(new_translation, raw_temp, segment=s)
-                        segment_budget.record_repair_resynth()
-                        _convert_tts_to_final_wav(ffmpeg_path, raw_temp, temp_wav, job_id, runner)
-                        re_synthesis_ms = round((time.perf_counter() - synth_started) * 1000)
-                        raw_temp.unlink(missing_ok=True)
-                        new_dur = get_wav_duration(temp_wav)
-                        new_speech = _segment_speech_duration(s, temp_wav)
-                        repair_attempts += 1
-                        re_synthesis_count += 1
-                        if new_speech < current_speech_duration:
-                            input_for_fit = temp_wav
-                            current_duration = new_dur
-                            current_speech_duration = new_speech
-                            s["translation"] = new_translation
-                            fit_methods.append(
-                                f"{rewrite_prefix}_shorten_to_{target_words}_words"
-                                if target_words > 0
-                                else f"{rewrite_prefix}_shorten"
-                            )
-                        else:
-                            temp_wav.unlink(missing_ok=True)
-                except Exception:
-                    quality_warning = f"{rewrite_prefix}_shorten_failed"
 
-            def _maybe_apply_global_speed() -> None:
-                nonlocal input_for_fit, current_duration, current_speech_duration, atempo_ms
-                global_speed_method = f"global_speed_{round(global_speed, 2)}x"
-                if abs(global_speed - 1.0) <= 0.001 or global_speed_method in fit_methods:
-                    return
-                speed_started = time.perf_counter()
-                input_for_fit, current_duration = _apply_global_speed_if_needed(
-                    ffmpeg_path=ffmpeg_path,
-                    input_path=input_for_fit,
-                    output_dir=tts_dir,
-                    index=idx,
-                    global_speed=global_speed,
-                    job_id=job_id,
-                    runner=runner,
-                )
-                atempo_ms += round((time.perf_counter() - speed_started) * 1000)
-                fit_methods.append(global_speed_method)
-                current_speech_duration = _segment_speech_duration(s, input_for_fit)
+            speech_dur = _segment_speech_duration(s, orig_file if orig_file.is_file() else None)
+            if fit_max > 0 and speech_dur > fit_max + tolerance_sec:
+                _scale_attempt_budget_for_overflow(segment_budget, speech_dur / fit_max)
 
-            if exact_enabled and fit_max > 0 and current_speech_duration > fit_max + tolerance_sec:
-                _maybe_apply_global_speed()
-                raw_factor = tempo_factor_for_duration(current_speech_duration, fit_max)
-                automatic_tempo, tempo_risk = clamp_automatic_tempo(
-                    raw_factor,
-                    policy=fit_policy,
-                    user_global_speed=global_speed,
-                )
-                speed_factor = min(max_stretch, max(1.0, automatic_tempo))
-                stretch_decision = classify_stretch_with_policy(
-                    speed_factor,
-                    settings=settings,
-                    explicit_allow_danger=True,
-                )
-                duration_repair_risk = stretch_decision.risk if stretch_decision.risk != "normal" else tempo_risk
-                if stretch_decision.warning:
-                    quality_warning = stretch_decision.warning
-                stretched_file = tts_dir / f"tts_stretch_{idx}.wav"
-                stretched_file.unlink(missing_ok=True)
-                atempo_started = time.perf_counter()
-                _run_ffmpeg_audio_filter(
-                    ffmpeg_path,
-                    input_for_fit,
-                    stretched_file,
-                    filter_expr=_build_atempo_chain(speed_factor),
-                    job_id=job_id,
-                    runner=runner,
-                )
-                atempo_ms = round((time.perf_counter() - atempo_started) * 1000)
-                input_for_fit = stretched_file
-                current_duration = get_wav_duration(stretched_file)
-                current_speech_duration = _segment_speech_duration(s, stretched_file)
-                time_stretch_factor = round(speed_factor, 3)
-                s["automatic_tempo_factor"] = time_stretch_factor
-                s["effective_speed"] = round(global_speed * time_stretch_factor, 3)
-                fit_methods.append(f"time_stretch_{round(speed_factor, 2)}x")
-                repair_attempts += 1
-
-            if exact_enabled and fit_max > 0:
-                target_dur = max(0.05, float(fit_max))
-                lengthen_target = max(0.05, float(repair_target))
-                if current_speech_duration > fit_max + tolerance_sec:
-                    # Speech itself still overflows the free window after shorten + stretch.
-                    # Never trim into speech (2.4 hard cap) — flag the segment for human review
-                    # instead of silently cutting content.
-                    _maybe_apply_global_speed()
-                    tail_speech_detected = _wav_tail_has_speech(input_for_fit)
-                    quality_warning = quality_warning or "speech_over_window_needs_review"
-                    duration_repair_risk = "danger"
-                    needs_review = True
-                    s["speech_trimmed"] = False
-                elif current_duration > fit_max + tolerance_sec and (
-                    current_duration - current_speech_duration
-                ) > tolerance_sec:
-                    # Only trailing silence overshoots the window: shrink the silence down to the
-                    # window boundary (fit_max), keeping the full speech tail intact.
-                    _maybe_apply_global_speed()
-                    trailing = float(
-                        s.get("tts_trailing_silence") or max(0.0, current_duration - current_speech_duration)
-                    )
-                    trim_ratio, trim_cap_ms = _duration_trim_caps(settings)
-                    trim_amount_ms = round(max(0.0, current_duration - target_dur) * 1000)
-                    speech_headroom_ms = round(max(0.0, target_dur - current_speech_duration) * 1000)
-                    # Guard: only trim silence that sits beyond the speech end. If honoring the
-                    # window would require cutting into speech, refuse and flag for review.
-                    if speech_headroom_ms < 0 or trim_amount_ms > trim_cap_ms + round(trailing * 1000):
-                        quality_warning = quality_warning or "silence_trim_exceeds_cap_needs_review"
-                        needs_review = True
-                        s["speech_trimmed"] = False
-                    else:
-                        exact_file = tts_dir / f"tts_exact_{idx}.wav"
-                        exact_file.unlink(missing_ok=True)
-                        exact_filter = (
-                            f"atrim=0:{current_speech_duration + 0.05:.3f},"
-                            f"apad=pad_dur={target_dur + 0.2:.3f},atrim=0:{target_dur:.3f}"
-                        )
-                        trim_started = time.perf_counter()
-                        _run_ffmpeg_audio_filter(
-                            ffmpeg_path,
-                            input_for_fit,
-                            exact_file,
-                            filter_expr=exact_filter,
-                            job_id=job_id,
-                            runner=runner,
-                        )
-                        trim_ms = round((time.perf_counter() - trim_started) * 1000)
-                        input_for_fit = exact_file
-                        current_duration = get_wav_duration(exact_file)
-                        current_speech_duration = _segment_speech_duration(s, exact_file)
-                        fit_methods.append("outer_silence_trim")
-                        s["outer_silence_trimmed_ms"] = round(trailing * 1000)
-                        repair_attempts += 1
-                elif should_lengthen_for_timing(current_speech_duration, s, policy=fit_policy):
-                    # Tail pad always applies for abnormally short speech. Spoken-text
-                    # lengthen is opt-in via allow_spoken_text_mutation (default False).
-                    lengthen_gap_threshold = _lengthen_min_gap_sec(settings)
-                    gap = lengthen_target - current_speech_duration
-                    allow_mutation = bool(settings.get("allow_spoken_text_mutation", False))
-                    if allow_mutation and gap > lengthen_gap_threshold:
-                        try:
-                            llm_started = time.perf_counter()
-                            new_translation, target_words = lengthen_translation_for_timing(
-                                settings,
-                                database,
-                                text=str(s.get("translation") or ""),
-                                budget=lengthen_target,
-                                current_duration=current_speech_duration,
-                                min_gap_sec=lengthen_gap_threshold,
-                                max_ratio=_lengthen_max_ratio(settings),
-                                estimate_word_count=_estimate_word_count,
-                                language_label=dub_lang_label,
-                            )
-                            llm_lengthen_ms = round((time.perf_counter() - llm_started) * 1000)
-                            if new_translation and new_translation != s.get("translation") and segment_budget.can_synthesize():
-                                raw_temp = tts_dir / f"tts_temp_raw_{idx}.wav"
-                                temp_wav = tts_dir / f"tts_temp_{idx}.wav"
-                                raw_temp.unlink(missing_ok=True)
-                                temp_wav.unlink(missing_ok=True)
-                                synth_started = time.perf_counter()
-                                session.synthesize(new_translation, raw_temp, segment=s)
-                                segment_budget.record_repair_resynth()
-                                _convert_tts_to_final_wav(ffmpeg_path, raw_temp, temp_wav, job_id, runner)
-                                re_synthesis_ms += round((time.perf_counter() - synth_started) * 1000)
-                                raw_temp.unlink(missing_ok=True)
-                                new_dur = get_wav_duration(temp_wav)
-                                new_speech = _segment_speech_duration(s, temp_wav)
-                                repair_attempts += 1
-                                re_synthesis_count += 1
-                                if new_speech > current_speech_duration:
-                                    input_for_fit = temp_wav
-                                    current_duration = new_dur
-                                    current_speech_duration = new_speech
-                                    s["translation"] = new_translation
-                                    fit_methods.append(
-                                        f"{rewrite_prefix}_lengthen_to_{target_words}_words"
-                                        if target_words > 0
-                                        else f"{rewrite_prefix}_lengthen"
-                                    )
-                                else:
-                                    temp_wav.unlink(missing_ok=True)
-                        except AppError:
-                            raise
-                        except Exception:
-                            quality_warning = f"{rewrite_prefix}_lengthen_failed"
-
-                    _maybe_apply_global_speed()
-                    if (
-                        should_lengthen_for_timing(current_speech_duration, s, policy=fit_policy)
-                        and current_speech_duration < lengthen_target - tolerance_sec
-                    ):
-                        remaining_gap = lengthen_target - current_speech_duration
-                        if (
-                            remaining_gap > lengthen_gap_threshold
-                            and allow_mutation
-                            and not any(
-                                method.endswith("_lengthen") or "_lengthen_to_" in method
-                                for method in fit_methods
-                            )
-                        ):
-                            quality_warning = quality_warning or "short_tts_gap_exceeds_tail_pad_without_lengthen"
-                        exact_file = tts_dir / f"tts_exact_{idx}.wav"
-                        exact_file.unlink(missing_ok=True)
-                        trim_started = time.perf_counter()
-                        _run_ffmpeg_audio_filter(
-                            ffmpeg_path,
-                            input_for_fit,
-                            exact_file,
-                            filter_expr=_tail_silence_pad_filter(current_duration, lengthen_target),
-                            job_id=job_id,
-                            runner=runner,
-                        )
-                        trim_ms = round((time.perf_counter() - trim_started) * 1000)
-                        input_for_fit = exact_file
-                        current_duration = get_wav_duration(exact_file)
-                        fit_methods.append("tail_silence_pad")
-                        repair_attempts += 1
-                elif acceptable_duration_fit(speech_fit):
-                    _maybe_apply_global_speed()
-                    s["accepted_without_repair"] = True
-                else:
-                    _maybe_apply_global_speed()
-            else:
-                _maybe_apply_global_speed()
-
-            repaired_file.unlink(missing_ok=True)
-            shutil.copy(input_for_fit, repaired_file)
-            repaired_duration = round(get_wav_duration(repaired_file), 2)
-            # Final residual-overflow guard: if the dub speech still overflows the free window
-            # after every safe repair, mark it danger + needs_review instead of hiding the issue.
-            final_speech = _segment_speech_duration(s, repaired_file) or current_speech_duration
-            if fit_max > 0 and final_speech > fit_max + tolerance_sec:
-                duration_repair_risk = "danger"
-                needs_review = True
-                quality_warning = quality_warning or "residual_speech_over_window"
-            if duration_repair_risk == "danger":
+            ops = _SegmentDurationRepairOps(
+                segment=s,
+                index=idx,
+                segment_budget=segment_budget,
+                settings=settings,
+                profile=profile,
+                fit_policy=fit_policy,
+                fit_max=fit_max,
+                repair_target=repair_target,
+                tolerance_sec=tolerance_sec,
+                max_stretch=max_stretch,
+                global_speed=global_speed,
+                orig_file=orig_file,
+                tts_dir=tts_dir,
+                ffmpeg_path=ffmpeg_path,
+                job_id=job_id,
+                runner=runner,
+                session=session,
+                database=database,
+                dub_lang_label=dub_lang_label,
+                rewrite_prefix=rewrite_prefix,
+            )
+            repair_result = execute_segment_duration_repair(
+                segment=s,
+                profile=profile,
+                settings=settings,
+                ops=ops,
+                segment_budget=segment_budget,
+                exact_timing_enabled=exact_enabled,
+                tolerance_sec=tolerance_sec,
+                fit_max=fit_max,
+                repair_target=repair_target,
+                orig_file=orig_file,
+            )
+            shutil.copy(repair_result.working_path, repaired_file)
+            attach_repair_execution_to_segment(s, repair_result)
+            if repair_result.duration_repair_risk == "danger":
                 repair_severity = "danger"
-            elif duration_repair_risk == "warning" or needs_review:
+            elif repair_result.duration_repair_risk == "warning" or repair_result.needs_review:
                 repair_severity = "warning"
             else:
                 repair_severity = "none"
-            s["repaired_duration"] = repaired_duration
-            s["repaired_method"] = "+".join(fit_methods) if fit_methods else "none"
-            s["duration_repair_risk"] = duration_repair_risk
             s["repair_severity"] = repair_severity
-            s["needs_review"] = bool(needs_review)
-            s["final_timing_error_ms"] = round((repaired_duration - repair_target) * 1000) if repair_target > 0 else 0
-            s["tail_speech_detected"] = tail_speech_detected
-            s["time_stretch_factor"] = time_stretch_factor
-            s["repair_attempts"] = repair_attempts
-            s["quality_warning"] = quality_warning
-            s["re_synthesis_count"] = re_synthesis_count
+            s["final_timing_error_ms"] = (
+                round((repair_result.repaired_duration - repair_target) * 1000) if repair_target > 0 else 0
+            )
+            s["tail_speech_detected"] = False
             s["tts_attempt_budget"] = segment_budget.to_dict()
             telemetry.record("duration_repair_segment", {
                 "wall_time_ms": round((time.perf_counter() - segment_started) * 1000),
-                "audio_duration_sec": repaired_duration,
+                "audio_duration_sec": repair_result.repaired_duration,
                 "original_duration": tts_dur,
                 "budget": budget,
                 "repair_target": repair_target,
                 "method": s["repaired_method"],
-                "llm_shorten_ms": llm_shorten_ms,
-                "llm_lengthen_ms": llm_lengthen_ms,
-                "re_synthesis_ms": re_synthesis_ms,
-                "atempo_ms": atempo_ms,
-                "trim_ms": trim_ms,
-                "re_synthesis_count": re_synthesis_count,
+                "re_synthesis_count": repair_result.re_synthesis_count,
                 "segment_index": idx,
+                "duration_fit_status": repair_result.duration_fit_status,
+                "final_repair_action": repair_result.final_repair_action,
             })
+
 
         _apply_soft_placement_speed_and_compact(
             segments=segments,
@@ -3587,31 +3570,44 @@ def render_step(job_id: str, config: AppConfig, database: Database, runner) -> d
 
     video_filters: list[str] = []
     subtitle_burn_in = False
+    subtitle_track_path: str | None = None
+    subtitle_track_hash: str | None = None
     if settings.get("subtitles_enabled", True) and segments:
-        refresh_all_segment_dub_word_timestamps(segments)
-        subtitle_segments = [
-            segment
-            for segment in segments
-            if str(segment.get("translation") or segment.get("target_text") or "").strip()
-        ]
+        project_root = Path(__file__).resolve().parents[2]
+        vendor_dir = Path(os.environ.get("DV_VENDOR_DIR", project_root / "vendor"))
+        subtitle_track = resolve_subtitle_track(
+            segments,
+            job_dir=job_dir,
+            settings=settings,
+            vendor_dir=vendor_dir,
+            ffmpeg_path=ffmpeg_path,
+            transcribe_fn=transcribe_audio,
+            tts_asr_align=True,
+        )
+        subtitle_segments = subtitle_track["segments"]
+        track_path = write_canonical_subtitle_track(
+            job_dir,
+            cues=subtitle_track["cues"],
+            segment_indices=[int(s.get("index", i) or i) for i, s in enumerate(subtitle_segments)],
+        )
+        subtitle_track_path = str(track_path)
+        loaded = load_canonical_subtitle_track(job_dir)
+        subtitle_track_hash = loaded["content_hash"] if loaded else None
         if subtitle_segments:
             width, height = probe_video_dimensions(ffmpeg_path, original_mp4)
-            project_root = Path(__file__).resolve().parents[2]
-            vendor_dir = Path(os.environ.get("DV_VENDOR_DIR", project_root / "vendor"))
-            has_dub_words = any(segment_has_usable_dub_words(segment) for segment in subtitle_segments)
+            needs_asr_subtitle_fallback = any(
+                not segment_has_usable_dub_words(segment) for segment in subtitle_segments
+            )
+            # Gate 3.2: production always serializes from resolved cues (never rebuild).
             write_ass_file(
                 ass_path,
                 subtitle_segments,
                 settings,
                 play_res_x=width,
                 play_res_y=height,
-                job_dir=job_dir,
-                vendor_dir=vendor_dir,
-                ffmpeg_path=ffmpeg_path,
-                transcribe_fn=transcribe_audio,
-                tts_asr_align=not has_dub_words,
+                cues=subtitle_track["cues"],
             )
-            if not has_dub_words:
+            if needs_asr_subtitle_fallback:
                 _release_tts_gpu_resources(settings)
                 configure_gpu_manager(settings)
                 _release_asr_gpu_models(settings)
@@ -3681,6 +3677,8 @@ def render_step(job_id: str, config: AppConfig, database: Database, runner) -> d
         "subtitles_enabled": bool(settings.get("subtitles_enabled", True)),
         "subtitle_burn_in": subtitle_burn_in,
         "subtitles_path": str(ass_path) if ass_path.is_file() else None,
+        "subtitle_track_path": subtitle_track_path,
+        "subtitle_track_hash": subtitle_track_hash,
     }
     save_checkpoint(config.data_dir, job_id, "render", checkpoint_data)
     return checkpoint_data
@@ -3795,16 +3793,46 @@ def qc_step(job_id: str, config: AppConfig, database: Database, runner) -> dict:
             step_rtf[step] = step_rtf.get(step, 0.0) + float(record["real_time_factor"])
 
     alignment_summary = summarize_alignment_results(segments) if align_cp else {}
-    subtitle_segments = [
-        segment
-        for segment in segments
-        if str(segment.get("translation") or segment.get("target_text") or "").strip()
-    ]
-    subtitle_cues = build_subtitle_cues(subtitle_segments) if subtitle_segments else []
-    subtitle_metrics = compute_subtitle_qc_metrics(segments, subtitle_cues) if subtitle_cues else {}
 
     rows = database.connection.execute("SELECT key, value FROM settings").fetchall()
     qc_settings = {r["key"]: json.loads(r["value"]) for r in rows}
+    job_dir = config.data_dir / "jobs" / job_id
+    # Gate 3.1 / 4A: QC consumes the render canonical cue artifact — never re-resolve.
+    subtitle_metrics: dict = {}
+    subtitle_cues: list = []
+    if bool(render_cp.get("subtitles_enabled", True)):
+        canonical_track = load_canonical_subtitle_track(job_dir)
+        expected_hash = render_cp.get("subtitle_track_hash")
+        if canonical_track is None:
+            subtitle_metrics["subtitle_track_error"] = (
+                "missing_or_invalid_artifact"
+                if render_cp.get("subtitle_track_path") or expected_hash
+                else "missing_artifact"
+            )
+            subtitle_metrics["subtitle_track_status"] = "failed"
+            logger.warning(
+                "QC missing/invalid subtitle_track.json for job %s; metrics empty (no re-resolve)",
+                job_id,
+            )
+        elif expected_hash and canonical_track["content_hash"] != expected_hash:
+            subtitle_metrics["subtitle_track_error"] = "hash_mismatch"
+            subtitle_metrics["subtitle_track_status"] = "failed"
+            subtitle_metrics["subtitle_track_hash"] = canonical_track["content_hash"]
+            subtitle_metrics["subtitle_track_expected_hash"] = expected_hash
+            logger.warning(
+                "QC subtitle_track hash mismatch for job %s; refusing cues (no re-resolve)",
+                job_id,
+            )
+        else:
+            subtitle_cues = list(canonical_track["cues"])
+            computed = compute_subtitle_qc_metrics(segments, subtitle_cues) if subtitle_cues else {}
+            subtitle_metrics = {
+                **computed,
+                "subtitle_track_status": "ok",
+                "subtitle_track_hash": canonical_track["content_hash"],
+                "subtitle_track_cue_count": canonical_track["cue_count"],
+            }
+
     timing_metrics = compute_timing_qc_metrics(segments, settings=qc_settings)
 
     checkpoint_data = {

@@ -157,6 +157,7 @@ def build_ass_content(
     ffmpeg_path: Path | None = None,
     transcribe_fn=None,
     tts_asr_align: bool = False,
+    cues: list[dict] | None = None,
 ) -> str:
     position = normalize_position(position)
     font_size = normalize_font_size(font_size)
@@ -200,15 +201,20 @@ def build_ass_content(
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
 
-    for cue in build_subtitle_cues(
-        segments,
-        job_dir=job_dir,
-        settings=settings,
-        vendor_dir=vendor_dir,
-        ffmpeg_path=ffmpeg_path,
-        transcribe_fn=transcribe_fn,
-        tts_asr_align=tts_asr_align,
-    ):
+    resolved_cues = (
+        cues
+        if cues is not None
+        else build_subtitle_cues(
+            segments,
+            job_dir=job_dir,
+            settings=settings,
+            vendor_dir=vendor_dir,
+            ffmpeg_path=ffmpeg_path,
+            transcribe_fn=transcribe_fn,
+            tts_asr_align=tts_asr_align,
+        )
+    )
+    for cue in resolved_cues:
         start = format_ass_time(float(cue["start"]))
         end = format_ass_time(float(cue["end"]))
         lines.append(
@@ -231,6 +237,7 @@ def write_ass_file(
     ffmpeg_path: Path | None = None,
     transcribe_fn=None,
     tts_asr_align: bool = False,
+    cues: list[dict] | None = None,
 ) -> Path:
     content = build_ass_content(
         segments,
@@ -255,6 +262,7 @@ def write_ass_file(
         ffmpeg_path=ffmpeg_path,
         transcribe_fn=transcribe_fn,
         tts_asr_align=tts_asr_align,
+        cues=cues,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(content, encoding="utf-8-sig")

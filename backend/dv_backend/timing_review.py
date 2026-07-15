@@ -6,6 +6,8 @@ import math
 import re
 from typing import Any
 
+from .timing_placement import segment_timing_diagnostics
+
 
 REVIEW_STATUS = "timing_review_required"
 INFEASIBLE_REASON = "infeasible_at_cap"
@@ -185,6 +187,7 @@ def list_timing_review_segments(
     segments: list[dict[str, Any]],
     *,
     absolute_max_rate: float = 1.2,
+    timing_stage: str | None = None,
 ) -> list[dict[str, Any]]:
     """Rows that still overflow the allocated window after max allowed speed.
 
@@ -250,6 +253,7 @@ def list_timing_review_segments(
                 "timing_available_duration": available,
                 "repaired_duration": duration,
                 "release_blocking": bool(segment.get("release_blocking", True)),
+                **segment_timing_diagnostics(segment, timing_stage=timing_stage),
             }
         )
     return rows

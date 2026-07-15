@@ -8,6 +8,12 @@ from ..errors import AppError
 from ..models import ErrorInfo
 from ..omnivoice_chunk_synthesis import record_direct_segment_result, synthesize_short_or_chunked
 from ..omnivoice_chunking import chunking_required
+from ..omnivoice_content_fidelity import (
+    clone_content_chunking_required,
+    is_clone_voice_path,
+    normalize_target_text_for_synthesis,
+    synthesize_clone_content_preserving,
+)
 from .omnivoice_infer import _strip_surrogates
 from .tts import parse_tts_voice_string, prepare_spoken_text_for_tts
 
@@ -169,8 +175,40 @@ class OmniVoiceTtsAdapter:
                     retryable=True,
                 ),
             )
+        self._emit_adapter_probe(
+            output_path,
+            voice=voice,
+            request_id=str(response.get("id") or output_path.stem),
+            worker_duration=response.get("duration"),
+        )
 
-    def _validate_worker_response(self, response: dict[str, Any], output_path: Path) -> None:
+    def _emit_adapter_probe(
+        self,
+        output_path: Path,
+        *,
+        voice: str,
+        request_id: str | None,
+        worker_duration: float | None,
+    ) -> None:
+        from ..omnivoice_diagnostics import diagnostics_enabled, probe_adapter_output, voice_mode
+
+        if not diagnostics_enabled():
+            return
+        kwargs = self._voice_kwargs(voice, None)
+        probe_adapter_output(
+            output_path,
+            mode=voice_mode(ref_audio=kwargs.get("ref_audio"), instruct=kwargs.get("instruct")),
+            request_id=request_id,
+            worker_duration=float(worker_duration) if worker_duration is not None else None,
+        )
+
+    def _validate_worker_response(
+        self,
+        response: dict[str, Any],
+        output_path: Path,
+        *,
+        voice: str | None = None,
+    ) -> None:
         if not response.get("ok", False):
             raise AppError(
                 502,
@@ -191,6 +229,13 @@ class OmniVoiceTtsAdapter:
                     action="Try another reference clip or switch to auto voice mode.",
                     retryable=True,
                 ),
+            )
+        if voice is not None:
+            self._emit_adapter_probe(
+                output_path,
+                voice=voice,
+                request_id=str(response.get("id") or output_path.stem),
+                worker_duration=response.get("duration"),
             )
 
     def _configured_batch_size(self) -> int:
@@ -298,8 +343,12 @@ class OmniVoiceTtsAdapter:
 
         for entry, response in zip(prepared, responses):
             output_path = Path(entry["output_path"])
-            self._validate_worker_response(response, output_path)
             item = entry["item"]
+            self._validate_worker_response(
+                response,
+                output_path,
+                voice=str(item.get("voice") or ""),
+            )
             record_direct_segment_result(
                 text=entry["text"],
                 output_path=output_path,
@@ -355,7 +404,7 @@ class OmniVoiceTtsAdapter:
         index = 0
         while index < len(items):
             item = items[index]
-            text = _strip_surrogates(str(item.get("text") or "")).strip()
+            text = normalize_target_text_for_synthesis(_strip_surrogates(str(item.get("text") or "")))
             if not text:
                 raise AppError(
                     422,
@@ -365,12 +414,15 @@ class OmniVoiceTtsAdapter:
                         action="Verify translation output for this segment.",
                     ),
                 )
-            if chunking_required(text, self._settings):
+            voice = str(item.get("voice") or "")
+            if chunking_required(text, self._settings) or clone_content_chunking_required(
+                text, is_clone=is_clone_voice_path(voice), settings=self._settings
+            ):
                 chunked_segments += 1
                 self.synthesize(
                     text,
                     Path(item["output_path"]),
-                    voice=str(item.get("voice") or ""),
+                    voice=voice,
                     ref_text=item.get("ref_text"),
                     anchor_text=item.get("anchor_text"),
                     clone=bool(item.get("clone")),
@@ -449,7 +501,7 @@ class OmniVoiceTtsAdapter:
     ) -> None:
         _ = clone, clone_mode, ref_text
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        cleaned = _strip_surrogates(text).strip()
+        cleaned = normalize_target_text_for_synthesis(_strip_surrogates(text))
         if not cleaned:
             raise AppError(
                 422,
@@ -470,8 +522,30 @@ class OmniVoiceTtsAdapter:
                 )
 
             vendor_dir = self._default_vendor_dir()
-            # Prepare once, then route short → single-shot or long → external chunking.
             prepared = prepare_spoken_text_for_tts(cleaned)
+            if clone_content_chunking_required(
+                prepared, is_clone=is_clone_voice_path(voice), settings=self._settings
+            ):
+                meta = synthesize_clone_content_preserving(
+                    text=prepared,
+                    output_path=output_path,
+                    synthesize_fn=_synthesize_chunk,
+                )
+                result = record_direct_segment_result(
+                    segment=segment,
+                    output_path=output_path,
+                    text=prepared,
+                    settings=self._settings,
+                    language=language,
+                    transcribe_fn=transcribe_fn,
+                    vendor_dir=vendor_dir,
+                )
+                result.update(meta)
+                if segment is not None:
+                    segment.update(meta)
+                return
+
+            # Prepare once, then route short → single-shot or long → external chunking.
             synthesize_short_or_chunked(
                 text=prepared,
                 output_path=output_path,

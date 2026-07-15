@@ -54,6 +54,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "omnivoice_audio_chunk_threshold": 30.0,
     "omnivoice_audio_chunk_duration": 15.0,
     "omnivoice_external_chunking_enabled": True,
+    "omnivoice_clone_chunk_strategy": "clauses",
     "omnivoice_chunk_fidelity_fallback_full_segment": True,
     "omnivoice_chunk_retry_on_fidelity_failure": True,
     "omnivoice_chunk_target_chars": 180,
@@ -705,11 +706,45 @@ class SettingsService:
         if values.get("omnivoice_language_id") is not None:
             values["omnivoice_language_id"] = str(values.get("omnivoice_language_id") or "").strip()
 
+        for chunk_int_key, minimum, maximum in (
+            ("omnivoice_chunk_max_chars", 80, 400),
+            ("omnivoice_chunk_target_chars", 60, 360),
+            ("omnivoice_chunk_min_chars", 20, 120),
+            ("omnivoice_long_text_threshold", 120, 600),
+            ("omnivoice_chunk_max_retries", 0, 5),
+            ("omnivoice_chunk_retry_max_chars_1", 80, 400),
+            ("omnivoice_chunk_retry_max_chars_2", 60, 300),
+            ("omnivoice_chunk_retry_max_chars_3", 40, 200),
+            ("tts_fidelity_retry_max_attempts", 0, 3),
+        ):
+            if values.get(chunk_int_key) is not None:
+                try:
+                    parsed = int(values[chunk_int_key])
+                except (TypeError, ValueError) as error:
+                    raise ValueError(f"{chunk_int_key} must be an integer.") from error
+                values[chunk_int_key] = max(minimum, min(maximum, parsed))
+
+        if (
+            values.get("omnivoice_chunk_target_chars") is not None
+            or values.get("omnivoice_chunk_max_chars") is not None
+        ):
+            # Keep target ≤ max when either slider is saved.
+            merged = {**self.get_raw_all(), **values}
+            target = int(merged.get("omnivoice_chunk_target_chars") or 180)
+            hard_max = int(merged.get("omnivoice_chunk_max_chars") or 220)
+            if target > hard_max:
+                values["omnivoice_chunk_target_chars"] = hard_max
+
         omnivoice_flag_touched = False
         for flag_key, _legacy, _new in _OMNIVOICE_CHUNK_FLAG_DEFAULT_FLIPS:
             if values.get(flag_key) is not None:
                 values[flag_key] = bool(values[flag_key])
                 omnivoice_flag_touched = True
+        if values.get("omnivoice_chunk_fidelity_fallback_full_segment") is not None:
+            values["omnivoice_chunk_fidelity_fallback_full_segment"] = bool(
+                values["omnivoice_chunk_fidelity_fallback_full_segment"]
+            )
+            omnivoice_flag_touched = True
         if omnivoice_flag_touched:
             # Stamp current defaults version so future migrations do not treat
             # an explicit False opt-out as untouched legacy seed data.

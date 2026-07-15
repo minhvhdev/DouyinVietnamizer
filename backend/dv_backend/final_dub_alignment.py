@@ -70,8 +70,87 @@ def segment_target_text(segment: dict[str, Any]) -> str:
 
 
 def segment_placement_start(segment: dict[str, Any]) -> float:
-    return float(segment.get("placement_start") or segment.get("start") or 0.0)
+    placement = segment.get("placement_start")
+    if placement is not None:
+        try:
+            value = float(placement)
+            if math.isfinite(value) and value >= 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    start = segment.get("start")
+    if start is not None:
+        try:
+            value = float(start)
+            if math.isfinite(value) and value >= 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    return 0.0
 
+
+def _dub_word_absolute_times(
+    word: dict[str, Any],
+    *,
+    placement_start: float,
+) -> tuple[float, float] | None:
+    if word.get("absolute_start") is not None and word.get("absolute_end") is not None:
+        try:
+            start = float(word["absolute_start"])
+            end = float(word["absolute_end"])
+        except (TypeError, ValueError):
+            return None
+    else:
+        try:
+            rel_start = float(word.get("start", 0.0))
+            rel_end = float(word.get("end", rel_start))
+        except (TypeError, ValueError):
+            return None
+        start = placement_start + rel_start
+        end = placement_start + rel_end
+    if not math.isfinite(start) or not math.isfinite(end):
+        return None
+    if end < start:
+        return None
+    return start, end
+
+
+def filter_valid_dub_words(
+    words: list[dict[str, Any]],
+    segment: dict[str, Any],
+    *,
+    outside_margin_sec: float = 0.15,
+) -> list[dict[str, Any]]:
+    """Return dub_words safe for subtitle cues without mutating the input list.
+
+    dub_words contract on segments:
+    - ``start``/``end`` are relative to clip audio (0 = clip start).
+    - ``absolute_start``/``absolute_end`` are playback-timeline seconds after placement.
+    - Cache files store relative timestamps only; placement rebasing happens via
+      ``apply_placement_to_dub_words`` — consumers must not rebase again.
+    Words outside the playback interval by more than ``outside_margin_sec`` are dropped
+  (tolerates small ASR/float jitter at boundaries).
+    """
+    from .timing_placement import segment_playback_interval
+
+    placement_start = segment_placement_start(segment)
+    play_start, play_end = segment_playback_interval(segment)
+    valid: list[dict[str, Any]] = []
+    previous_end = -1.0
+    for word in words:
+        if not str(word.get("text") or "").strip():
+            continue
+        times = _dub_word_absolute_times(word, placement_start=placement_start)
+        if times is None:
+            continue
+        abs_start, abs_end = times
+        if abs_end < play_start - outside_margin_sec or abs_start > play_end + outside_margin_sec:
+            continue
+        if abs_start < previous_end - 0.001:
+            continue
+        previous_end = abs_end
+        valid.append(word)
+    return valid
 
 def supports_forced_alignment(language: str) -> bool:
     return language in QWEN_FORCED_ALIGNER_LANGUAGES
@@ -390,7 +469,9 @@ def segment_has_usable_dub_words(segment: dict[str, Any]) -> bool:
     if not words:
         return False
     status = str(segment.get("dub_alignment_status") or "")
-    return status not in {"failed", "skipped"}
+    if status in {"failed", "skipped"}:
+        return False
+    return len(filter_valid_dub_words(list(words), segment)) > 0
 
 
 def text_similarity(target_text: str, asr_text: str) -> float:
@@ -744,7 +825,32 @@ def align_segment_final_dub(
             }
             for token, (start, end) in zip(target_tokens, spans, strict=True)
         ]
-        if wav_has_detectable_speech(audio_path):
+        from .omnivoice_diagnostics import diagnostics_enabled, log_event, probe_wav_path
+
+        speech_ok = wav_has_detectable_speech(audio_path)
+        if diagnostics_enabled():
+            probe = probe_wav_path(audio_path)
+            log_event(
+                "final_alignment_input",
+                {
+                    "stage": "final_alignment_input",
+                    "speech_detected": speech_ok,
+                    "probe": probe,
+                    "expected_duration": repaired_duration,
+                    "actual_duration": probe.get("duration_sec"),
+                },
+            )
+            if not speech_ok:
+                log_event(
+                    "final_alignment_no_speech",
+                    {
+                        "stage": "final_alignment",
+                        "probe": probe,
+                        "expected_duration": repaired_duration,
+                        "actual_duration": probe.get("duration_sec"),
+                    },
+                )
+        if speech_ok:
             status = "fallback_interpolated"
             fallback_reason = "asr_empty_with_detected_audio"
             method = f"weighted_interpolation:{fallback_reason}"

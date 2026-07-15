@@ -84,6 +84,10 @@ def chunk_cache_valid(wav_path: Path, expected_identity: dict[str, Any]) -> bool
 
 
 def _validate_chunk_wav(path: Path, *, min_speech_sec: float = 0.05) -> dict[str, Any]:
+    from .omnivoice_diagnostics import diagnostics_enabled, log_event, probe_wav_path
+
+    if diagnostics_enabled():
+        log_event("chunk_validation_input", {"probe": probe_wav_path(path), "path_name": path.name})
     if not path.is_file() or path.stat().st_size <= 44:
         raise AppError(
             502,
@@ -96,6 +100,16 @@ def _validate_chunk_wav(path: Path, *, min_speech_sec: float = 0.05) -> dict[str
         )
     envelope = measure_speech_envelope(path)
     if envelope.speech_duration <= min_speech_sec:
+        if diagnostics_enabled():
+            log_event(
+                "chunk_validation_silent",
+                {
+                    "stage": "chunk_validation",
+                    "probe": probe_wav_path(path),
+                    "speech_duration": envelope.speech_duration,
+                    "raw_duration": envelope.raw_wav_duration,
+                },
+            )
         raise AppError(
             502,
             ErrorInfo(

@@ -74,30 +74,78 @@ def _resolve_omnivoice_preview_clone(
     clone: bool,
 ) -> tuple[str | None, str | None]:
     """Return ``(ref_audio_path, anchor_text)`` when preview should use voice clone."""
+    ref_audio, anchor, source = _resolve_omnivoice_preview_clone_meta(
+        preview_voice=preview_voice,
+        settings=settings,
+        explicit_anchor=explicit_anchor,
+        clone=clone,
+    )
+    try:
+        from .omnivoice_diagnostics import diagnostics_enabled, file_content_hash, log_event, short_hash
+
+        if diagnostics_enabled() and ref_audio:
+            log_event(
+                "preview_anchor_resolve",
+                {
+                    "ref_audio_hash": file_content_hash(ref_audio),
+                    "anchor_text_hash": short_hash(anchor),
+                    "anchor_text_length": len(anchor or ""),
+                    "anchor_source": source,
+                    "clone": bool(clone),
+                },
+            )
+    except Exception:
+        pass
+    return ref_audio, anchor
+
+
+def _resolve_omnivoice_preview_clone_meta(
+    *,
+    preview_voice: str,
+    settings: dict[str, Any],
+    explicit_anchor: str | None,
+    clone: bool,
+) -> tuple[str | None, str | None, str]:
+    """Return ``(ref_audio_path, anchor_text, anchor_source)`` without changing selection rules."""
     ref_audio = str(settings.get("omnivoice_ref_audio") or "").strip() or None
     voice_value = (preview_voice or "").strip()
     if clone:
         candidate = voice_value if Path(voice_value).is_file() else ref_audio
         if not candidate:
-            return None, None
-        anchor = (explicit_anchor or "").strip() or _read_transcript_sidecar(Path(candidate))
-        if not anchor:
-            anchor = str(settings.get("omnivoice_ref_text") or "").strip() or None
-        return candidate, anchor
+            return None, None, "none"
+        if (explicit_anchor or "").strip():
+            return candidate, (explicit_anchor or "").strip(), "explicit_anchor"
+        sidecar = _read_transcript_sidecar(Path(candidate))
+        if sidecar:
+            return candidate, sidecar, "sidecar"
+        settings_text = str(settings.get("omnivoice_ref_text") or "").strip() or None
+        if settings_text:
+            return candidate, settings_text, "explicit_omnivoice_ref_text"
+        return candidate, None, "missing_anchor"
 
     if ref_audio:
-        anchor = (explicit_anchor or "").strip() or str(settings.get("omnivoice_ref_text") or "").strip()
-        if not anchor:
-            anchor = _read_transcript_sidecar(Path(ref_audio))
-        return ref_audio, anchor or None
+        if (explicit_anchor or "").strip():
+            return ref_audio, (explicit_anchor or "").strip(), "explicit_anchor"
+        settings_text = str(settings.get("omnivoice_ref_text") or "").strip()
+        if settings_text:
+            return ref_audio, settings_text, "explicit_omnivoice_ref_text"
+        sidecar = _read_transcript_sidecar(Path(ref_audio))
+        if sidecar:
+            return ref_audio, sidecar, "sidecar"
+        return ref_audio, None, "missing_anchor"
 
     if voice_value.lower().endswith(".wav") and Path(voice_value).is_file():
-        anchor = (explicit_anchor or "").strip() or _read_transcript_sidecar(Path(voice_value))
-        if not anchor:
-            anchor = str(settings.get("omnivoice_ref_text") or "").strip() or None
-        return voice_value, anchor
+        if (explicit_anchor or "").strip():
+            return voice_value, (explicit_anchor or "").strip(), "explicit_anchor"
+        sidecar = _read_transcript_sidecar(Path(voice_value))
+        if sidecar:
+            return voice_value, sidecar, "sidecar"
+        settings_text = str(settings.get("omnivoice_ref_text") or "").strip() or None
+        if settings_text:
+            return voice_value, settings_text, "explicit_omnivoice_ref_text"
+        return voice_value, None, "missing_anchor"
 
-    return None, None
+    return None, None, "none"
 
 
 def _normalize_voice_backend(value: str | None) -> str:
@@ -684,9 +732,20 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.get("/api/jobs/{job_id}/checkpoint/{step_name}")
     def get_checkpoint(job_id: str, step_name: str) -> Any:
+        from .duration_diagnostics import annotate_segments_duration_diagnostics
+        from .timing_placement import annotate_segments_timing_diagnostics
+
         data = load_checkpoint(config.data_dir, job_id, step_name)
         if not data:
             return JSONResponse(status_code=404, content={"message": "Checkpoint not found"})
+        if step_name in {"align_final_dub", "duration_repair", "tts"}:
+            segments = [dict(segment) for segment in (data.get("segments") or [])]
+            annotate_segments_timing_diagnostics(segments, timing_stage=step_name)
+            annotate_segments_duration_diagnostics(segments)
+            enriched = dict(data)
+            enriched["segments"] = segments
+            enriched["timing_stage"] = step_name
+            return enriched
         return data
 
     @app.patch("/api/jobs/{job_id}/segments/{index}/speaker")

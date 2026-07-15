@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from dv_backend.adapters.omnivoice_infer import plan_official_omnivoice_call
+from dv_backend.audio_probe import diagnostics_enabled, probe_wav_path, probe_waveform
 from dv_backend.omnivoice_env import OMNIVOICE_DEFAULT_MODEL, OMNIVOICE_DEFAULT_SAMPLE_RATE
 
 DEFAULT_DEVICE = "cuda:0"
@@ -89,9 +90,25 @@ class OmniVoiceEngine:
         _log("OmniVoice model ready")
         return self
 
-    def _clone_prompt(self, *, ref_audio: str, ref_text: str, preprocess_prompt: bool):
+    def _clone_prompt(self, *, ref_audio: str, ref_text: str, preprocess_prompt: bool, request_id: str | None = None):
         cache_key = (ref_audio, ref_text)
         cached = self._clone_prompt_cache.get(cache_key)
+        cache_hit = cached is not None
+        if diagnostics_enabled():
+            from dv_backend.omnivoice_diagnostics import describe_ref_conditioning, log_event
+
+            log_event(
+                "W0_ref_input",
+                {
+                    "request_id": request_id,
+                    **describe_ref_conditioning(
+                        ref_audio=ref_audio,
+                        ref_text=ref_text,
+                        cache_hit=cache_hit,
+                    ),
+                    "preprocess_prompt": bool(preprocess_prompt),
+                },
+            )
         if cached is not None:
             return cached
         assert self._model is not None
@@ -118,6 +135,7 @@ class OmniVoiceEngine:
         audio_chunk_threshold: float = 30.0,
         audio_chunk_duration: float = 15.0,
         include_perf: bool = False,
+        request_id: str | None = None,
     ) -> tuple[float, int, dict[str, Any] | None]:
         if self._model is None:
             raise RuntimeError("OmniVoice engine is not initialized.")
@@ -153,12 +171,15 @@ class OmniVoiceEngine:
 
         clone_ref_audio = plan.pop("ref_audio", None)
         clone_ref_text = plan.pop("ref_text", None)
+        mode = "clone" if clone_ref_audio else ("instruct" if generate_kwargs.get("instruct") else "auto")
+        corr_id = request_id or Path(output_path).stem
         clone_started = time.perf_counter()
         if clone_ref_audio:
             generate_kwargs["voice_clone_prompt"] = self._clone_prompt(
                 ref_audio=clone_ref_audio,
                 ref_text=clone_ref_text or "",
                 preprocess_prompt=generation_config.preprocess_prompt,
+                request_id=corr_id,
             )
         if include_perf:
             perf["clone_prompt_ms"] = round((time.perf_counter() - clone_started) * 1000, 2)
@@ -167,12 +188,51 @@ class OmniVoiceEngine:
             f"Synthesize clone={bool(clone_ref_audio)} design={bool(generate_kwargs.get('instruct'))} "
             f"steps={generation_config.num_step} speed={generate_kwargs.get('speed', 1.0)}"
         )
+        if diagnostics_enabled():
+            from dv_backend.omnivoice_diagnostics import describe_target_conditioning, log_event
+
+            log_event(
+                "W0_target_before_generate",
+                {
+                    "request_id": corr_id,
+                    **describe_target_conditioning(
+                        text=str(generate_kwargs.get("text") or ""),
+                        mode=mode,
+                    ),
+                    "language": generate_kwargs.get("language"),
+                    "has_clone_prompt": bool(generate_kwargs.get("voice_clone_prompt")),
+                    "has_instruct": bool(generate_kwargs.get("instruct")),
+                    "num_step": generation_config.num_step,
+                    "speed": generate_kwargs.get("speed", 1.0),
+                },
+            )
         model_started = time.perf_counter()
         samples = self._model.generate(**generate_kwargs)[0]
         if include_perf:
             perf["model_synthesis_ms"] = round((time.perf_counter() - model_started) * 1000, 2)
         if samples is None or len(samples) == 0:
             raise RuntimeError("OmniVoice returned no audio.")
+
+        if diagnostics_enabled():
+            from dv_backend.omnivoice_diagnostics import log_event, write_waveform_artifact
+
+            w1 = probe_waveform(samples, sample_rate=OMNIVOICE_DEFAULT_SAMPLE_RATE)
+            log_event(
+                "W1_generate_output",
+                {
+                    "request_id": corr_id,
+                    "mode": mode,
+                    "postprocess_output": bool(generation_config.postprocess_output),
+                    "probe": w1,
+                },
+            )
+            write_waveform_artifact(
+                samples,
+                sample_rate=OMNIVOICE_DEFAULT_SAMPLE_RATE,
+                request_id=corr_id,
+                label=f"{mode}_raw",
+            )
+
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         encode_started = time.perf_counter()
@@ -181,6 +241,51 @@ class OmniVoiceEngine:
             perf["encode_ms"] = round((time.perf_counter() - encode_started) * 1000, 2)
             perf["total_worker_ms"] = round((time.perf_counter() - started) * 1000, 2)
         duration, sample_rate = _wav_duration(output_path)
+
+        if diagnostics_enabled():
+            from dv_backend.audio_probe import diagnostics_dir
+            from dv_backend.omnivoice_diagnostics import (
+                copy_artifact,
+                log_event,
+                maybe_capture_clone_failure_bundle,
+            )
+
+            w2_probe = probe_wav_path(out)
+            log_event(
+                "W2_written_output",
+                {
+                    "request_id": corr_id,
+                    "mode": mode,
+                    "worker_duration_sec": duration,
+                    "probe": w2_probe,
+                },
+            )
+            copy_artifact(out, request_id=corr_id, label=f"{mode}_post")
+            generate_artifact = diagnostics_dir() / f"{corr_id}_{mode}_raw.wav"
+            w1_probe = probe_wav_path(generate_artifact) if generate_artifact.is_file() else None
+            failure_stage = "generate_output"
+            if w1_probe and w1_probe.get("speech_detected"):
+                failure_stage = "written_output"
+            maybe_capture_clone_failure_bundle(
+                request_id=corr_id,
+                mode=mode,
+                ref_audio=clone_ref_audio,
+                ref_text=clone_ref_text,
+                target_text=generate_kwargs.get("text"),
+                generate_output_path=generate_artifact if generate_artifact.is_file() else None,
+                written_output_path=out,
+                generate_probe=w1_probe,
+                written_probe=w2_probe,
+                failure_stage=failure_stage,
+                language=generate_kwargs.get("language"),
+                generation_config={
+                    "num_step": generation_config.num_step,
+                    "postprocess_output": bool(generation_config.postprocess_output),
+                    "preprocess_prompt": bool(generation_config.preprocess_prompt),
+                },
+                model_identity={"model_id": self._model_id, "device": self._device},
+            )
+
         return duration, sample_rate, perf if include_perf else None
 
     def release(self) -> None:
@@ -218,6 +323,7 @@ def _iter_batch(engine: OmniVoiceEngine, batch: list[dict[str, Any]]):
                 audio_chunk_threshold=float(req.get("audio_chunk_threshold") or 30.0),
                 audio_chunk_duration=float(req.get("audio_chunk_duration") or 15.0),
                 include_perf=include_perf,
+                request_id=str(req.get("id") or "") or None,
             )
         except ValueError as exc:
             _log(f"Synthesize rejected: {exc!r}")

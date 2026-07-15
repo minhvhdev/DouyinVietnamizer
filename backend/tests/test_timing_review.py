@@ -213,6 +213,106 @@ def test_rebase_cue_texts_to_spoken_overrides_asr_words() -> None:
     assert "Xin chào" in joined or "chào" in joined.lower()
 
 
+def test_checkpoint_for_review_prefers_align_final_dub_when_valid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dv_backend import timing_review_ops as ops
+
+    align_cp = {
+        "segments": [
+            {
+                "index": 0,
+                "start": 0.0,
+                "end": 2.0,
+                "placement_start": 0.0,
+                "repaired_duration": 2.0,
+            },
+            {
+                "index": 1,
+                "start": 3.0,
+                "end": 5.0,
+                "placement_start": 4.2,
+                "repaired_duration": 1.8,
+            },
+            {
+                "index": 2,
+                "start": 6.0,
+                "end": 8.0,
+                "placement_start": 6.0,
+                "repaired_duration": 2.0,
+            },
+        ]
+    }
+    repair_cp = {
+        "segments": [
+            {
+                "index": 1,
+                "start": 3.0,
+                "end": 5.0,
+                "placement_start": 3.0,
+                "repaired_duration": 1.8,
+            }
+        ]
+    }
+
+    def _load(_data_dir, _job_id, step):
+        if step == "align_final_dub":
+            return align_cp
+        if step == "duration_repair":
+            return repair_cp
+        return None
+
+    monkeypatch.setattr(ops, "load_checkpoint", _load)
+
+    class _Cfg:
+        data_dir = tmp_path
+
+    step, cp = ops._checkpoint_for_review(_Cfg(), "job-1")  # type: ignore[arg-type]
+    assert step == "align_final_dub"
+    assert len(cp["segments"]) == 3
+
+
+def test_timing_review_rows_include_effective_playback_fields() -> None:
+    from dv_backend.timing_review import flag_infeasible_segments, list_timing_review_segments
+
+    segments = [
+        {
+            "index": 1,
+            "start": 3.0,
+            "end": 5.0,
+            "placement_start": 4.2,
+            "placement_end": 6.0,
+            "tts_spoken_text": "đoạn bị dời và vẫn quá dài sau max speed",
+            "timing_available_duration": 1.2,
+            "repaired_duration": 2.4,
+            "soft_speed_factor": 1.2,
+        }
+    ]
+    flag_infeasible_segments(segments, absolute_max_rate=1.2)
+    rows = list_timing_review_segments(segments, timing_stage="align_final_dub")
+    assert len(rows) == 1
+    assert rows[0]["effective_start"] == 4.2
+    assert rows[0]["source_start"] == 3.0
+    assert rows[0]["timing_stage"] == "align_final_dub"
+
+
+def test_segment_without_dub_words_still_has_timing_diagnostics() -> None:
+    from dv_backend.timing_placement import segment_timing_diagnostics
+
+    payload = segment_timing_diagnostics(
+        {
+            "index": 2,
+            "start": 6.0,
+            "end": 8.0,
+            "placement_start": 6.0,
+            "repaired_duration": 2.0,
+        },
+        timing_stage="align_final_dub",
+    )
+    assert payload["effective_start"] == 6.0
+    assert payload["effective_end"] == 8.0
+
+
 def test_plan_version_conflict_rejects_stale_edit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from dv_backend import timing_review_ops as ops
 

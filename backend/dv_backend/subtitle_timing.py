@@ -93,14 +93,142 @@ def _thai_word_tokens(text: str) -> list[str]:
     return [cleaned]
 
 
+def resolve_spoken_subtitle_text(segment: dict[str, Any]) -> str:
+    return str(
+        segment.get("tts_spoken_text")
+        or segment.get("translation")
+        or segment.get("target_text")
+        or ""
+    ).strip()
+
+
+def filter_subtitle_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Segments eligible for subtitle resolution (spoken text present)."""
+    return [segment for segment in segments if resolve_spoken_subtitle_text(segment)]
+
+
+SUBTITLE_TRACK_ARTIFACT_VERSION = 1
+SUBTITLE_TRACK_ARTIFACT_NAME = "subtitle_track.json"
+
+
+def canonical_subtitle_track_path(job_dir: Path) -> Path:
+    return Path(job_dir) / "artifacts" / SUBTITLE_TRACK_ARTIFACT_NAME
+
+
+def hash_subtitle_cues(cues: list[dict[str, Any]]) -> str:
+    """Hash cue list only — kept for backward-compatible assertions."""
+    return hash_subtitle_track_body(cues=cues)
+
+
+def hash_subtitle_track_body(
+    *,
+    cues: list[dict[str, Any]],
+    segment_indices: list[int] | None = None,
+    schema_version: int = SUBTITLE_TRACK_ARTIFACT_VERSION,
+) -> str:
+    """Canonical artifact body hash — excludes the content_hash field itself."""
+    import hashlib
+
+    payload = {
+        "schema_version": schema_version,
+        "segment_indices": list(segment_indices or []),
+        "cues": cues,
+    }
+    body = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def write_canonical_subtitle_track(
+    job_dir: Path,
+    *,
+    cues: list[dict[str, Any]],
+    segment_indices: list[int] | None = None,
+) -> Path:
+    """Persist resolved cues for QC / review — do not re-resolve downstream."""
+    path = canonical_subtitle_track_path(job_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cue_list = list(cues)
+    indices = list(segment_indices or [])
+    artifact = {
+        "schema_version": SUBTITLE_TRACK_ARTIFACT_VERSION,
+        "cue_count": len(cue_list),
+        "content_hash": hash_subtitle_track_body(
+            cues=cue_list,
+            segment_indices=indices,
+            schema_version=SUBTITLE_TRACK_ARTIFACT_VERSION,
+        ),
+        "segment_indices": indices,
+        "cues": cue_list,
+    }
+    path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def load_canonical_subtitle_track(job_dir: Path) -> dict[str, Any] | None:
+    """Load cues written by render. Returns None if artifact missing or invalid."""
+    path = canonical_subtitle_track_path(job_dir)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    cues = payload.get("cues")
+    if not isinstance(cues, list):
+        return None
+    indices = list(payload.get("segment_indices") or [])
+    schema_version = int(payload.get("schema_version") or SUBTITLE_TRACK_ARTIFACT_VERSION)
+    expected = str(payload.get("content_hash") or "")
+    computed = hash_subtitle_track_body(
+        cues=cues,
+        segment_indices=indices,
+        schema_version=schema_version,
+    )
+    if expected and expected != computed:
+        logger.warning("Canonical subtitle track hash mismatch at %s", path)
+        return None
+    return {
+        "schema_version": schema_version,
+        "cue_count": len(cues),
+        "content_hash": expected or computed,
+        "segment_indices": indices,
+        "cues": cues,
+        "path": path,
+    }
+
+
+def resolve_subtitle_track(
+    segments: list[dict],
+    *,
+    job_dir: Path | None = None,
+    settings: dict[str, Any] | None = None,
+    vendor_dir: Path | None = None,
+    ffmpeg_path: Path | None = None,
+    transcribe_fn: Callable[..., Any] | None = None,
+    tts_asr_align: bool = True,
+) -> dict[str, Any]:
+    """Canonical subtitle track for render, QC, and timing review preview."""
+    subtitle_segments = filter_subtitle_segments(segments)
+    cues = (
+        build_subtitle_cues(
+            subtitle_segments,
+            job_dir=job_dir,
+            settings=settings,
+            vendor_dir=vendor_dir,
+            ffmpeg_path=ffmpeg_path,
+            transcribe_fn=transcribe_fn,
+            tts_asr_align=tts_asr_align,
+        )
+        if subtitle_segments
+        else []
+    )
+    return {"segments": subtitle_segments, "cues": cues}
+
+
 def segment_subtitle_start(segment: dict) -> float:
-    placement = segment.get("placement_start")
-    if placement is not None:
-        return float(placement)
-    start = segment.get("start")
-    if start is not None:
-        return float(start)
-    return 0.0
+    from .timing_placement import segment_effective_start
+
+    return segment_effective_start(segment)
 
 
 def segment_subtitle_end(segment: dict) -> float:
@@ -939,7 +1067,9 @@ def build_cues_from_dub_words(
     language: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build subtitle cues from final dub word timestamps."""
-    dub_words = segment.get("dub_words") or []
+    from .final_dub_alignment import filter_valid_dub_words
+
+    dub_words = filter_valid_dub_words(list(segment.get("dub_words") or []), segment)
     if not dub_words:
         return []
     layout = subtitle_layout_from_settings(settings)
@@ -1101,21 +1231,15 @@ def build_segment_subtitle_cues(
     next_segment_start: float | None = None,
     target_language: str | None = None,
 ) -> list[dict[str, Any]]:
-    # Content lineage must match spoken audio (cluster compact/re-TTS updates).
-    translation = str(
-        segment.get("tts_spoken_text")
-        or segment.get("translation")
-        or segment.get("target_text")
-        or ""
-    ).strip()
+    from .final_dub_alignment import refresh_segment_dub_word_timestamps, segment_has_usable_dub_words
+    from .timing_placement import segment_playback_interval
+
+    translation = resolve_spoken_subtitle_text(segment)
     if not translation:
         return []
 
-    from .final_dub_alignment import refresh_segment_dub_word_timestamps, segment_has_usable_dub_words
-
     refresh_segment_dub_word_timestamps(segment)
-    window_start = segment_subtitle_start(segment)
-    window_end = segment_subtitle_end(segment)
+    window_start, window_end = segment_playback_interval(segment)
     if segment_has_usable_dub_words(segment):
         cues = build_cues_from_dub_words(
             segment,
@@ -1157,8 +1281,9 @@ def build_segment_subtitle_cues(
     )
     speech_duration = max(SUBTITLE_MIN_CUE_DURATION, speech_end - speech_start)
 
+    segment_tts_asr = tts_asr_align and not segment_has_usable_dub_words(segment)
     should_try_asr = (
-        tts_asr_align
+        segment_tts_asr
         and len(chunks) >= SUBTITLE_MIN_CHUNKS_FOR_TTS_ASR
         and speech_duration >= SUBTITLE_MIN_DURATION_FOR_TTS_ASR
         and job_dir is not None
